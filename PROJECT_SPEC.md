@@ -1,6 +1,6 @@
 # VoxInk Project Specification
 
-Status: Initial design draft  
+Status: Working prototype implemented
 Last updated: 2026-08-25
 
 ## 1. Product Summary
@@ -478,29 +478,34 @@ Exit criterion: the end-to-end macOS experience is usable without a terminal.
 
 - The workspace contains `Qwen3-ASR-1.7B`.
 - The two model weight shards currently occupy approximately 4.4 GB.
-- The model remains experimental until Phase 0 proves that it loads and runs on
-  the target Apple Silicon hardware with acceptable behavior.
+- The model has loaded successfully on CPU and transcribed the English sample
+  through both the direct script and the localhost HTTP API.
+- The installed Torch build currently reports MPS unavailable, so Apple GPU
+  acceleration remains an optimization task.
 - Model choice and runtime are replaceable implementation details, not permanent
   product constraints.
 
-## 15. Open Decisions
+## 15. Remaining Work
 
-The following have not yet been confirmed:
+The prototype resolves the initial platform and protocol decisions: macOS 13+,
+native Swift/AppKit/SwiftUI capture and captions, a loopback-only versioned
+HTTP/WebSocket API, automatic English/Chinese detection with overrides,
+`~/Documents/VoxInk/` output, 700 ms energy-VAD finalization, and rotating WAV
+retention.
 
-1. Minimum supported macOS version; proposed initial target is macOS 13 or
-   newer.
-2. Push-to-talk output behavior; proposed initial addition is copying finalized
-   text to the clipboard.
-3. Language mode; proposed default is automatic English/Chinese detection with
-   manual overrides.
-4. Default transcript directory; proposed value is `~/Documents/VoxInk/` with a
-   configurable destination.
-5. Exact local API schema, transport encoding, and authentication expectations.
-6. Qwen runtime support and performance on the target Apple Silicon machine.
-7. Audio file format and audio rotation thresholds.
-8. Exact VAD, chunk, overlap, and partial-result timing parameters.
-9. Whether the initial macOS UI is native SwiftUI or a cross-platform shell with
-   native capture modules.
+The following remain after the initial implementation:
+
+1. Package the native components as a signed menu-bar `.app` with reliable
+   privacy permission identity.
+2. Produce true incremental model partials; the current live path emits stable
+   results after VAD finalization.
+3. Benchmark and enable an accelerated Apple Silicon inference runtime.
+4. Add push-to-talk clipboard behavior and global-shortcut configuration.
+5. Add Qwen forced alignment for word-level timestamps.
+6. Add optional speaker diarization.
+7. Add explicit-consent online-provider adapters.
+8. Add Windows and Linux capture implementations.
+9. Run long-duration capture and file-recovery soak tests on real meetings.
 
 ## 16. Design Principles
 

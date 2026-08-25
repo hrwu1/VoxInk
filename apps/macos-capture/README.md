@@ -48,6 +48,10 @@ IDs change, so apps that quit and restart reconnect automatically. If none of th
 selected apps is running, capture waits and emits an `applications_waiting`
 status event.
 
+The floating caption panel is enabled by default for capture commands. Pass
+`--click-through` to let pointer events reach the windows beneath it, or
+`--no-captions` for terminal-only operation.
+
 ## Local service contract
 
 The default endpoint is
@@ -95,13 +99,11 @@ the eventual VoxInk UI produces sounds.
 
 ## Floating caption prototype
 
-`FloatingCaptionPanelController` is an embeddable AppKit/SwiftUI prototype for
-the future menu-bar app. It is always on top, can be made click-through, retains
+`FloatingCaptionPanelController` is an AppKit/SwiftUI prototype used by the CLI
+and available to the future menu-bar app. It is always on top, can be made click-through, retains
 the four newest captions in one chronological stream, replaces partial captions
 by stable event ID, and uses textual `MIC`/`SYSTEM` badges in addition to color.
-Call `show(_:)` with `event.captionItem` from the sink's transcript callback.
-The CLI prints those received transcript events; the panel remains embeddable so
-the CLI does not need to take ownership of an AppKit application lifecycle.
+The CLI prints received transcript events and maps them into the floating panel.
 
 ## Current scope
 

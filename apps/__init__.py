@@ -1,0 +1,1 @@
+"""VoxInk capture applications."""

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import VoxInkCapture
 
@@ -6,6 +7,8 @@ private struct Options {
     var allSystemAudio = false
     var applicationBundleIdentifiers = Set<String>()
     var listApplications = false
+    var captions = true
+    var clickThroughCaptions = false
     var endpoint: URL?
     var sessionID = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 
@@ -17,6 +20,8 @@ private struct Options {
             case "--mic": options.microphone = true
             case "--system-all": options.allSystemAudio = true
             case "--list-apps": options.listApplications = true
+            case "--no-captions": options.captions = false
+            case "--click-through": options.clickThroughCaptions = true
             case "--app", "--endpoint", "--session-id":
                 guard index + 1 < arguments.count else { throw CLIError("Missing value after \(arguments[index]).") }
                 let value = arguments[index + 1]
@@ -45,7 +50,7 @@ private struct CLIError: LocalizedError {
       voxink-capture --list-apps
       voxink-capture [--mic] [--system-all | --app BUNDLE_ID ...]
                       [--endpoint ws://127.0.0.1:8765/v1/sessions/SESSION_ID/stream]
-                      [--session-id ID]
+                      [--session-id ID] [--no-captions | --click-through]
 
     Examples:
       voxink-capture --mic
@@ -87,10 +92,26 @@ private struct VoxInkCaptureCommand {
                 systemAudio: systemAudio,
                 serviceURL: options.endpoint
             )
+            let captionPanel: FloatingCaptionPanelController? = if options.captions {
+                await MainActor.run {
+                    let application = NSApplication.shared
+                    application.setActivationPolicy(.accessory)
+                    application.finishLaunching()
+                    let panel = FloatingCaptionPanelController()
+                    panel.setClickThrough(options.clickThroughCaptions)
+                    panel.showWindow()
+                    return panel
+                }
+            } else {
+                nil
+            }
             let coordinator = try CaptureCoordinator(
                 configuration: configuration,
                 transcriptHandler: { event in
                     print("[\(event.source.rawValue.uppercased())] \(event.text)")
+                    if let captionPanel {
+                        Task { @MainActor in captionPanel.show(event.captionItem) }
+                    }
                 },
                 statusHandler: { event in
                     FileHandle.standardError.write(Data(("\(event.code): \(event.message)\n").utf8))
@@ -100,6 +121,9 @@ private struct VoxInkCaptureCommand {
             print("Capture started for session \(options.sessionID). Press Ctrl-C to stop.")
             await waitForInterrupt()
             await coordinator.stop()
+            if let captionPanel {
+                await MainActor.run { captionPanel.hideWindow() }
+            }
             print("Capture stopped.")
         } catch {
             let message = error.localizedDescription

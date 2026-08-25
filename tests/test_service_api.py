@@ -241,6 +241,54 @@ class ApiTests(unittest.TestCase):
         self.assertTrue((session_dir / "system-part-001.wav").is_file())
         self.assertTrue((session_dir / "combined-part-001.wav").is_file())
 
+    def test_shared_session_stops_only_after_both_source_streams(self) -> None:
+        def start_message(source: str) -> dict:
+            return {
+                "type": "stream.start",
+                "schema_version": 1,
+                "session_id": "dual",
+                "session_sources": ["microphone", "system"],
+                "stream_id": f"{source}-1",
+                "source": source,
+                "audio": {
+                    "encoding": "pcm_s16le",
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                },
+            }
+
+        pcm = bytes(640)
+        with self.client.websocket_connect("/v1/sessions/dual/stream") as mic:
+            mic.send_json(start_message("microphone"))
+            self.assertEqual("stream.ready", mic.receive_json()["type"])
+            with self.client.websocket_connect("/v1/sessions/dual/stream") as system:
+                system.send_json(start_message("system"))
+                self.assertEqual("stream.ready", system.receive_json()["type"])
+                mic.send_json(
+                    {"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 20}
+                )
+                self.assertEqual("stream.stopped", mic.receive_json()["type"])
+                self.assertEqual(
+                    "running", self.client.get("/v1/sessions/dual").json()["state"]
+                )
+                system.send_json(
+                    {
+                        "type": "audio.chunk",
+                        "sequence": 0,
+                        "stream_id": "system-1",
+                        "start_ms": 0,
+                        "end_ms": 20,
+                        "byte_length": len(pcm),
+                    }
+                )
+                system.send_bytes(pcm)
+                self.assertEqual("transcript.final", system.receive_json()["type"])
+                system.send_json(
+                    {"type": "stream.stop", "stream_id": "system-1", "at_ms": 20}
+                )
+                self.assertEqual("stream.stopped", system.receive_json()["type"])
+        self.assertEqual("stopped", self.client.get("/v1/sessions/dual").json()["state"])
+
 
 if __name__ == "__main__":
     unittest.main()

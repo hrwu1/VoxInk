@@ -70,6 +70,7 @@ class ServiceRuntime:
         )
         self.sessions = sessions or SessionManager(settings.output_root)
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
+        self.active_streams: dict[str, set[str]] = {}
 
 
 def create_app(
@@ -142,6 +143,7 @@ def create_app(
         except (InvalidSessionTransition, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if action == "stop":
+            runtime.active_streams.pop(session_id, None)
             _finalize_audio(runtime, session)
         return _session_view(session)
 
@@ -183,6 +185,7 @@ def create_app(
         await websocket.accept()
         pending_header: dict[str, Any] | None = None
         start_message: dict[str, Any] | None = None
+        registered_stream_id: str | None = None
         chunker: EnergyVadChunker | None = None
         frame_offset_ms = 0
         try:
@@ -201,6 +204,10 @@ def create_app(
                         )
                         _ensure_started_session(
                             runtime, session_id, source, sources=declared_sources
+                        )
+                        registered_stream_id = str(control["stream_id"])
+                        runtime.active_streams.setdefault(session_id, set()).add(
+                            registered_stream_id
                         )
                         await websocket.send_json(
                             {"type": "stream.ready", "schema_version": 1, "session_id": session_id}
@@ -234,8 +241,8 @@ def create_app(
                                 chunker.flush("stop"),
                                 frame_offset_ms,
                             )
-                        _control_if_possible(runtime, session_id, "stop")
-                        _finalize_audio(runtime, runtime.sessions.get(session_id))
+                        _release_stream(runtime, session_id, registered_stream_id)
+                        registered_stream_id = None
                         await websocket.send_json({"type": "stream.stopped", "session_id": session_id})
                         await websocket.close(code=1000)
                         return
@@ -284,6 +291,9 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             await websocket.send_json({"type": "error", "code": "invalid_message", "message": str(exc)})
             await websocket.close(code=1003)
+        finally:
+            if registered_stream_id is not None:
+                _release_stream(runtime, session_id, registered_stream_id)
 
     return app
 
@@ -330,6 +340,27 @@ def _finalize_audio(runtime: ServiceRuntime, session) -> None:
         for source in Source:
             for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
                 path.unlink()
+
+
+def _release_stream(
+    runtime: ServiceRuntime, session_id: str, stream_id: str | None
+) -> None:
+    if stream_id is None:
+        return
+    streams = runtime.active_streams.get(session_id)
+    if streams is None:
+        return
+    streams.discard(stream_id)
+    if streams:
+        return
+    runtime.active_streams.pop(session_id, None)
+    try:
+        session = runtime.sessions.get(session_id)
+    except KeyError:
+        return
+    if session.state in {SessionState.RUNNING, SessionState.PAUSED}:
+        runtime.sessions.stop(session_id)
+        _finalize_audio(runtime, session)
 
 
 def _stream_chunker(start: dict[str, Any]) -> EnergyVadChunker:
