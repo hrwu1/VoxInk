@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Editors and IDEs
+.idea/
+.vscode/
+
+# Xcode / Swift
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.build/
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+
+# Downloaded local model weights (about 4.4 GB)
+Qwen3-ASR-1.7B/
