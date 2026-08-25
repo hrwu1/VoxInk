@@ -1,0 +1,318 @@
+import Foundation
+
+public protocol AudioFrameSink: AnyObject {
+    func connect(sessionID: String, sources: [AudioSource]) async throws
+    func send(_ frame: AudioFrame) async throws
+    func send(_ event: CaptureStatusEvent) async throws
+    func disconnect(sessionID: String, reason: String) async
+}
+
+public enum LocalEndpointPolicy {
+    public static func validate(_ url: URL) throws {
+        guard let scheme = url.scheme?.lowercased(), ["ws", "wss"].contains(scheme),
+              let host = url.host?.lowercased(),
+              ["127.0.0.1", "localhost", "::1"].contains(host)
+        else { throw CaptureError.invalidServiceURL(url) }
+    }
+}
+
+public struct TranscriptWireEvent: Codable, Sendable {
+    public let segmentID: String
+    public let source: AudioSource
+    public let text: String
+    public let startMilliseconds: Int64
+    public let endMilliseconds: Int64
+    public let isFinal: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case text, source
+        case segmentID = "segment_id"
+        case startMilliseconds = "start_ms"
+        case endMilliseconds = "end_ms"
+        case isFinal = "is_final"
+    }
+
+    public var captionItem: CaptionItem {
+        CaptionItem(
+            id: segmentID,
+            source: source,
+            text: text,
+            startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds,
+            isFinal: isFinal
+        )
+    }
+}
+
+/// One localhost WebSocket is opened per source stream. Each audio frame is sent
+/// as an `audio.frame` JSON header immediately followed by raw PCM binary, which
+/// matches the Python service's schema-version-1 streaming contract.
+public actor WebSocketAudioFrameSink: AudioFrameSink {
+    public typealias TranscriptHandler = @Sendable (TranscriptWireEvent) -> Void
+    public typealias StatusHandler = @Sendable (CaptureStatusEvent) -> Void
+
+    private let endpoint: URL
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private let transcriptHandler: TranscriptHandler?
+    private let statusHandler: StatusHandler?
+    private var session: URLSession?
+    private var sessionID: String?
+    private var sessionSources = [AudioSource]()
+    private var sessionStartedNanoseconds: UInt64 = 0
+    private var sockets = [String: URLSessionWebSocketTask]()
+    private var sendTails = [String: Task<Void, Error>]()
+
+    public init(
+        endpoint: URL,
+        transcriptHandler: TranscriptHandler? = nil,
+        statusHandler: StatusHandler? = nil
+    ) throws {
+        try LocalEndpointPolicy.validate(endpoint)
+        self.endpoint = endpoint
+        self.transcriptHandler = transcriptHandler
+        self.statusHandler = statusHandler
+        encoder.outputFormatting = [.sortedKeys]
+    }
+
+    public func connect(sessionID: String, sources: [AudioSource]) async throws {
+        self.sessionID = sessionID
+        sessionSources = sources
+        sessionStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        session = URLSession(configuration: configuration)
+    }
+
+    public func send(_ frame: AudioFrame) async throws {
+        let previous = sendTails[frame.streamID]
+        let task = Task { [weak self] in
+            if let previous { _ = try? await previous.value }
+            guard !Task.isCancelled, let self else { throw CancellationError() }
+            try await self.sendPair(frame)
+        }
+        sendTails[frame.streamID] = task
+        try await task.value
+    }
+
+    /// Serializing each header/binary pair is required because the service allows
+    /// exactly one outstanding audio header on a connection.
+    private func sendPair(_ frame: AudioFrame) async throws {
+        let socket = try await socket(for: frame)
+        let durationMilliseconds = Double(frame.pcmS16LE.count) / 2.0 / Double(frame.sampleRate) * 1_000.0
+        let elapsedNanoseconds = frame.timestampNanoseconds >= sessionStartedNanoseconds
+            ? frame.timestampNanoseconds - sessionStartedNanoseconds
+            : 0
+        let captureMilliseconds = Double(elapsedNanoseconds) / 1_000_000.0
+        let header = AudioFrameHeader(
+            sequence: frame.sequence,
+            streamID: frame.streamID,
+            startMilliseconds: max(0, captureMilliseconds - durationMilliseconds),
+            durationMilliseconds: durationMilliseconds,
+            capturedAtNanoseconds: frame.timestampNanoseconds,
+            byteLength: frame.pcmS16LE.count
+        )
+        do {
+            try await sendJSON(header, on: socket)
+            try await socket.send(.data(frame.pcmS16LE))
+        } catch {
+            if sockets[frame.streamID] === socket {
+                sockets.removeValue(forKey: frame.streamID)
+                socket.cancel(with: .goingAway, reason: nil)
+            }
+            throw error
+        }
+    }
+
+    /// Capture diagnostics are local events, not service protocol messages.
+    public func send(_ event: CaptureStatusEvent) async throws {
+        statusHandler?(event)
+    }
+
+    public func disconnect(sessionID: String, reason: String) async {
+        sendTails.values.forEach { $0.cancel() }
+        sendTails.removeAll()
+        let now = DispatchTime.now().uptimeNanoseconds
+        let atMilliseconds = Double(now >= sessionStartedNanoseconds ? now - sessionStartedNanoseconds : 0) / 1_000_000.0
+        for (streamID, socket) in sockets {
+            let stop = StreamStopEnvelope(streamID: streamID, atMilliseconds: atMilliseconds)
+            try? await sendJSON(stop, on: socket)
+            socket.cancel(with: .normalClosure, reason: reason.data(using: .utf8))
+        }
+        sockets.removeAll()
+        session?.invalidateAndCancel()
+        session = nil
+        self.sessionID = nil
+        sessionSources = []
+    }
+
+    private func socket(for frame: AudioFrame) async throws -> URLSessionWebSocketTask {
+        if let socket = sockets[frame.streamID] { return socket }
+        guard let session, let sessionID else { throw URLError(.notConnectedToInternet) }
+        let task = session.webSocketTask(with: endpoint)
+        sockets[frame.streamID] = task
+        task.resume()
+        let start = StreamStartEnvelope(
+            sessionID: sessionID,
+            streamID: frame.streamID,
+            source: frame.source,
+            sessionSources: sessionSources,
+            sampleRate: frame.sampleRate,
+            channels: frame.channels,
+            frameDurationMilliseconds: 20,
+            applicationBundleIdentifiers: frame.applicationBundleIdentifiers
+        )
+        try await sendJSON(start, on: task)
+        Task { [weak self, task] in await self?.receiveLoop(task: task, streamID: frame.streamID) }
+        return task
+    }
+
+    private func receiveLoop(task: URLSessionWebSocketTask, streamID: String) async {
+        while sockets[streamID] === task {
+            do {
+                let message = try await task.receive()
+                guard case .string(let json) = message, let data = json.data(using: .utf8) else { continue }
+                if let response = try? decoder.decode(TranscriptResponse.self, from: data),
+                   ["transcript.partial", "transcript.final"].contains(response.type),
+                   let event = response.event {
+                    transcriptHandler?(event)
+                } else if let response = try? decoder.decode(ErrorResponse.self, from: data), response.type == "error" {
+                    statusHandler?(CaptureStatusEvent(
+                        sessionID: sessionID ?? "unknown",
+                        source: nil,
+                        level: .error,
+                        code: response.code ?? "service_error",
+                        message: response.message ?? "The transcription service reported an error."
+                    ))
+                }
+            } catch {
+                if sockets[streamID] === task {
+                    sockets.removeValue(forKey: streamID)
+                    statusHandler?(CaptureStatusEvent(
+                        sessionID: sessionID ?? "unknown",
+                        source: nil,
+                        level: .warning,
+                        code: "service_connection_closed",
+                        message: error.localizedDescription
+                    ))
+                }
+                return
+            }
+        }
+    }
+
+    private func sendJSON<T: Encodable>(_ value: T, on socket: URLSessionWebSocketTask) async throws {
+        let data = try encoder.encode(value)
+        try await socket.send(.string(String(decoding: data, as: UTF8.self)))
+    }
+}
+
+private struct StreamStartEnvelope: Encodable {
+    let type = "stream.start"
+    let schemaVersion = 1
+    let sessionID: String
+    let streamID: String
+    let source: AudioSource
+    let sessionSources: [AudioSource]
+    let audio: AudioDescription
+    let client = ClientDescription(name: "voxink-macos-capture", version: "0.1.0")
+    let streamMode = "frames"
+    let vad = VADDescription()
+    let applicationBundleIdentifiers: [String]?
+
+    init(
+        sessionID: String,
+        streamID: String,
+        source: AudioSource,
+        sessionSources: [AudioSource],
+        sampleRate: Int,
+        channels: Int,
+        frameDurationMilliseconds: Double,
+        applicationBundleIdentifiers: [String]?
+    ) {
+        self.sessionID = sessionID
+        self.streamID = streamID
+        self.source = source
+        self.sessionSources = sessionSources
+        audio = AudioDescription(
+            encoding: "pcm_s16le",
+            sampleRate: sampleRate,
+            channels: channels,
+            frameDurationMilliseconds: frameDurationMilliseconds
+        )
+        self.applicationBundleIdentifiers = applicationBundleIdentifiers
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type, source, audio, client, vad
+        case schemaVersion = "schema_version"
+        case sessionID = "session_id"
+        case streamID = "stream_id"
+        case sessionSources = "session_sources"
+        case streamMode = "stream_mode"
+        case applicationBundleIdentifiers = "application_bundle_identifiers"
+    }
+}
+
+private struct AudioDescription: Encodable {
+    let encoding: String
+    let sampleRate: Int
+    let channels: Int
+    let frameDurationMilliseconds: Double
+    enum CodingKeys: String, CodingKey {
+        case encoding, channels
+        case sampleRate = "sample_rate_hz"
+        case frameDurationMilliseconds = "frame_duration_ms"
+    }
+}
+
+private struct ClientDescription: Encodable { let name: String; let version: String }
+private struct VADDescription: Encodable {
+    let thresholdRMS = 500.0
+    let silenceDurationMilliseconds = 700
+    let minSpeechDurationMilliseconds = 200
+    let maxChunkDurationMilliseconds = 15_000
+    let preRollMilliseconds = 200
+    let overlapMilliseconds = 200
+    enum CodingKeys: String, CodingKey {
+        case thresholdRMS = "threshold_rms"
+        case silenceDurationMilliseconds = "silence_duration_ms"
+        case minSpeechDurationMilliseconds = "min_speech_duration_ms"
+        case maxChunkDurationMilliseconds = "max_chunk_duration_ms"
+        case preRollMilliseconds = "pre_roll_ms"
+        case overlapMilliseconds = "overlap_ms"
+    }
+}
+
+private struct AudioFrameHeader: Encodable {
+    let type = "audio.frame"
+    let sequence: UInt64
+    let streamID: String
+    let startMilliseconds: Double
+    let durationMilliseconds: Double
+    let capturedAtNanoseconds: UInt64
+    let byteLength: Int
+    enum CodingKeys: String, CodingKey {
+        case type, sequence
+        case streamID = "stream_id"
+        case startMilliseconds = "start_ms"
+        case durationMilliseconds = "duration_ms"
+        case capturedAtNanoseconds = "captured_at_ns"
+        case byteLength = "byte_length"
+    }
+}
+
+private struct StreamStopEnvelope: Encodable {
+    let type = "stream.stop"
+    let streamID: String
+    let atMilliseconds: Double
+    enum CodingKeys: String, CodingKey {
+        case type
+        case streamID = "stream_id"
+        case atMilliseconds = "at_ms"
+    }
+}
+
+private struct TranscriptResponse: Decodable { let type: String; let event: TranscriptWireEvent? }
+private struct ErrorResponse: Decodable { let type: String; let code: String?; let message: String? }
