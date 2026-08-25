@@ -14,7 +14,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.python_capture.vad import EnergyVadChunker, VadConfig
 from voxink.models import SessionConfig, Source, TranscriptionOptions
+from voxink.persistence.audio import AudioRetentionWriter
 from voxink.providers.base import TranscriptionProvider
 from voxink.providers.qwen import QwenLocalProvider
 from voxink.sessions import InvalidSessionTransition, SessionManager, SessionState
@@ -67,6 +69,7 @@ class ServiceRuntime:
             max_new_tokens=settings.max_new_tokens,
         )
         self.sessions = sessions or SessionManager(settings.output_root)
+        self.audio_writers: dict[str, AudioRetentionWriter] = {}
 
 
 def create_app(
@@ -138,6 +141,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="session not found") from exc
         except (InvalidSessionTransition, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if action == "stop":
+            _finalize_audio(runtime, session)
         return _session_view(session)
 
     @app.post("/v1/transcriptions")
@@ -178,6 +183,8 @@ def create_app(
         await websocket.accept()
         pending_header: dict[str, Any] | None = None
         start_message: dict[str, Any] | None = None
+        chunker: EnergyVadChunker | None = None
+        frame_offset_ms = 0
         try:
             while True:
                 message = await websocket.receive()
@@ -187,7 +194,14 @@ def create_app(
                     if message_type == "stream.start":
                         start_message = control
                         source = Source(control.get("source", "microphone"))
-                        _ensure_started_session(runtime, session_id, source)
+                        chunker = _stream_chunker(control)
+                        declared_sources = tuple(
+                            Source(item)
+                            for item in control.get("session_sources", [source.value])
+                        )
+                        _ensure_started_session(
+                            runtime, session_id, source, sources=declared_sources
+                        )
                         await websocket.send_json(
                             {"type": "stream.ready", "schema_version": 1, "session_id": session_id}
                         )
@@ -196,11 +210,32 @@ def create_app(
                             raise ValueError("stream.start must be sent before audio")
                         pending_header = control
                     elif message_type == "stream.pause":
+                        if chunker is not None and start_message is not None:
+                            await _send_chunks(
+                                websocket,
+                                runtime,
+                                session_id,
+                                start_message,
+                                chunker.flush("pause"),
+                                frame_offset_ms,
+                            )
+                            chunker.reset()
                         _control_if_possible(runtime, session_id, "pause")
                     elif message_type == "stream.resume":
+                        frame_offset_ms = int(control.get("at_ms", frame_offset_ms))
                         _control_if_possible(runtime, session_id, "resume")
                     elif message_type == "stream.stop":
+                        if chunker is not None and start_message is not None:
+                            await _send_chunks(
+                                websocket,
+                                runtime,
+                                session_id,
+                                start_message,
+                                chunker.flush("stop"),
+                                frame_offset_ms,
+                            )
                         _control_if_possible(runtime, session_id, "stop")
+                        _finalize_audio(runtime, runtime.sessions.get(session_id))
                         await websocket.send_json({"type": "stream.stopped", "session_id": session_id})
                         await websocket.close(code=1000)
                         return
@@ -213,14 +248,26 @@ def create_app(
                     expected = pending_header.get("byte_length")
                     if expected is not None and len(pcm) != expected:
                         raise ValueError(f"expected {expected} audio bytes, received {len(pcm)}")
+                    _record_audio(runtime, session_id, start_message, pending_header, pcm)
                     if pending_header["type"] == "audio.frame":
-                        await websocket.send_json(
-                            {
-                                "type": "audio.accepted",
-                                "sequence": pending_header.get("sequence"),
-                                "note": "continuous frames require server-side VAD and are not transcribed yet",
-                            }
+                        if chunker is None:
+                            raise ValueError("audio frame received without stream VAD configuration")
+                        chunks = chunker.feed(pcm)
+                        await _send_chunks(
+                            websocket,
+                            runtime,
+                            session_id,
+                            start_message,
+                            chunks,
+                            frame_offset_ms,
                         )
+                        if not chunks:
+                            await websocket.send_json(
+                                {
+                                    "type": "audio.accepted",
+                                    "sequence": pending_header.get("sequence"),
+                                }
+                            )
                     else:
                         event = await _transcribe_pcm_chunk(
                             runtime, session_id, start_message, pending_header, pcm
@@ -239,6 +286,92 @@ def create_app(
             await websocket.close(code=1003)
 
     return app
+
+
+def _record_audio(
+    runtime: ServiceRuntime,
+    session_id: str,
+    start: dict[str, Any],
+    header: dict[str, Any],
+    pcm: bytes,
+) -> None:
+    session = runtime.sessions.get(session_id)
+    if not session.config.audio_saved:
+        return
+    source = Source(header.get("source", start.get("source", "microphone")))
+    writer = runtime.audio_writers.get(session_id)
+    if writer is None:
+        audio = start.get("audio", {})
+        session_dir = (
+            session.config.output_directory
+            or runtime.settings.output_root / session.config.session_id
+        )
+        writer = AudioRetentionWriter(
+            session_dir,
+            sample_rate=int(audio.get("sample_rate_hz", 16000)),
+            channels=int(audio.get("channels", 1)),
+        )
+        runtime.audio_writers[session_id] = writer
+    writer.append_pcm(
+        source,
+        pcm,
+        start_ms=round(float(header.get("start_ms", 0))),
+    )
+
+
+def _finalize_audio(runtime: ServiceRuntime, session) -> None:
+    writer = runtime.audio_writers.pop(session.config.session_id, None)
+    if writer is None:
+        return
+    writer.close()
+    if session.config.save_combined_audio:
+        writer.generate_combined()
+    if not session.config.save_separate_audio:
+        for source in Source:
+            for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
+                path.unlink()
+
+
+def _stream_chunker(start: dict[str, Any]) -> EnergyVadChunker:
+    audio = start.get("audio", {})
+    requested = start.get("vad", {})
+    names = {
+        "threshold_rms",
+        "silence_duration_ms",
+        "min_speech_duration_ms",
+        "max_chunk_duration_ms",
+        "pre_roll_ms",
+        "overlap_ms",
+    }
+    values = {name: requested[name] for name in names if name in requested}
+    values["sample_rate_hz"] = int(audio.get("sample_rate_hz", 16000))
+    values["frame_duration_ms"] = int(audio.get("frame_duration_ms", 20))
+    return EnergyVadChunker(VadConfig(**values))
+
+
+async def _send_chunks(
+    websocket: WebSocket,
+    runtime: ServiceRuntime,
+    session_id: str,
+    start: dict[str, Any],
+    chunks,
+    offset_ms: int,
+) -> None:
+    sample_rate = int(start.get("audio", {}).get("sample_rate_hz", 16000))
+    for chunk in chunks:
+        chunk_start = offset_ms + round(chunk.start_ms(sample_rate))
+        chunk_end = offset_ms + round(chunk.end_ms(sample_rate))
+        header = {
+            "type": "audio.chunk",
+            "start_ms": chunk_start,
+            "end_ms": chunk_end,
+            "finalization_reason": chunk.reason,
+        }
+        event = await _transcribe_pcm_chunk(
+            runtime, session_id, start, header, chunk.pcm
+        )
+        runtime.sessions.append(event)
+        await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
 
 
 async def _transcribe_pcm_chunk(
@@ -284,7 +417,11 @@ def _parse_control(raw: str) -> dict[str, Any]:
 
 
 def _ensure_started_session(
-    runtime: ServiceRuntime, session_id: str | None, source: Source
+    runtime: ServiceRuntime,
+    session_id: str | None,
+    source: Source,
+    *,
+    sources: tuple[Source, ...] | None = None,
 ):
     if session_id is None:
         session_id = _new_session_id()
@@ -292,7 +429,12 @@ def _ensure_started_session(
         session = runtime.sessions.get(session_id)
     except KeyError:
         session = runtime.sessions.create(
-            SessionConfig(session_id=session_id, sources=(source,))
+            SessionConfig(session_id=session_id, sources=sources or (source,))
+        )
+    if source not in session.config.sources:
+        raise HTTPException(
+            status_code=409,
+            detail=f"source {source.value} is not enabled for this session",
         )
     if session.state is SessionState.CREATED:
         runtime.sessions.start(session_id)

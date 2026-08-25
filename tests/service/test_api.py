@@ -142,6 +142,105 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual("stream.stopped", websocket.receive_json()["type"])
 
+    def test_continuous_frames_are_segmented_by_server_vad(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/frames/stream") as websocket:
+            websocket.send_json(
+                {
+                    "type": "stream.start",
+                    "schema_version": 1,
+                    "session_id": "frames",
+                    "stream_id": "system-1",
+                    "source": "system",
+                    "audio": {
+                        "encoding": "pcm_s16le",
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "frame_duration_ms": 20,
+                    },
+                    "vad": {
+                        "threshold_rms": 500,
+                        "min_speech_duration_ms": 20,
+                        "silence_duration_ms": 40,
+                        "pre_roll_ms": 0,
+                        "overlap_ms": 0,
+                    },
+                }
+            )
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            voiced = int(1000).to_bytes(2, "little", signed=True) * 320
+            silence = bytes(640)
+            responses = []
+            for sequence, pcm in enumerate((voiced, silence, silence)):
+                websocket.send_json(
+                    {
+                        "type": "audio.frame",
+                        "sequence": sequence,
+                        "stream_id": "system-1",
+                        "start_ms": sequence * 20,
+                        "duration_ms": 20,
+                        "byte_length": len(pcm),
+                    }
+                )
+                websocket.send_bytes(pcm)
+                responses.append(websocket.receive_json())
+            self.assertEqual("transcript.final", responses[-1]["type"])
+            self.assertEqual("system", responses[-1]["event"]["source"])
+            websocket.send_json(
+                {"type": "stream.stop", "stream_id": "system-1", "at_ms": 60}
+            )
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+
+    def test_optional_audio_is_saved_and_combined_on_stop(self) -> None:
+        created = self.client.post(
+            "/v1/sessions",
+            json={
+                "session_id": "recorded",
+                "sources": ["system"],
+                "audio_saved": True,
+                "save_separate_audio": True,
+                "save_combined_audio": True,
+            },
+        )
+        self.assertEqual(201, created.status_code)
+        with self.client.websocket_connect("/v1/sessions/recorded/stream") as websocket:
+            websocket.send_json(
+                {
+                    "type": "stream.start",
+                    "schema_version": 1,
+                    "session_id": "recorded",
+                    "session_sources": ["system"],
+                    "stream_id": "system-1",
+                    "source": "system",
+                    "audio": {
+                        "encoding": "pcm_s16le",
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                    },
+                }
+            )
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            pcm = int(123).to_bytes(2, "little", signed=True) * 320
+            websocket.send_json(
+                {
+                    "type": "audio.chunk",
+                    "sequence": 0,
+                    "stream_id": "system-1",
+                    "source": "system",
+                    "start_ms": 0,
+                    "end_ms": 20,
+                    "byte_length": len(pcm),
+                }
+            )
+            websocket.send_bytes(pcm)
+            self.assertEqual("transcript.final", websocket.receive_json()["type"])
+            websocket.send_json(
+                {"type": "stream.stop", "stream_id": "system-1", "at_ms": 20}
+            )
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+        session_dir = self.output_root / "recorded"
+        self.assertTrue((session_dir / "system-part-001.wav").is_file())
+        self.assertTrue((session_dir / "combined-part-001.wav").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

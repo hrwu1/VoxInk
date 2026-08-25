@@ -1,0 +1,335 @@
+"""Optional, recoverable PCM audio retention for long-running sessions."""
+
+from __future__ import annotations
+
+import os
+import struct
+import sys
+import threading
+import wave
+from array import array
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, Iterable
+
+from ..models import Source
+
+
+_WAV_HEADER_SIZE = 44
+_RIFF_DATA_LIMIT = 0xFFFFFFFF - 36
+
+
+@dataclass
+class _Track:
+    source: Source
+    part: int
+    path: Path
+    handle: BinaryIO
+    data_bytes: int
+    written_until_frame: int
+
+
+class AudioRetentionWriter:
+    """Persist timestamped signed-16-bit little-endian PCM as aligned WAV parts.
+
+    Retention is off unless a caller explicitly constructs this class and feeds
+    it audio. Part boundaries are shared time/frame boundaries across sources,
+    so independently written microphone and system tracks can be mixed later.
+    """
+
+    def __init__(
+        self,
+        session_dir: str | Path,
+        *,
+        sample_rate: int = 16_000,
+        channels: int = 1,
+        max_part_seconds: float = 60 * 60,
+        max_part_bytes: int = 2 * 1024 * 1024 * 1024,
+        durable_flush: bool = True,
+    ) -> None:
+        if sample_rate <= 0 or channels <= 0:
+            raise ValueError("sample_rate and channels must be positive")
+        if max_part_seconds <= 0 or max_part_bytes <= 0:
+            raise ValueError("rotation limits must be positive")
+        self.session_dir = Path(session_dir)
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.sample_width = 2
+        self.frame_bytes = channels * self.sample_width
+        safe_bytes = min(max_part_bytes, _RIFF_DATA_LIMIT)
+        byte_frames = safe_bytes // self.frame_bytes
+        time_frames = int(max_part_seconds * sample_rate)
+        self.frames_per_part = min(byte_frames, time_frames)
+        if self.frames_per_part <= 0:
+            raise ValueError("rotation limits must accommodate at least one PCM frame")
+        self.max_data_bytes = self.frames_per_part * self.frame_bytes
+        self.durable_flush = durable_flush
+        self._tracks: dict[Source, _Track] = {}
+        self._lock = threading.RLock()
+
+    def append_pcm(
+        self,
+        source: Source | str,
+        pcm_s16le: bytes,
+        *,
+        start_ms: int,
+    ) -> tuple[Path, ...]:
+        """Append PCM at a session-relative time, returning all touched parts.
+
+        Forward gaps are filled with digital silence. If a chunk overlaps audio
+        already written to that source, the overlapping prefix is discarded.
+        Chunks must arrive chronologically per source.
+        """
+        source = Source(source)
+        if start_ms < 0:
+            raise ValueError("start_ms must be non-negative")
+        if not isinstance(pcm_s16le, bytes):
+            raise TypeError("pcm_s16le must be bytes")
+        if len(pcm_s16le) % self.frame_bytes:
+            raise ValueError("PCM length must contain complete sample frames")
+        if not pcm_s16le:
+            return ()
+
+        with self._lock:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            start_frame = start_ms * self.sample_rate // 1000
+            track = self._tracks.get(source)
+            if track is None:
+                track = self._recover_or_open(source, start_frame)
+
+            overlap = max(0, track.written_until_frame - start_frame)
+            chunk_frames = len(pcm_s16le) // self.frame_bytes
+            if overlap >= chunk_frames:
+                return ()
+            if overlap:
+                pcm_s16le = pcm_s16le[overlap * self.frame_bytes :]
+                start_frame += overlap
+
+            touched: list[Path] = []
+            cursor = start_frame
+            offset = 0
+            remaining = len(pcm_s16le) // self.frame_bytes
+            while remaining:
+                part = cursor // self.frames_per_part + 1
+                if track.part != part:
+                    self._close_track(track)
+                    track = self._open_track(source, part)
+                    self._tracks[source] = track
+                part_start = (part - 1) * self.frames_per_part
+                position = cursor - part_start
+                existing_frames = track.data_bytes // self.frame_bytes
+                if position > existing_frames:
+                    self._write_bytes(
+                        track, b"\0" * ((position - existing_frames) * self.frame_bytes)
+                    )
+                capacity = self.frames_per_part - position
+                count = min(remaining, capacity)
+                byte_count = count * self.frame_bytes
+                self._write_bytes(track, pcm_s16le[offset : offset + byte_count])
+                if not touched or touched[-1] != track.path:
+                    touched.append(track.path)
+                cursor += count
+                offset += byte_count
+                remaining -= count
+                track.written_until_frame = cursor
+                self._flush_track(track)
+            return tuple(touched)
+
+    def close(self) -> None:
+        with self._lock:
+            for track in tuple(self._tracks.values()):
+                self._close_track(track)
+            self._tracks.clear()
+
+    def generate_combined(
+        self,
+        *,
+        overwrite: bool = False,
+        chunk_frames: int = 8192,
+    ) -> tuple[Path, ...]:
+        """Create aligned combined parts with a chunked saturating sample mix."""
+        if chunk_frames <= 0:
+            raise ValueError("chunk_frames must be positive")
+        with self._lock:
+            self.close()
+            parts = sorted(set(self._part_numbers(Source.MICROPHONE)) | set(self._part_numbers(Source.SYSTEM)))
+            outputs: list[Path] = []
+            for part in parts:
+                mic_path = self._path(Source.MICROPHONE, part)
+                system_path = self._path(Source.SYSTEM, part)
+                inputs = [path for path in (mic_path, system_path) if path.is_file()]
+                if not inputs:
+                    continue
+                output = self.session_dir / f"combined-part-{part:03d}.wav"
+                if output.exists() and not overwrite:
+                    raise FileExistsError(f"combined audio already exists: {output}")
+                temporary = output.with_suffix(".wav.tmp")
+                if temporary.exists():
+                    temporary.unlink()
+                try:
+                    self._mix_part(inputs, temporary, chunk_frames)
+                    os.replace(temporary, output)
+                finally:
+                    if temporary.exists():
+                        temporary.unlink()
+                outputs.append(output)
+            return tuple(outputs)
+
+    def __enter__(self) -> "AudioRetentionWriter":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _recover_or_open(self, source: Source, requested_start: int) -> _Track:
+        parts = self._part_numbers(source)
+        requested_part = requested_start // self.frames_per_part + 1
+        if parts and parts[-1] >= requested_part:
+            part = parts[-1]
+            track = self._open_existing_track(source, part)
+            self._tracks[source] = track
+            return track
+        track = self._open_track(source, requested_part)
+        self._tracks[source] = track
+        return track
+
+    def _open_track(self, source: Source, part: int) -> _Track:
+        path = self._path(source, part)
+        try:
+            handle = path.open("x+b")
+        except FileExistsError:
+            return self._open_existing_track(source, part)
+        handle.write(_wav_header(self.sample_rate, self.channels, 0))
+        handle.flush()
+        return _Track(
+            source=source,
+            part=part,
+            path=path,
+            handle=handle,
+            data_bytes=0,
+            written_until_frame=(part - 1) * self.frames_per_part,
+        )
+
+    def _open_existing_track(self, source: Source, part: int) -> _Track:
+        path = self._path(source, part)
+        handle = path.open("r+b")
+        try:
+            rate, channels, data_bytes = _read_header(handle)
+            if rate != self.sample_rate or channels != self.channels:
+                raise ValueError(f"audio format mismatch in recovered file: {path}")
+            data_bytes -= data_bytes % self.frame_bytes
+            actual_bytes = max(0, path.stat().st_size - _WAV_HEADER_SIZE)
+            # Trust only bytes committed to the header. Extra bytes may be from
+            # a crash between data append and header update.
+            data_bytes = min(data_bytes, actual_bytes, self.max_data_bytes)
+            handle.truncate(_WAV_HEADER_SIZE + data_bytes)
+            handle.seek(0, os.SEEK_END)
+        except Exception:
+            handle.close()
+            raise
+        part_start = (part - 1) * self.frames_per_part
+        return _Track(
+            source, part, path, handle, data_bytes,
+            part_start + data_bytes // self.frame_bytes,
+        )
+
+    def _write_bytes(self, track: _Track, data: bytes) -> None:
+        if track.data_bytes + len(data) > self.max_data_bytes:
+            raise RuntimeError("internal error: audio write exceeded part capacity")
+        track.handle.write(data)
+        track.data_bytes += len(data)
+
+    def _flush_track(self, track: _Track) -> None:
+        _update_wav_sizes(track.handle, track.data_bytes)
+        track.handle.flush()
+        if self.durable_flush:
+            os.fsync(track.handle.fileno())
+
+    def _close_track(self, track: _Track) -> None:
+        if track.handle.closed:
+            return
+        self._flush_track(track)
+        track.handle.close()
+
+    def _part_numbers(self, source: Source) -> list[int]:
+        prefix = f"{source.value}-part-"
+        return sorted(
+            int(path.stem.removeprefix(prefix))
+            for path in self.session_dir.glob(f"{prefix}[0-9][0-9][0-9].wav")
+        )
+
+    def _path(self, source: Source, part: int) -> Path:
+        return self.session_dir / f"{source.value}-part-{part:03d}.wav"
+
+    def _mix_part(self, inputs: Iterable[Path], output: Path, chunk_frames: int) -> None:
+        readers = [wave.open(str(path), "rb") for path in inputs]
+        try:
+            for reader in readers:
+                if (
+                    reader.getframerate() != self.sample_rate
+                    or reader.getnchannels() != self.channels
+                    or reader.getsampwidth() != self.sample_width
+                    or reader.getcomptype() != "NONE"
+                ):
+                    raise ValueError("all source WAV files must use matching PCM s16le")
+            total_frames = max(reader.getnframes() for reader in readers)
+            with wave.open(str(output), "wb") as writer:
+                writer.setnchannels(self.channels)
+                writer.setsampwidth(self.sample_width)
+                writer.setframerate(self.sample_rate)
+                remaining = total_frames
+                while remaining:
+                    count = min(chunk_frames, remaining)
+                    sample_count = count * self.channels
+                    mixed = [0] * sample_count
+                    for reader in readers:
+                        samples = array("h", reader.readframes(count))
+                        if sys.byteorder != "little":
+                            samples.byteswap()
+                        for index, sample in enumerate(samples):
+                            mixed[index] += sample
+                    saturated = array(
+                        "h", (max(-32768, min(32767, value)) for value in mixed)
+                    )
+                    if sys.byteorder != "little":
+                        saturated.byteswap()
+                    writer.writeframesraw(saturated.tobytes())
+                    remaining -= count
+        finally:
+            for reader in readers:
+                reader.close()
+
+
+def _wav_header(sample_rate: int, channels: int, data_bytes: int) -> bytes:
+    byte_rate = sample_rate * channels * 2
+    block_align = channels * 2
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + data_bytes, b"WAVE", b"fmt ", 16, 1, channels,
+        sample_rate, byte_rate, block_align, 16, b"data", data_bytes,
+    )
+
+
+def _read_header(handle: BinaryIO) -> tuple[int, int, int]:
+    handle.seek(0)
+    data = handle.read(_WAV_HEADER_SIZE)
+    if len(data) != _WAV_HEADER_SIZE:
+        raise ValueError("incomplete WAV header")
+    values = struct.unpack("<4sI4s4sIHHIIHH4sI", data)
+    riff, _, wave_id, fmt, fmt_size, encoding, channels, rate, _, align, bits, data_id, size = values
+    if (
+        riff != b"RIFF" or wave_id != b"WAVE" or fmt != b"fmt "
+        or fmt_size != 16 or encoding != 1 or bits != 16 or data_id != b"data"
+        or align != channels * 2
+    ):
+        raise ValueError("unsupported or corrupt WAV header")
+    return rate, channels, size
+
+
+def _update_wav_sizes(handle: BinaryIO, data_bytes: int) -> None:
+    position = handle.tell()
+    handle.seek(4)
+    handle.write(struct.pack("<I", 36 + data_bytes))
+    handle.seek(40)
+    handle.write(struct.pack("<I", data_bytes))
+    handle.seek(position)
