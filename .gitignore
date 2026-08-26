@@ -48,3 +48,6 @@ xcuserdata/
 
 # Downloaded local model weights (about 4.4 GB)
 models/Qwen3-ASR-1.7B/
+!models/Qwen3-ASR-1.7B/
+models/Qwen3-ASR-1.7B/*
+!models/Qwen3-ASR-1.7B/voxink-model-manifest.json
