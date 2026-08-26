@@ -30,6 +30,7 @@ class HelperConfig:
     output_root: Path
     device: str = "auto"
     readiness_timeout: float = 30.0
+    service_module: str = "services.transcription"
 
 
 class HelperSupervisor:
@@ -62,7 +63,7 @@ class HelperSupervisor:
         command = [
             sys.executable,
             "-m",
-            "services.transcription",
+            self.config.service_module,
             "--port",
             str(self.port),
             "--model",

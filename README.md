@@ -27,7 +27,7 @@ and Transformers offline modes and loads the model exclusively from the local
 Speaker diarization, forced-alignment timestamps, online providers, and polished
 UI controls remain extension points rather than completed features.
 
-## Python setup
+## One-command developer workflow
 
 The tested environment uses Python 3.12:
 
@@ -39,23 +39,50 @@ python3.12 -m venv .venv
 The model weights must already exist locally at `models/Qwen3-ASR-1.7B/`.
 VoxInk never downloads model files while running.
 
-Start the service:
+Install the microphone capture dependencies, then start the complete local
+workflow:
 
 ```sh
+.venv/bin/python -m pip install -r requirements-capture.txt
+./scripts/voxink-dev --device cpu
+```
+
+The command verifies the Python environment and local model checksums, checks
+disk space, chooses a private loopback port, creates a per-launch credential,
+starts the helper, negotiates the protocol version, and opens the microphone
+controls. Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down
+both capture and the helper. Finalized transcripts default to
+`~/Documents/VoxInk/`, and the saved path is printed when capture exits.
+
+Run only the startup checks with:
+
+```sh
+./scripts/voxink-dev --preflight-only
+```
+
+Private operational diagnostics are stored under
+`~/Library/Application Support/VoxInk/logs/`. They contain process state and
+protocol metadata, never transcript text, raw audio, or the launch credential.
+
+## Direct service debugging
+
+Normal use should go through `scripts/voxink-dev`. For protocol debugging, set
+a temporary credential before starting the helper directly:
+
+```sh
+export VOXINK_AUTH_SECRET="replace-with-a-random-development-secret"
 .venv/bin/python -m services.transcription --device cpu
 ```
 
-The default service URL is `http://127.0.0.1:8765`, and transcripts default to
-`~/Documents/VoxInk/`. Check readiness without loading the model:
-
-```sh
-curl http://127.0.0.1:8765/health
-```
+The default direct-debug URL is `http://127.0.0.1:8765`. `/health` exposes only
+minimal readiness and compatibility metadata; all session HTTP routes and
+WebSocket upgrades require `Authorization: Bearer $VOXINK_AUTH_SECRET`.
 
 ### Batch transcription
 
 ```sh
 curl -X POST http://127.0.0.1:8765/v1/transcriptions \
+  -H "Authorization: Bearer $VOXINK_AUTH_SECRET" \
   -F file=@samples/asr_en.wav \
   -F session_id=batch-demo \
   -F source=system \
@@ -66,15 +93,9 @@ curl -X POST http://127.0.0.1:8765/v1/transcriptions \
 The response contains a normalized transcript event, and the finalized text is
 also written under `~/Documents/VoxInk/batch-demo/`.
 
-### Live Python microphone
+### Direct live Python microphone debugging
 
-Install the optional capture dependencies:
-
-```sh
-.venv/bin/python -m pip install -r requirements-capture.txt
-```
-
-Then run the interactive client while the service is running:
+With the direct service running and the credential still exported:
 
 ```sh
 .venv/bin/python -m clients.python_capture

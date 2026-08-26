@@ -101,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
                 pid=capture.pid,
                 return_code=capture.returncode,
             )
+            transcripts = sorted((report.output_root / session_id).glob("transcript-part-*.md"))
+            if transcripts:
+                print(f"Transcript saved: {transcripts[-1]}")
+            else:
+                print("Session stopped before any transcript text was finalized.")
             return int(capture.returncode)
         except KeyboardInterrupt:
             capture.send_signal(signal.SIGINT)
