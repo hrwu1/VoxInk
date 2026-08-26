@@ -21,8 +21,8 @@ MODEL_MANIFEST = "voxink-model-manifest.json"
 MIN_FREE_BYTES = 512 * 1024 * 1024
 MIN_AUDIO_FREE_BYTES = 2 * 1024 * 1024 * 1024
 
-SERVICE_IMPORTS = ("fastapi", "uvicorn", "torch", "qwen_asr")
-MICROPHONE_IMPORTS = ("sounddevice", "websockets")
+SERVICE_IMPORTS = ("fastapi", "uvicorn", "websockets", "torch", "qwen_asr")
+MICROPHONE_IMPORTS = ("sounddevice",)
 
 
 class PreflightError(RuntimeError):

@@ -78,9 +78,20 @@ class PreflightTests(unittest.TestCase):
         )
         report = run_preflight(
             options,
-            import_available=lambda name: name not in {"sounddevice", "websockets"},
+            import_available=lambda name: name != "sounddevice",
         )
         self.assertEqual(1, report.checked_files)
+
+    @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
+    def test_browser_capture_requires_a_websocket_library(self) -> None:
+        options = PreflightOptions(
+            model_path=self.model,
+            output_root=self.root / "output",
+            state_root=self.root / "state",
+            python_capture=False,
+        )
+        with self.assertRaisesRegex(PreflightError, "websockets.+requirements.txt"):
+            run_preflight(options, import_available=lambda name: name != "websockets")
 
 
 if __name__ == "__main__":

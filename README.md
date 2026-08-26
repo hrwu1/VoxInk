@@ -73,6 +73,9 @@ Run only the startup checks with:
 ./scripts/voxink-dev --preflight-only
 ```
 
+The checks match the interface you select, so add `--terminal` when you intend
+to use the Terminal controls; only then are the capture dependencies verified.
+
 Private operational diagnostics are stored under
 `~/Library/Application Support/VoxInk/logs/`. They contain process state and
 protocol metadata, never transcript text, raw audio, or the launch credential.
