@@ -1,11 +1,17 @@
 import Foundation
 
 public final class CaptureCoordinator {
+    public enum State: String, Sendable {
+        case idle
+        case recording
+        case paused
+    }
+
     private let configuration: CaptureConfiguration
     private let sink: AudioFrameSink
     private var microphone: MicrophoneCapture?
     private var systemAudio: SystemAudioCapture?
-    private var running = false
+    private var state: State = .idle
 
     public init(
         configuration: CaptureConfiguration,
@@ -25,8 +31,15 @@ public final class CaptureCoordinator {
         )
     }
 
+    public var currentState: State { state }
+
+    /// Frames discarded across all sources because transcription fell behind.
+    public var droppedFrameCount: Int {
+        (microphone?.droppedFrameCount ?? 0) + (systemAudio?.droppedFrameCount ?? 0)
+    }
+
     public func start() async throws {
-        guard !running else { return }
+        guard state == .idle else { return }
         var sources = [AudioSource]()
         if configuration.microphoneEnabled { sources.append(.microphone) }
         if configuration.systemAudio != nil { sources.append(.system) }
@@ -51,9 +64,9 @@ public final class CaptureCoordinator {
                 try await systemAudio.start()
                 self.systemAudio = systemAudio
             }
-            running = true
+            state = .recording
         } catch {
-            microphone?.stop()
+            await microphone?.stop()
             microphone = nil
             await systemAudio?.stop()
             systemAudio = nil
@@ -62,13 +75,32 @@ public final class CaptureCoordinator {
         }
     }
 
+    /// Stop delivering audio, then tell the service. Draining first means the
+    /// utterance in progress is finalized instead of being cut off, and no
+    /// audio arrives after the service has paused the session.
+    public func pause() async {
+        guard state == .recording else { return }
+        await microphone?.pause()
+        await systemAudio?.pause()
+        await sink.pause(sessionID: configuration.sessionID)
+        state = .paused
+    }
+
+    public func resume() async {
+        guard state == .paused else { return }
+        await sink.resume(sessionID: configuration.sessionID)
+        microphone?.resume()
+        systemAudio?.resume()
+        state = .recording
+    }
+
     public func stop() async {
-        guard running else { return }
-        microphone?.stop()
+        guard state != .idle else { return }
+        await microphone?.stop()
         microphone = nil
         await systemAudio?.stop()
         systemAudio = nil
-        running = false
+        state = .idle
         await sink.disconnect(sessionID: configuration.sessionID, reason: "user_stopped")
     }
 }

@@ -2,8 +2,9 @@
 
 This Swift package is the native macOS audio-capture adapter. It keeps microphone
 and system audio separate, converts both to 16 kHz mono signed 16-bit PCM, labels
-each frame, and sends frames to a WebSocket service bound to this Mac's loopback
-interface.
+each frame, and sends frames in capture order to a WebSocket service bound to
+this Mac's loopback interface. Each source retains one `AVAudioConverter` for the
+life of the session so the resampler keeps its filter state across buffers.
 
 It is intentionally independent of Qwen and transcript persistence. The Python
 service owns those concerns.
@@ -25,8 +26,8 @@ swift test
 ```
 
 The tests use XCTest and require a full Xcode installation. A standalone Command
-Line Tools distribution can build the targets but may not include the XCTest SDK
-module.
+Line Tools distribution builds the library and CLI but has no XCTest SDK module,
+so `swift test` fails there with `no such module 'XCTest'`.
 
 List the currently running applications available to ScreenCaptureKit:
 
@@ -77,11 +78,51 @@ header immediately followed by a raw binary message:
 }
 ```
 
-The connection ends with `stream.stop`. The receiver decodes
+Manual pause and resume are `stream.pause` and `stream.resume`, each carrying
+the `stream_id` and an `at_ms` reading of the session clock:
+
+```json
+{"type":"stream.pause","stream_id":"system-1","at_ms":12000.0}
+{"type":"stream.resume","stream_id":"system-1","at_ms":41500.0}
+```
+
+The connection ends with `stream.stop`, and the client waits up to two seconds
+for the service's `stream.stopped` acknowledgement before closing the socket.
+The service finalizes its last VAD chunk while stopping, so closing immediately
+would discard the final caption of the session. The receiver decodes
 `transcript.partial` and `transcript.final` messages into `TranscriptWireEvent`;
 a host UI can map these directly to `CaptionItem`. Local capture diagnostics are
 delivered through a separate status callback because sending them as unknown
 WebSocket messages would violate the service contract.
+
+## Frame delivery, ordering, and backpressure
+
+Every frame passes through one bounded queue per source, drained by a single
+task. Order is strict: the service pairs each JSON header with the binary
+message that follows it, so out-of-order delivery would corrupt the stream.
+
+When transcription falls behind real time the queue holds roughly ten seconds of
+audio and then discards its oldest frames rather than growing without limit.
+Discards are counted, exposed as `CaptureCoordinator.droppedFrameCount`, and
+reported at most once per second as an `audio_frames_dropped` warning status
+event so the lag is visible instead of silent.
+
+## Session controls
+
+`CaptureCoordinator` exposes `start()`, `pause()`, `resume()`, and `stop()`, and
+reports `currentState` as `idle`, `recording`, or `paused`.
+
+Pausing stops delivering audio at the capture source and drains what is already
+queued before sending `stream.pause`, so the utterance in progress is finalized
+rather than truncated and no audio arrives after the service has paused the
+session. Audio captured while paused is discarded rather than buffered: replaying
+it after a resume would place it at the wrong point on the session timeline. The
+ScreenCaptureKit stream stays open across a pause so resuming does not surrender
+the capture filter or re-prompt for permission.
+
+The development CLI still exposes only start and stop, because a pause command
+needs interactive stdin that the CLI does not have. Pause and resume are for the
+menu-bar app target described in `SHIP_SPEC.md`.
 
 ## Permissions and app packaging
 

@@ -32,7 +32,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let sessionID: String
     private let sink: AudioFrameSink
     private let normalizer: PCMNormalizer
+    private let frames: AudioFrameQueue
     private let callbackQueue = DispatchQueue(label: "dev.voxink.capture.system-audio")
+
+    /// ScreenCaptureKit delivers samples and stop callbacks on its own queues
+    /// while capture control runs on Swift concurrency's executors, so every
+    /// mutable field below is reached from more than one thread.
+    private let lock = NSLock()
     private var stream: SCStream?
     private var reconnectTask: Task<Void, Never>?
     private var sequence: UInt64 = 0
@@ -44,34 +50,67 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.sessionID = sessionID
         self.sink = sink
         normalizer = PCMNormalizer(outputSampleRate: Double(sampleRate))
+        frames = AudioFrameQueue(sink: sink, sessionID: sessionID, source: .system)
     }
+
+    var droppedFrameCount: Int { frames.droppedFrameCount }
 
     func start() async throws {
         guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
             throw CaptureError.screenRecordingPermissionDenied
         }
-        stopping = false
-        try await rebuildStream(allowMissingApplications: true)
+        withLock { stopping = false }
+        frames.start()
+        do {
+            try await rebuildStream(allowMissingApplications: true)
+        } catch {
+            await frames.finishAndDrain()
+            throw error
+        }
         if case .applications = selection {
             startReconnectMonitor()
         }
     }
 
+    /// Keep the ScreenCaptureKit stream alive across a pause — tearing it down
+    /// would surrender the capture filter and re-prompt for permission — and
+    /// close the delivery pipeline instead so no audio reaches the service.
+    func pause() async {
+        await frames.finishAndDrain()
+    }
+
+    func resume() {
+        frames.start()
+    }
+
     func stop() async {
-        stopping = true
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        withLock { stopping = true }
+        let task = withLock { () -> Task<Void, Never>? in
+            let task = reconnectTask
+            reconnectTask = nil
+            return task
+        }
+        task?.cancel()
+        let stream = withLock { () -> SCStream? in
+            let stream = self.stream
+            self.stream = nil
+            activeProcessIDs = []
+            return stream
+        }
         if let stream {
             try? await stream.stopCapture()
         }
-        stream = nil
-        activeProcessIDs = []
+        await frames.finishAndDrain()
     }
 
     private func rebuildStream(allowMissingApplications: Bool) async throws {
-        if let stream {
-            try? await stream.stopCapture()
+        let existing = withLock { () -> SCStream? in
+            let existing = self.stream
             self.stream = nil
+            return existing
+        }
+        if let existing {
+            try? await existing.stopCapture()
         }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else { throw CaptureError.noDisplayAvailable }
@@ -83,13 +122,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             let ownPID = ProcessInfo.processInfo.processIdentifier
             let ownApplications = content.applications.filter { $0.processID == ownPID }
             filter = SCContentFilter(display: display, excludingApplications: ownApplications, exceptingWindows: [])
-            activeProcessIDs = []
+            withLock { activeProcessIDs = [] }
         case .applications(let bundleIdentifiers):
             let applications = content.applications.filter {
                 bundleIdentifiers.contains($0.bundleIdentifier) && $0.processID != ProcessInfo.processInfo.processIdentifier
             }
             guard !applications.isEmpty else {
-                activeProcessIDs = []
+                withLock { activeProcessIDs = [] }
                 if allowMissingApplications {
                     await emitStatus(
                         level: .warning,
@@ -101,7 +140,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 throw CaptureError.noSelectedApplications(bundleIdentifiers)
             }
             filter = SCContentFilter(display: display, including: applications, exceptingWindows: [])
-            activeProcessIDs = Set(applications.map(\.processID))
+            withLock { activeProcessIDs = Set(applications.map(\.processID)) }
             selectedIDs = bundleIdentifiers.sorted()
         }
 
@@ -115,22 +154,28 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.height = 2
         configuration.showsCursor = false
 
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: callbackQueue)
-        self.stream = stream
-        try await stream.startCapture()
+        let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: callbackQueue)
+        withLock { self.stream = newStream }
+        do {
+            try await newStream.startCapture()
+        } catch {
+            withLock { if self.stream === newStream { self.stream = nil } }
+            throw error
+        }
         let sourceDescription = selectedIDs?.joined(separator: ", ") ?? "all system audio"
         await emitStatus(level: .info, code: "system_capture_started", message: "Capturing \(sourceDescription).")
     }
 
     private func startReconnectMonitor() {
-        reconnectTask = Task { [weak self] in
+        let task = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard !Task.isCancelled, let self, !self.stopping else { return }
+                guard !Task.isCancelled, let self, !self.isStopping else { return }
                 await self.refreshSelectedApplications()
             }
         }
+        withLock { reconnectTask = task }
     }
 
     private func refreshSelectedApplications() async {
@@ -143,7 +188,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 else { return nil }
                 return application.processID
             })
-            guard currentPIDs != activeProcessIDs else { return }
+            guard currentPIDs != withLock({ activeProcessIDs }) else { return }
             await emitStatus(level: .info, code: "applications_changed", message: "Selected application processes changed; rebuilding capture filter.")
             try await rebuildStream(allowMissingApplications: true)
         } catch {
@@ -157,10 +202,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             let input = try Self.pcmBuffer(from: sampleBuffer)
             let data = try normalizer.normalize(input)
             guard !data.isEmpty else { return }
-            sequence += 1
+            let sequence = withLock { () -> UInt64 in
+                self.sequence += 1
+                return self.sequence
+            }
             let appIDs: [String]?
             if case .applications(let identifiers) = selection { appIDs = identifiers.sorted() } else { appIDs = nil }
-            let frame = AudioFrame(
+            frames.submit(AudioFrame(
                 sessionID: sessionID,
                 streamID: "system-1",
                 source: .system,
@@ -169,19 +217,26 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 sampleRate: Int(normalizer.outputSampleRate),
                 pcmS16LE: data,
                 applicationBundleIdentifiers: appIDs
-            )
-            Task { try? await sink.send(frame) }
+            ))
         } catch {
             Task { await emitStatus(level: .warning, code: "system_frame_dropped", message: error.localizedDescription) }
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        guard !stopping else { return }
+        guard !isStopping else { return }
         Task {
             await emitStatus(level: .error, code: "system_capture_stopped", message: error.localizedDescription)
             try? await rebuildStream(allowMissingApplications: true)
         }
+    }
+
+    private var isStopping: Bool { withLock { stopping } }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 
     private func emitStatus(level: CaptureStatusEvent.Level, code: String, message: String) async {

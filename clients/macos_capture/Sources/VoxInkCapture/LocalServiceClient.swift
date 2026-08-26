@@ -4,6 +4,8 @@ public protocol AudioFrameSink: AnyObject {
     func connect(sessionID: String, sources: [AudioSource]) async throws
     func send(_ frame: AudioFrame) async throws
     func send(_ event: CaptureStatusEvent) async throws
+    func pause(sessionID: String) async
+    func resume(sessionID: String) async
     func disconnect(sessionID: String, reason: String) async
 }
 
@@ -62,6 +64,12 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     private var sessionStartedNanoseconds: UInt64 = 0
     private var sockets = [String: URLSessionWebSocketTask]()
     private var sendTails = [String: Task<Void, Error>]()
+    private var stoppedWaiters = [String: CheckedContinuation<Void, Never>]()
+
+    /// How long a stop waits for the service to acknowledge `stream.stop`. The
+    /// service finalizes its last VAD chunk first, so closing the socket early
+    /// loses the final caption.
+    private static let stopAcknowledgementNanoseconds: UInt64 = 2_000_000_000
 
     public init(
         endpoint: URL,
@@ -130,14 +138,40 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         statusHandler?(event)
     }
 
+    /// Pause every open stream. Callers must stop feeding frames first so the
+    /// control message lands after the audio it follows.
+    public func pause(sessionID: String) async {
+        await drainPendingSends()
+        let atMilliseconds = elapsedMilliseconds()
+        for (streamID, socket) in sockets {
+            try? await sendJSON(
+                StreamControlEnvelope(type: "stream.pause", streamID: streamID, atMilliseconds: atMilliseconds),
+                on: socket
+            )
+        }
+    }
+
+    public func resume(sessionID: String) async {
+        let atMilliseconds = elapsedMilliseconds()
+        for (streamID, socket) in sockets {
+            try? await sendJSON(
+                StreamControlEnvelope(type: "stream.resume", streamID: streamID, atMilliseconds: atMilliseconds),
+                on: socket
+            )
+        }
+    }
+
     public func disconnect(sessionID: String, reason: String) async {
-        sendTails.values.forEach { $0.cancel() }
-        sendTails.removeAll()
-        let now = DispatchTime.now().uptimeNanoseconds
-        let atMilliseconds = Double(now >= sessionStartedNanoseconds ? now - sessionStartedNanoseconds : 0) / 1_000_000.0
+        // Let queued audio finish rather than cancelling it: the tail of a
+        // session is exactly the part a user is still waiting to read.
+        await drainPendingSends()
+        let atMilliseconds = elapsedMilliseconds()
         for (streamID, socket) in sockets {
             let stop = StreamStopEnvelope(streamID: streamID, atMilliseconds: atMilliseconds)
             try? await sendJSON(stop, on: socket)
+            await awaitStopAcknowledgement(streamID: streamID)
+        }
+        for socket in sockets.values {
             socket.cancel(with: .normalClosure, reason: reason.data(using: .utf8))
         }
         sockets.removeAll()
@@ -145,6 +179,35 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         session = nil
         self.sessionID = nil
         sessionSources = []
+    }
+
+    private func drainPendingSends() async {
+        let tails = sendTails
+        sendTails.removeAll()
+        for task in tails.values { _ = try? await task.value }
+    }
+
+    private func elapsedMilliseconds() -> Double {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return Double(now >= sessionStartedNanoseconds ? now - sessionStartedNanoseconds : 0) / 1_000_000.0
+    }
+
+    /// Wait for `stream.stopped`, or give up so a wedged service cannot block
+    /// the user's Stop.
+    private func awaitStopAcknowledgement(streamID: String) async {
+        guard sockets[streamID] != nil else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            stoppedWaiters[streamID] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.stopAcknowledgementNanoseconds)
+                await self?.completeStopAcknowledgement(streamID: streamID)
+            }
+        }
+    }
+
+    /// Actor isolation makes remove-then-resume safe against a double resume.
+    private func completeStopAcknowledgement(streamID: String) {
+        stoppedWaiters.removeValue(forKey: streamID)?.resume()
     }
 
     private func socket(for frame: AudioFrame) async throws -> URLSessionWebSocketTask {
@@ -177,6 +240,9 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                    ["transcript.partial", "transcript.final"].contains(response.type),
                    let event = response.event {
                     transcriptHandler?(event)
+                } else if let envelope = try? decoder.decode(TypeOnlyResponse.self, from: data),
+                          envelope.type == "stream.stopped" {
+                    completeStopAcknowledgement(streamID: streamID)
                 } else if let response = try? decoder.decode(ErrorResponse.self, from: data), response.type == "error" {
                     statusHandler?(CaptureStatusEvent(
                         sessionID: sessionID ?? "unknown",
@@ -187,6 +253,8 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                     ))
                 }
             } catch {
+                // A closed socket will never acknowledge a stop.
+                completeStopAcknowledgement(streamID: streamID)
                 if sockets[streamID] === task {
                     sockets.removeValue(forKey: streamID)
                     statusHandler?(CaptureStatusEvent(
@@ -314,5 +382,17 @@ private struct StreamStopEnvelope: Encodable {
     }
 }
 
+private struct StreamControlEnvelope: Encodable {
+    let type: String
+    let streamID: String
+    let atMilliseconds: Double
+    enum CodingKeys: String, CodingKey {
+        case type
+        case streamID = "stream_id"
+        case atMilliseconds = "at_ms"
+    }
+}
+
+private struct TypeOnlyResponse: Decodable { let type: String }
 private struct TranscriptResponse: Decodable { let type: String; let event: TranscriptWireEvent? }
 private struct ErrorResponse: Decodable { let type: String; let code: String?; let message: String? }

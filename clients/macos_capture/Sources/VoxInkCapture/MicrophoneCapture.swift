@@ -5,15 +5,18 @@ final class MicrophoneCapture {
     private let engine = AVAudioEngine()
     private let normalizer: PCMNormalizer
     private let sessionID: String
-    private let sink: AudioFrameSink
+    private let queue: AudioFrameQueue
     private let streamID = "microphone-1"
+    private let lock = NSLock()
     private var sequence: UInt64 = 0
 
     init(sessionID: String, sampleRate: Int, sink: AudioFrameSink) {
         self.sessionID = sessionID
-        self.sink = sink
         normalizer = PCMNormalizer(outputSampleRate: Double(sampleRate))
+        queue = AudioFrameQueue(sink: sink, sessionID: sessionID, source: .microphone)
     }
+
+    var droppedFrameCount: Int { queue.droppedFrameCount }
 
     func start() async throws {
         let granted: Bool
@@ -32,24 +35,46 @@ final class MicrophoneCapture {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw CaptureError.audioFormatUnavailable("microphone returned \(format)")
         }
+        queue.start()
         input.installTap(onBus: 0, bufferSize: 2_048, format: format) { [weak self] buffer, _ in
             self?.handle(buffer: buffer)
         }
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            await queue.finishAndDrain()
+            throw error
+        }
     }
 
-    func stop() {
+    /// Stop delivering audio while the session is paused. Frames captured
+    /// before the pipeline closes are still sent, so the utterance in progress
+    /// is finalized rather than truncated.
+    func pause() async {
+        await queue.finishAndDrain()
+    }
+
+    func resume() {
+        queue.start()
+    }
+
+    func stop() async {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        await queue.finishAndDrain()
     }
 
     private func handle(buffer: AVAudioPCMBuffer) {
         do {
             let data = try normalizer.normalize(buffer)
             guard !data.isEmpty else { return }
+            lock.lock()
             sequence += 1
-            let frame = AudioFrame(
+            let sequence = self.sequence
+            lock.unlock()
+            queue.submit(AudioFrame(
                 sessionID: sessionID,
                 streamID: streamID,
                 source: .microphone,
@@ -57,8 +82,7 @@ final class MicrophoneCapture {
                 timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
                 sampleRate: Int(normalizer.outputSampleRate),
                 pcmS16LE: data
-            )
-            Task { try? await sink.send(frame) }
+            ))
         } catch {
             // Capture continues after an isolated conversion failure. A host app
             // can replace this with structured diagnostics through its logger.
