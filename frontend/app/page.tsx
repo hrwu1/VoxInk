@@ -1,106 +1,135 @@
-const sidebarWidths = [74, 58, 82, 66, 71, 54];
-const articleWidths = [100, 97, 94, 98, 86];
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+
+type SessionState = 'ready' | 'recording' | 'paused';
+
+const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
+
+const demoCaptions = [
+  { time: '00:03', text: 'VoxInk is listening locally.' },
+  { time: '00:08', text: 'Your words appear here as they are finalized.' },
+];
 
 export default function Home() {
+  const [state, setState] = useState<SessionState>('ready');
+  const [seconds, setSeconds] = useState(0);
+  const [captions, setCaptions] = useState(demoCaptions);
+
+  useEffect(() => {
+    if (state !== 'recording') return;
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [state]);
+
+  const elapsed = useMemo(() => {
+    const minutes = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const remainder = (seconds % 60).toString().padStart(2, '0');
+    return `${minutes}:${remainder}`;
+  }, [seconds]);
+
+  function toggleRecording() {
+    if (state === 'ready') {
+      setSeconds(0);
+      setCaptions([]);
+      setState('recording');
+      return;
+    }
+    setState(state === 'recording' ? 'paused' : 'recording');
+  }
+
+  function stop() {
+    setState('ready');
+  }
+
   return (
-    <main className="fixed inset-0 overflow-hidden bg-[#fbfaf8] text-zinc-900">
-      <header
-        aria-hidden="true"
-        className="grid h-[76px] grid-cols-[1fr_auto_1fr] items-center border-b border-stone-200 bg-white/95 px-6 sm:px-14"
-      >
-        <div className="flex items-center gap-3">
-          <span className="h-9 w-9 rounded-full bg-stone-100" />
-          <span className="h-3.5 w-28 rounded-full bg-stone-100" />
+    <main className="app-shell">
+      <nav className="topbar" aria-label="VoxInk navigation">
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
+          <span>VoxInk</span>
         </div>
-        <span className="hidden h-9 w-[min(30vw,420px)] rounded-xl bg-stone-100 sm:block" />
-        <div className="flex items-center justify-end gap-3">
-          <span className="hidden h-9 w-9 rounded-full bg-stone-100 sm:block" />
-          <span className="h-9 w-24 rounded-xl bg-stone-100" />
-        </div>
-      </header>
+        <div className="privacy-pill"><span /> Local only</div>
+        <button className="icon-button" aria-label="Open settings">⌘</button>
+      </nav>
 
-      <div
-        aria-hidden="true"
-        className="grid h-[calc(100%-76px)] grid-cols-[180px_minmax(0,1fr)_260px] gap-10 px-6 pb-24 pt-10 opacity-55 max-lg:grid-cols-[150px_minmax(0,1fr)] max-sm:grid-cols-1 sm:px-14"
-      >
-        <aside className="hidden border-r border-stone-200 pr-7 sm:block">
-          <div className="mb-6 h-2.5 w-16 rounded-full bg-stone-200" />
-          <div className="space-y-4">
-            {sidebarWidths.map((width) => (
-              <div key={width} className="flex items-center gap-3">
-                <span className="h-4 w-4 rounded bg-stone-200" />
-                <span
-                  className="h-2.5 rounded-full bg-stone-200"
-                  style={{ width: `${width}%` }}
-                />
-              </div>
-            ))}
+      <section className="workspace">
+        <header className="workspace-heading">
+          <div>
+            <p className="eyebrow">Developer edition</p>
+            <h1>Turn speech into something<br />you can keep.</h1>
           </div>
-          <div className="mb-6 mt-9 h-2.5 w-24 rounded-full bg-stone-200" />
-          <div className="space-y-4">
-            {sidebarWidths.slice(0, 3).map((width) => (
-              <span
-                key={width}
-                className="block h-2.5 rounded-full bg-stone-200"
-                style={{ width: `${width}%` }}
-              />
-            ))}
+          <div className={`connection-state ${state}`}>
+            <span />
+            {state === 'ready' ? 'Ready to record' : state === 'paused' ? 'Session paused' : 'Listening now'}
           </div>
-        </aside>
+        </header>
 
-        <article className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-          <div className="space-y-3">
-            <div className="h-2.5 w-28 rounded-full bg-stone-200" />
-            <div className="h-7 w-4/5 rounded-lg bg-stone-200" />
-            <div className="h-7 w-3/5 rounded-lg bg-stone-200" />
-          </div>
-          <div className="min-h-[240px] flex-1 rounded-2xl bg-stone-200" />
-          <div className="flex items-center gap-3">
-            <span className="h-9 w-9 rounded-full bg-stone-200" />
-            <span className="h-2.5 w-28 rounded-full bg-stone-200" />
-          </div>
-          <div className="space-y-2">
-            {articleWidths.map((width) => (
-              <span
-                key={width}
-                className="block h-2.5 rounded-full bg-stone-200"
-                style={{ width: `${width}%` }}
-              />
-            ))}
-          </div>
-        </article>
-
-        <aside className="space-y-5 max-lg:hidden">
-          {[0, 1].map((card) => (
-            <div
-              key={card}
-              className="space-y-4 rounded-2xl border border-stone-200 bg-white/70 p-6"
-            >
-              <span className="block h-10 w-10 rounded-full bg-stone-200" />
-              <span className="block h-3 w-3/5 rounded-full bg-stone-200" />
-              <span className="block h-2.5 w-full rounded-full bg-stone-200" />
-              <span className="block h-2.5 w-4/5 rounded-full bg-stone-200" />
-              <span className="block h-8 w-24 rounded-lg bg-stone-200" />
+        <div className="content-grid">
+          <section className="recorder-card" aria-label="Recorder controls">
+            <div className="recorder-topline">
+              <label className="source-control">
+                <span className="source-icon">◉</span>
+                <span><small>Input source</small><strong>MacBook Microphone</strong></span>
+                <select aria-label="Input source" defaultValue="microphone">
+                  <option value="microphone">MacBook Microphone</option>
+                </select>
+              </label>
+              <div className="model-label"><small>Model</small><strong>Qwen3 · Local</strong></div>
             </div>
-          ))}
-        </aside>
-      </div>
 
-      <section
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        className="absolute left-1/2 top-[clamp(96px,13vh,122px)] w-[min(620px,calc(100%-40px))] -translate-x-1/2 rounded-[18px] border border-stone-200 bg-white/95 px-5 py-5 shadow-[0_18px_50px_rgb(24_24_27/9%)] backdrop-blur-sm"
-      >
-        <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.09em] text-stone-500">
-          Building your site
-        </p>
-        <h1 className="text-xl font-semibold tracking-tight">
-          Your site is taking shape
-        </h1>
-        <p className="mt-1 text-sm text-stone-500">
-          Your first version will appear here automatically when it’s ready.
-        </p>
+            <div className={`waveform ${state}`} aria-label={`${state} waveform`}>
+              {bars.map((height, index) => (
+                <span key={index} style={{ '--bar-height': `${height}%`, '--delay': `${index * -65}ms` } as React.CSSProperties} />
+              ))}
+            </div>
+
+            <div className="timer-row">
+              <span className="timer">{elapsed}</span>
+              <span className="session-label">{state === 'ready' ? 'New session' : 'Untitled session'}</span>
+            </div>
+
+            <div className="control-row">
+              <button className="secondary-control" onClick={stop} disabled={state === 'ready'}>Stop</button>
+              <button className={`record-control ${state}`} onClick={toggleRecording}>
+                <span aria-hidden="true">{state === 'recording' ? 'Ⅱ' : '●'}</span>
+                {state === 'ready' ? 'Start recording' : state === 'paused' ? 'Resume' : 'Pause'}
+              </button>
+              <button className="secondary-control" disabled>Mark</button>
+            </div>
+            <p className="shortcut-hint">Press <kbd>Space</kbd> to start or pause</p>
+          </section>
+
+          <aside className="session-card">
+            <div className="panel-heading">
+              <div><p className="eyebrow">Live transcript</p><h2>Captions</h2></div>
+              <span className="language-chip">Auto · EN / 中文</span>
+            </div>
+            <div className="caption-list" aria-live="polite">
+              {captions.length ? captions.map((caption) => (
+                <article className="caption-line" key={`${caption.time}-${caption.text}`}>
+                  <time>{caption.time}</time>
+                  <div><span className="speaker-label">MIC</span><p>{caption.text}</p></div>
+                </article>
+              )) : (
+                <div className="empty-captions">
+                  <span className="listening-orbit"><i /></span>
+                  <strong>{state === 'recording' ? 'Listening…' : state === 'paused' ? 'Paused' : 'Your captions will appear here'}</strong>
+                  <p>Finalized words are saved locally as Markdown.</p>
+                </div>
+              )}
+            </div>
+            <footer className="caption-footer">
+              <span><i /> 0 dropped frames</span>
+              <button>Open transcript folder ↗</button>
+            </footer>
+          </aside>
+        </div>
+
+        <footer className="recent-strip">
+          <div><p className="eyebrow">Last session</p><strong>Nothing recorded yet</strong></div>
+          <div className="local-note"><span>⌁</span><p><strong>Private by design</strong><br />Audio never leaves this Mac.</p></div>
+        </footer>
       </section>
     </main>
   );

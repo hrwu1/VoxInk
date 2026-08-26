@@ -13,7 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Untitled site',
+  title: 'VoxInk — Local transcription console',
+  description: 'A private local control surface for VoxInk microphone transcription.',
 };
 
 export default function RootLayout({
