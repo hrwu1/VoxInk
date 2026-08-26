@@ -19,6 +19,7 @@ from .preflight import (
     run_preflight,
 )
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
+from .diagnostics import DiagnosticLog
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,8 +66,10 @@ def main(argv: list[str] | None = None) -> int:
         print("System capture integration is not available in this implementation slice.", file=sys.stderr)
         return 2
     session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    diagnostics = DiagnosticLog(report.log_root)
     supervisor = HelperSupervisor(
-        HelperConfig(report.model_path, report.output_root, device=args.device)
+        HelperConfig(report.model_path, report.output_root, device=args.device),
+        diagnostics=diagnostics,
     )
     try:
         health = supervisor.start()
@@ -85,12 +88,19 @@ def main(argv: list[str] | None = None) -> int:
             session_id,
         ]
         capture = subprocess.Popen(command, env=supervisor.capture_environment())
+        diagnostics.emit("capture.started", component="capture", pid=capture.pid)
         try:
             while capture.poll() is None:
                 helper = supervisor.process
                 if helper is None or helper.poll() is not None:
                     raise SupervisorError("transcription helper exited unexpectedly")
                 time.sleep(0.1)
+            diagnostics.emit(
+                "capture.stopped",
+                component="capture",
+                pid=capture.pid,
+                return_code=capture.returncode,
+            )
             return int(capture.returncode)
         except KeyboardInterrupt:
             capture.send_signal(signal.SIGINT)
@@ -100,10 +110,12 @@ def main(argv: list[str] | None = None) -> int:
                 capture.terminate()
                 capture.wait(timeout=5)
     except (OSError, SupervisorError, subprocess.TimeoutExpired) as exc:
+        diagnostics.emit("supervisor.failed", level="error", component="supervisor")
         print(f"VoxInk failed: {exc}", file=sys.stderr)
         return 1
     finally:
         supervisor.stop()
+        diagnostics.close()
 
 
 if __name__ == "__main__":

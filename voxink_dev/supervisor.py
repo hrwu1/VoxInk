@@ -17,6 +17,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from services.transcription.app import PROTOCOL_VERSION
+from .diagnostics import DiagnosticLog
 
 
 class SupervisorError(RuntimeError):
@@ -37,9 +38,11 @@ class HelperSupervisor:
         config: HelperConfig,
         *,
         process_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        diagnostics: DiagnosticLog | None = None,
     ) -> None:
         self.config = config
         self.process_factory = process_factory
+        self.diagnostics = diagnostics
         self.auth_secret = secrets.token_urlsafe(32)
         self.port: int | None = None
         self.process: subprocess.Popen[str] | None = None
@@ -77,9 +80,19 @@ class HelperSupervisor:
             stderr=subprocess.PIPE,
             text=True,
         )
+        self._emit("helper.starting", component="helper", pid=self.process.pid, port=self.port)
         try:
-            return self.wait_until_ready()
+            health = self.wait_until_ready()
+            self._emit(
+                "helper.ready",
+                component="helper",
+                pid=self.process.pid,
+                port=self.port,
+                protocol_version=health["protocol_version"],
+            )
+            return health
         except BaseException:
+            self._emit("helper.start_failed", level="error", component="helper")
             self.stop()
             raise
 
@@ -129,6 +142,7 @@ class HelperSupervisor:
             return
         try:
             if process.poll() is None:
+                self._emit("helper.stopping", component="helper", pid=process.pid)
                 process.send_signal(signal.SIGTERM)
                 try:
                     process.wait(timeout=timeout)
@@ -136,8 +150,18 @@ class HelperSupervisor:
                     process.kill()
                     process.wait(timeout=2.0)
         finally:
+            self._emit(
+                "helper.stopped",
+                component="helper",
+                pid=process.pid,
+                return_code=process.returncode,
+            )
             if process.stderr is not None:
                 process.stderr.close()
+
+    def _emit(self, event: str, *, level: str = "info", **fields: object) -> None:
+        if self.diagnostics is not None:
+            self.diagnostics.emit(event, level=level, **fields)
 
     def __enter__(self) -> HelperSupervisor:
         self.start()
