@@ -42,6 +42,12 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var reconnectTask: Task<Void, Never>?
     private var sequence: UInt64 = 0
+    private var capturedFrameCount: UInt64 = 0
+    private var sourcePeakAmplitude = 0.0
+    private var sourceByteCount: UInt64 = 0
+    private var sourceNonzeroByteCount: UInt64 = 0
+    private var sourceFormatDescription = "unavailable"
+    private var peakAmplitude = 0
     private var activeProcessIDs = Set<pid_t>()
     private var stopping = false
 
@@ -101,6 +107,21 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             try? await stream.stopCapture()
         }
         await frames.finishAndDrain()
+        let summary = withLock {
+            (
+                capturedFrameCount,
+                sourcePeakAmplitude,
+                peakAmplitude,
+                sourceNonzeroByteCount,
+                sourceByteCount,
+                sourceFormatDescription
+            )
+        }
+        await emitStatus(
+            level: summary.0 > 0 ? .info : .warning,
+            code: "system_capture_summary",
+            message: "Captured \(summary.0) system audio frames (source peak \(String(format: "%.4f", summary.1)); output peak \(summary.2) of 32768; raw nonzero bytes \(summary.3)/\(summary.4); format \(summary.5))."
+        )
     }
 
     private func rebuildStream(allowMissingApplications: Bool) async throws {
@@ -200,10 +221,18 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .audio, sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
         do {
             let input = try Self.pcmBuffer(from: sampleBuffer)
+            let sourcePeak = Self.pcmPeakAmplitude(input)
+            let sourceActivity = Self.pcmByteActivity(input)
             let data = try normalizer.normalize(input)
             guard !data.isEmpty else { return }
             let sequence = withLock { () -> UInt64 in
                 self.sequence += 1
+                capturedFrameCount += 1
+                sourcePeakAmplitude = max(sourcePeakAmplitude, sourcePeak)
+                sourceNonzeroByteCount += UInt64(sourceActivity.nonzero)
+                sourceByteCount += UInt64(sourceActivity.total)
+                sourceFormatDescription = input.format.description
+                peakAmplitude = max(peakAmplitude, Self.pcmPeakAmplitude(data))
                 return self.sequence
             }
             let appIDs: [String]?
@@ -242,6 +271,76 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private func emitStatus(level: CaptureStatusEvent.Level, code: String, message: String) async {
         let event = CaptureStatusEvent(sessionID: sessionID, source: .system, level: level, code: code, message: message)
         try? await sink.send(event)
+    }
+
+    static func pcmPeakAmplitude(_ data: Data) -> Int {
+        guard data.count >= 2 else { return 0 }
+        return data.withUnsafeBytes { raw in
+            var peak = 0
+            for offset in stride(from: 0, to: raw.count - 1, by: 2) {
+                let bits = UInt16(raw[offset]) | UInt16(raw[offset + 1]) << 8
+                peak = max(peak, abs(Int(Int16(bitPattern: bits))))
+            }
+            return peak
+        }
+    }
+
+    static func pcmPeakAmplitude(_ buffer: AVAudioPCMBuffer) -> Double {
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return 0 }
+        var peak = 0.0
+        switch buffer.format.commonFormat {
+        case .pcmFormatFloat32:
+            guard let data = buffer.floatChannelData else { return 0 }
+            for channel in 0..<channels {
+                for frame in 0..<frames { peak = max(peak, abs(Double(data[channel][frame]))) }
+            }
+        case .pcmFormatFloat64:
+            for audioBuffer in UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList) {
+                guard let raw = audioBuffer.mData else { continue }
+                let data = raw.assumingMemoryBound(to: Double.self)
+                let sampleCount = Int(audioBuffer.mDataByteSize) / MemoryLayout<Double>.size
+                for sample in 0..<sampleCount { peak = max(peak, abs(data[sample])) }
+            }
+        case .pcmFormatInt16:
+            guard let data = buffer.int16ChannelData else { return 0 }
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    peak = max(peak, Double(abs(Int(data[channel][frame]))) / 32768.0)
+                }
+            }
+        case .pcmFormatInt32:
+            guard let data = buffer.int32ChannelData else { return 0 }
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    peak = max(peak, Double(abs(Int64(data[channel][frame]))) / 2_147_483_648.0)
+                }
+            }
+        case .otherFormat:
+            return 0
+        @unknown default:
+            return 0
+        }
+        return peak
+    }
+
+    static func pcmByteActivity(_ buffer: AVAudioPCMBuffer) -> (nonzero: Int, total: Int) {
+        let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        var nonzero = 0
+        var total = 0
+        for audioBuffer in buffers {
+            guard let data = audioBuffer.mData else { continue }
+            let bytes = UnsafeRawBufferPointer(
+                start: data,
+                count: Int(audioBuffer.mDataByteSize)
+            )
+            total += bytes.count
+            nonzero += bytes.reduce(into: 0) { count, byte in
+                if byte != 0 { count += 1 }
+            }
+        }
+        return (nonzero, total)
     }
 
     private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer {

@@ -58,6 +58,20 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Array(counts.suffix(4)), [160, 160, 160, 160])
     }
 
+    func testSystemPCMLevelSummaryReadsSignedLittleEndianSamples() {
+        let pcm = Data([0x00, 0x00, 0xD2, 0x04, 0x30, 0xF8]) // 0, 1234, -2000
+        XCTAssertEqual(SystemAudioCapture.pcmPeakAmplitude(pcm), 2000)
+        let buffer = Self.stereoBuffer(frames: 480)
+        XCTAssertEqual(
+            SystemAudioCapture.pcmPeakAmplitude(buffer),
+            0.25,
+            accuracy: 0.0001
+        )
+        let activity = SystemAudioCapture.pcmByteActivity(buffer)
+        XCTAssertGreaterThan(activity.nonzero, 0)
+        XCTAssertGreaterThan(activity.total, 0)
+    }
+
     // MARK: - Ordered, bounded frame delivery
 
     func testFramesArriveInSubmissionOrderWhileTheSinkIsSlow() async {

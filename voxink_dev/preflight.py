@@ -15,6 +15,16 @@ from typing import Callable, Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
+DEFAULT_NATIVE_CAPTURE = (
+    PROJECT_ROOT
+    / "clients"
+    / "macos_capture"
+    / ".build"
+    / "VoxInkCaptureDev.app"
+    / "Contents"
+    / "MacOS"
+    / "voxink-capture"
+)
 DEFAULT_OUTPUT_ROOT = Path.home() / "Documents" / "VoxInk"
 DEFAULT_STATE_ROOT = Path.home() / "Library" / "Application Support" / "VoxInk"
 MODEL_MANIFEST = "voxink-model-manifest.json"
@@ -105,7 +115,7 @@ def run_preflight(
         if native is None or not native.is_file() or not os.access(native, os.X_OK):
             failures.append(
                 "System audio requires an executable native capture helper. "
-                "Build clients/macos_capture and pass --native-capture PATH."
+                "Run ./scripts/build-macos-capture or pass --native-capture PATH."
             )
 
     if failures:

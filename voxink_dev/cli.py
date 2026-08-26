@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import signal
@@ -14,6 +15,7 @@ import webbrowser
 
 from .preflight import (
     DEFAULT_MODEL_PATH,
+    DEFAULT_NATIVE_CAPTURE,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_STATE_ROOT,
     PreflightError,
@@ -24,15 +26,46 @@ from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
 
 
+@dataclass(frozen=True, slots=True)
+class CapturePlan:
+    modes: tuple[str, ...]
+    session_sources: tuple[str, ...]
+    applications: tuple[str, ...]
+
+    @property
+    def uses_native_capture(self) -> bool:
+        return any(mode in {"system", "applications"} for mode in self.modes)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument(
-        "--source", choices=("microphone", "system", "applications"), default="microphone"
+        "--source",
+        dest="sources",
+        choices=("microphone", "system", "applications"),
+        action="append",
+        help=(
+            "capture source; repeat to combine microphone with system or applications "
+            "(default: microphone)"
+        ),
     )
-    parser.add_argument("--native-capture", type=Path)
+    parser.add_argument(
+        "--app",
+        dest="applications",
+        action="append",
+        default=[],
+        metavar="BUNDLE_ID",
+        help="application bundle identifier to capture; repeat for multiple applications",
+    )
+    parser.add_argument("--native-capture", type=Path, default=DEFAULT_NATIVE_CAPTURE)
+    parser.add_argument(
+        "--list-apps",
+        action="store_true",
+        help="list applications available to native capture and exit",
+    )
     parser.add_argument("--retain-audio", action="store_true")
     parser.add_argument("--skip-checksums", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--preflight-only", action="store_true")
@@ -57,17 +90,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.list_apps:
+        return _list_applications(args.native_capture)
+    try:
+        capture_plan = _build_capture_plan(args.sources, args.applications)
+    except ValueError as exc:
+        print(f"VoxInk cannot start:\n- {exc}", file=sys.stderr)
+        return 2
     try:
         report = run_preflight(
             PreflightOptions(
                 model_path=args.model,
                 output_root=args.output,
                 state_root=args.state_root,
-                sources=(args.source,),
+                sources=capture_plan.modes,
                 retain_audio=args.retain_audio,
-                native_capture=args.native_capture,
+                native_capture=(
+                    args.native_capture if capture_plan.uses_native_capture else None
+                ),
                 verify_checksums=not args.skip_checksums,
-                python_capture=not args.web,
+                python_capture=(
+                    not args.web and not capture_plan.uses_native_capture
+                ),
             )
         )
     except PreflightError as exc:
@@ -79,9 +123,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.preflight_only:
         return 0
-    if args.source != "microphone":
-        print("System capture integration is not available in this implementation slice.", file=sys.stderr)
-        return 2
     session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
     diagnostics = DiagnosticLog(report.log_root)
     supervisor = HelperSupervisor(
@@ -94,45 +135,37 @@ def main(argv: list[str] | None = None) -> int:
             f"Helper ready on a private loopback port "
             f"(protocol {health['protocol_version']}, provider {health['provider']})."
         )
-        if args.web:
+        if args.web and not capture_plan.uses_native_capture:
             return _run_web_ui(supervisor, health, diagnostics, report.output_root)
         endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
-        command = [
-            sys.executable,
-            "-m",
-            "clients.python_capture",
-            "--url",
-            endpoint,
-            "--session-id",
-            session_id,
-        ]
-        capture = subprocess.Popen(command, env=supervisor.capture_environment())
-        diagnostics.emit("capture.started", component="capture", pid=capture.pid)
-        try:
-            while capture.poll() is None:
-                helper = supervisor.process
-                if helper is None or helper.poll() is not None:
-                    raise SupervisorError("transcription helper exited unexpectedly")
-                time.sleep(0.1)
-            diagnostics.emit(
-                "capture.stopped",
-                component="capture",
-                pid=capture.pid,
-                return_code=capture.returncode,
+        if capture_plan.uses_native_capture:
+            command = _native_capture_command(
+                args.native_capture,
+                endpoint,
+                session_id,
+                capture_plan,
             )
-            transcripts = sorted((report.output_root / session_id).glob("transcript-part-*.md"))
-            if transcripts:
-                print(f"Transcript saved: {transcripts[-1]}")
-            else:
-                print("Session stopped before any transcript text was finalized.")
-            return int(capture.returncode)
-        except KeyboardInterrupt:
-            capture.send_signal(signal.SIGINT)
-            return capture.wait(timeout=10)
-        finally:
-            if capture.poll() is None:
-                capture.terminate()
-                capture.wait(timeout=5)
+            print(
+                "Starting native macOS capture. Approve Microphone and/or "
+                "Screen & System Audio Recording access if prompted."
+            )
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "clients.python_capture",
+                "--url",
+                endpoint,
+                "--session-id",
+                session_id,
+            ]
+        return _run_capture_process(
+            supervisor,
+            command,
+            diagnostics,
+            report.output_root,
+            session_id,
+        )
     except (OSError, SupervisorError, subprocess.TimeoutExpired) as exc:
         diagnostics.emit("supervisor.failed", level="error", component="supervisor")
         print(f"VoxInk failed: {exc}", file=sys.stderr)
@@ -140,6 +173,101 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         supervisor.stop()
         diagnostics.close()
+
+
+def _build_capture_plan(
+    requested_sources: list[str] | None,
+    requested_applications: list[str],
+) -> CapturePlan:
+    modes = tuple(dict.fromkeys(requested_sources or ["microphone"]))
+    applications = tuple(dict.fromkeys(requested_applications))
+    if "system" in modes and "applications" in modes:
+        raise ValueError("choose all system audio or selected applications, not both")
+    if "applications" in modes and not applications:
+        raise ValueError("--source applications requires at least one --app BUNDLE_ID")
+    if applications and "applications" not in modes:
+        raise ValueError("--app requires --source applications")
+    session_sources = tuple(
+        dict.fromkeys("system" if mode == "applications" else mode for mode in modes)
+    )
+    return CapturePlan(modes, session_sources, applications)
+
+
+def _native_capture_command(
+    executable: Path,
+    endpoint: str,
+    session_id: str,
+    plan: CapturePlan,
+) -> list[str]:
+    command = [
+        str(executable.expanduser().resolve()),
+        "--endpoint",
+        endpoint,
+        "--session-id",
+        session_id,
+    ]
+    if "microphone" in plan.modes:
+        command.append("--mic")
+    if "system" in plan.modes:
+        command.append("--system-all")
+    if "applications" in plan.modes:
+        for bundle_identifier in plan.applications:
+            command.extend(("--app", bundle_identifier))
+    return command
+
+
+def _list_applications(executable: Path) -> int:
+    executable = executable.expanduser().resolve()
+    if not executable.is_file() or not executable.stat().st_mode & 0o111:
+        print(
+            "VoxInk cannot list applications:\n"
+            f"- Native capture executable is unavailable: {executable}\n"
+            "  Build it with: ./scripts/build-macos-capture",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        return subprocess.run([str(executable), "--list-apps"], check=False).returncode
+    except OSError as exc:
+        print(f"VoxInk cannot list applications: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_capture_process(
+    supervisor: HelperSupervisor,
+    command: list[str],
+    diagnostics: DiagnosticLog,
+    output_root: Path,
+    session_id: str,
+) -> int:
+    capture = subprocess.Popen(command, env=supervisor.capture_environment())
+    diagnostics.emit("capture.started", component="capture", pid=capture.pid)
+    try:
+        try:
+            while capture.poll() is None:
+                helper = supervisor.process
+                if helper is None or helper.poll() is not None:
+                    raise SupervisorError("transcription helper exited unexpectedly")
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            capture.send_signal(signal.SIGINT)
+            capture.wait(timeout=10)
+    finally:
+        if capture.poll() is None:
+            capture.terminate()
+            capture.wait(timeout=5)
+        diagnostics.emit(
+            "capture.stopped",
+            component="capture",
+            pid=capture.pid,
+            return_code=capture.returncode,
+        )
+    transcripts = sorted((output_root / session_id).glob("transcript-part-*.md"))
+    if transcripts:
+        print(f"Transcript saved: {transcripts[-1]}")
+    else:
+        print("Session stopped before any transcript text was finalized.")
+    return int(capture.returncode or 0)
 
 
 def _run_web_ui(

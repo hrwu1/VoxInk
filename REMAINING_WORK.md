@@ -1,7 +1,7 @@
 # VoxInk Remaining Work
 
 Status: Developer-edition implementation plan
-Last updated: 2026-08-25
+Last updated: 2026-08-26
 
 ## Purpose
 
@@ -48,17 +48,22 @@ packaging. It does not need Developer ID signing or notarization.
 - The Python service and tests run in the repository's Python 3.12 virtual
   environment.
 - The local Qwen3-ASR-1.7B model occupies approximately 4.4 GB.
-- The native capture code exists as a Swift package and command-line tool, not
-  as a complete macOS application.
-- The installed Command Line Tools currently have a Swift compiler/macOS SDK
-  mismatch, so native builds cannot be verified until the tools are aligned.
+- The native capture code exists as a Swift package plus a generated,
+  background-only development app, not as a complete macOS application.
+  `scripts/voxink-dev` supervises it for all-system, selected-application, and
+  combined microphone/system workflows.
+- Full Xcode 26.6 is selected, the native helper builds, and its Swift tests
+  pass. An interactive macOS 26.5.1 check confirmed TCC access and a running
+  ScreenCaptureKit stream, but the OS supplied zero-filled system-audio buffers
+  during verified Chrome playback. Target-device acceptance remains open until
+  that OS/framework behavior is resolved or a fallback capture backend lands.
 - A paid Apple Developer account is not required for local development or
   ad-hoc signing. It is required later for Developer ID signing and notarized
   distribution.
 
-Code and tests that do not require compiling Swift should proceed immediately.
-Swift source can also be developed now, but native acceptance tests remain
-blocked until a matching Swift toolchain is available.
+Code, Python tests, and Swift tests can proceed now. Native system-audio
+acceptance remains separate from build correctness because it depends on the
+target Mac's capture framework and privacy state.
 
 ## Priority Overview
 
@@ -451,6 +456,8 @@ The first focused slice should deliver:
 - A microphone-only end-to-end test proving that one command produces a saved
   transcript.
 
-This slice provides immediate value without Xcode and creates the lifecycle
-boundary that both the terminal interface and eventual native application will
-reuse.
+This slice now also discovers and supervises the built native capture helper,
+passes its private endpoint and per-launch credential, accepts repeatable source
+and application selections, and owns coordinated shutdown. The remaining work
+is the richer unified control surface, recovery, reliability validation, and the
+eventual native application.

@@ -20,27 +20,32 @@ service owns those concerns.
 Build and test:
 
 ```sh
+./scripts/build-macos-capture
 cd clients/macos_capture
-swift build
 swift test
 ```
+
+Run the build command from the repository root. It wraps the SwiftPM executable
+in a background-only development app with a stable bundle identifier and the
+privacy usage descriptions required by macOS.
 
 The tests use XCTest and require a full Xcode installation. A standalone Command
 Line Tools distribution builds the library and CLI but has no XCTest SDK module,
 so `swift test` fails there with `no such module 'XCTest'`.
 
-List the currently running applications available to ScreenCaptureKit:
+List the currently running applications through the repository launcher:
 
 ```sh
-swift run voxink-capture --list-apps
+./scripts/voxink-dev --list-apps
 ```
 
 Capture examples:
 
 ```sh
-swift run voxink-capture --mic
-swift run voxink-capture --system-all
-swift run voxink-capture --mic --app us.zoom.xos --app com.apple.Safari
+./scripts/voxink-dev --source microphone
+./scripts/voxink-dev --source system
+./scripts/voxink-dev --source microphone --source applications \
+  --app us.zoom.xos --app com.apple.Safari
 ```
 
 Press Ctrl-C to stop. Selected applications are tracked by bundle identifier.
@@ -126,11 +131,10 @@ menu-bar app target described in `SHIP_SPEC.md`.
 
 ## Permissions and app packaging
 
-The SwiftPM executable is useful for development, but macOS privacy grants are
-identity-sensitive. For reliable interactive permission prompts, embed the
-`VoxInkCapture` library in the future signed `.app` and add the provided
-`Support/Info.plist` usage string and `Support/VoxInkCapture.entitlements`.
-ScreenCaptureKit may require restarting the host app after permission is first
+macOS privacy grants are identity-sensitive. `./scripts/build-macos-capture`
+creates `.build/VoxInkCaptureDev.app` with the stable `dev.voxink.capture`
+identifier and the usage descriptions from `Resources/Info.plist`.
+ScreenCaptureKit may require restarting the helper after permission is first
 granted. The screen/system-audio permission cannot be bypassed programmatically.
 
 System capture excludes the current process twice: from the all-system content

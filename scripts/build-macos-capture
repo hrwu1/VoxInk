@@ -1,0 +1,17 @@
+#!/bin/zsh
+set -euo pipefail
+
+script_dir=${0:A:h}
+project_root=${script_dir:h}
+package_root="$project_root/clients/macos_capture"
+app_root="$package_root/.build/VoxInkCaptureDev.app"
+
+swift build --package-path "$package_root"
+swift_bin_dir=$(swift build --package-path "$package_root" --show-bin-path)
+
+mkdir -p "$app_root/Contents/MacOS"
+install -m 755 "$swift_bin_dir/voxink-capture" "$app_root/Contents/MacOS/voxink-capture"
+install -m 644 "$package_root/Resources/Info.plist" "$app_root/Contents/Info.plist"
+codesign --force --sign - --identifier dev.voxink.capture "$app_root"
+
+echo "Built $app_root"

@@ -4,7 +4,12 @@ from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 
-from voxink_dev.cli import _run_web_ui, build_parser
+from voxink_dev.cli import (
+    _build_capture_plan,
+    _native_capture_command,
+    _run_web_ui,
+    build_parser,
+)
 
 
 class CliParserTests(unittest.TestCase):
@@ -15,6 +20,72 @@ class CliParserTests(unittest.TestCase):
     def test_terminal_interface_can_be_selected_explicitly(self) -> None:
         args = build_parser().parse_args(["--terminal"])
         self.assertFalse(args.web)
+
+    def test_sources_can_be_repeated_for_combined_capture(self) -> None:
+        args = build_parser().parse_args(
+            ["--source", "microphone", "--source", "system"]
+        )
+        plan = _build_capture_plan(args.sources, args.applications)
+        self.assertEqual(("microphone", "system"), plan.modes)
+        self.assertEqual(("microphone", "system"), plan.session_sources)
+        self.assertTrue(plan.uses_native_capture)
+
+    def test_microphone_is_the_default_capture_plan(self) -> None:
+        plan = _build_capture_plan(None, [])
+        self.assertEqual(("microphone",), plan.modes)
+        self.assertFalse(plan.uses_native_capture)
+
+    def test_selected_applications_require_bundle_identifiers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one --app"):
+            _build_capture_plan(["applications"], [])
+
+    def test_application_ids_require_application_capture(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--app requires"):
+            _build_capture_plan(["microphone"], ["com.apple.Safari"])
+
+    def test_all_system_and_selected_applications_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not both"):
+            _build_capture_plan(
+                ["system", "applications"], ["com.apple.Safari"]
+            )
+
+    def test_native_command_carries_endpoint_sources_and_applications(self) -> None:
+        plan = _build_capture_plan(
+            ["microphone", "applications"],
+            ["com.apple.Safari", "us.zoom.xos"],
+        )
+        command = _native_capture_command(
+            Path("/tmp/voxink-capture"),
+            "ws://127.0.0.1:4321/v1/sessions/demo/stream",
+            "demo",
+            plan,
+        )
+        self.assertEqual(
+            [
+                str(Path("/tmp/voxink-capture").resolve()),
+                "--endpoint",
+                "ws://127.0.0.1:4321/v1/sessions/demo/stream",
+                "--session-id",
+                "demo",
+                "--mic",
+                "--app",
+                "com.apple.Safari",
+                "--app",
+                "us.zoom.xos",
+            ],
+            command,
+        )
+
+    def test_all_system_audio_maps_to_native_system_flag(self) -> None:
+        plan = _build_capture_plan(["system"], [])
+        command = _native_capture_command(
+            Path("/tmp/voxink-capture"),
+            "ws://127.0.0.1:4321/v1/sessions/demo/stream",
+            "demo",
+            plan,
+        )
+        self.assertIn("--system-all", command)
+        self.assertNotIn("--mic", command)
 
 
 class WebUiLauncherTests(unittest.TestCase):

@@ -67,6 +67,51 @@ Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down both
 capture and the helper, and the saved transcript path is printed when capture
 exits. The former explicit `--web` spelling remains supported for compatibility.
 
+### Native system and application capture
+
+Build the native capture helper after cloning and whenever its Swift source
+changes:
+
+```sh
+./scripts/build-macos-capture
+```
+
+This creates a background-only development app with the stable identity macOS
+uses for Microphone and Screen & System Audio Recording permissions.
+
+Then the same `voxink-dev` supervisor can run every native source combination:
+
+```sh
+# Show bundle identifiers for currently running applications.
+./scripts/voxink-dev --list-apps
+
+# All system audio.
+./scripts/voxink-dev --source system
+
+# Microphone and all system audio together.
+./scripts/voxink-dev --source microphone --source system
+
+# One or more selected applications.
+./scripts/voxink-dev --source applications \
+  --app com.apple.Safari --app us.zoom.xos
+
+# Microphone and selected applications together.
+./scripts/voxink-dev --source microphone --source applications \
+  --app com.apple.Safari
+```
+
+Native workflows use the Swift floating-caption panel rather than the browser
+recorder. `voxink-dev` supplies the private loopback endpoint and per-launch
+credential, monitors the native capture process and transcription helper, and
+shuts both down on Ctrl-C. macOS requests Microphone and/or Screen & System Audio
+Recording permission when each protected source is first used.
+
+Current target-Mac note: on macOS 26.5.1, a controlled Chrome playback test
+started the authorized ScreenCaptureKit stream but macOS returned zero-filled
+system-audio buffers. The supervisor and source selection are wired; live
+system/application acceptance on this OS remains open and is tracked in
+`REMAINING_WORK.md`.
+
 Run only the startup checks with:
 
 ```sh
@@ -138,9 +183,8 @@ The service must already be running. macOS will request Microphone and Screen &
 System Audio Recording permissions as needed. Selected apps are supplied by
 bundle identifier and may be repeated.
 
-The development CLI is not a signed `.app`; macOS privacy grants are more
-reliable once the library and caption panel are embedded in a signed app using
-the provided plist and entitlements.
+For direct native debugging, build the development app first and run its inner
+executable. The one-command workflow selects that executable automatically.
 
 ## Session and stream protocol
 
