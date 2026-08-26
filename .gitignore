@@ -18,6 +18,7 @@ htmlcov/
 .venv/
 venv/
 env/
+.pnpm-store/
 
 # Python packaging
 build/

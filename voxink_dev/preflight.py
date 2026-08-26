@@ -42,6 +42,7 @@ class PreflightOptions:
     retain_audio: bool = False
     native_capture: Path | None = None
     verify_checksums: bool = True
+    python_capture: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +70,7 @@ def run_preflight(
         )
 
     required_imports = list(SERVICE_IMPORTS)
-    if "microphone" in options.sources:
+    if "microphone" in options.sources and options.python_capture:
         required_imports.extend(MICROPHONE_IMPORTS)
     missing = [name for name in required_imports if not available(name)]
     if missing:

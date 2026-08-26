@@ -9,6 +9,8 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
+import webbrowser
 
 from .preflight import (
     DEFAULT_MODEL_PATH,
@@ -36,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
     parser.add_argument("--session-id")
+    parser.add_argument("--web", action="store_true", help="open the local browser control surface")
     return parser
 
 
@@ -51,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
                 retain_audio=args.retain_audio,
                 native_capture=args.native_capture,
                 verify_checksums=not args.skip_checksums,
+                python_capture=not args.web,
             )
         )
     except PreflightError as exc:
@@ -77,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Helper ready on a private loopback port "
             f"(protocol {health['protocol_version']}, provider {health['provider']})."
         )
+        if args.web:
+            return _run_web_ui(supervisor, health, diagnostics, report.output_root)
         endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
         command = [
             sys.executable,
@@ -121,6 +127,34 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         supervisor.stop()
         diagnostics.close()
+
+
+def _run_web_ui(
+    supervisor: HelperSupervisor,
+    health: dict[str, object],
+    diagnostics: DiagnosticLog,
+    output_root: Path,
+) -> int:
+    if not health.get("ui_available"):
+        raise SupervisorError(
+            "the local UI build is missing; run the frontend build:local script"
+        )
+    fragment = urlencode({"bootstrap": supervisor.ui_bootstrap_secret})
+    url = f"{supervisor.base_url}/ui/#{fragment}"
+    if not webbrowser.open(url):
+        raise SupervisorError("the browser could not be opened")
+    diagnostics.emit("ui.opened", component="ui", port=supervisor.port)
+    print("VoxInk is open in your browser. Press Ctrl-C here when you are finished.")
+    print(f"Transcripts will be saved under: {output_root}")
+    try:
+        while True:
+            helper = supervisor.process
+            if helper is None or helper.poll() is not None:
+                raise SupervisorError("transcription helper exited unexpectedly")
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        print("Stopping VoxInk and finalizing open transcript files…")
+        return 0
 
 
 if __name__ == "__main__":

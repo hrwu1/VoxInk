@@ -31,6 +31,7 @@ def main() -> None:
             output_root=args.output.expanduser().resolve(),
             device=args.device,
             auth_secret=auth_secret,
+            ui_bootstrap_secret=os.environ.get("VOXINK_UI_BOOTSTRAP_SECRET"),
         )
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)

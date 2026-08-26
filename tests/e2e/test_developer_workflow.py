@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.request import Request, urlopen
 
 from websockets.sync.client import connect
 
@@ -24,6 +25,17 @@ class DeveloperWorkflowTests(unittest.TestCase):
             )
             supervisor.start()
             try:
+                with urlopen(f"{supervisor.base_url}/ui/", timeout=2) as response:
+                    self.assertIn(b"VoxInk", response.read())
+                request = Request(
+                    f"{supervisor.base_url}/v1/ui/bootstrap",
+                    method="POST",
+                    headers={"X-VoxInk-Bootstrap": supervisor.ui_bootstrap_secret},
+                )
+                with urlopen(request, timeout=2) as response:
+                    browser_token = json.load(response)["token"]
+                self.assertEqual(supervisor.auth_secret, browser_token)
+
                 session_id = "supervised-microphone"
                 url = (
                     f"ws://127.0.0.1:{supervisor.port}/v1/sessions/"
@@ -32,7 +44,7 @@ class DeveloperWorkflowTests(unittest.TestCase):
                 with connect(
                     url,
                     additional_headers={
-                        "Authorization": f"Bearer {supervisor.auth_secret}"
+                        "Authorization": f"Bearer {browser_token}"
                     },
                 ) as websocket:
                     websocket.send(

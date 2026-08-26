@@ -38,13 +38,23 @@ export function useVoxInkRecorder() {
 
   useEffect(() => {
     const values = new URLSearchParams(window.location.hash.slice(1));
-    const endpoint = values.get('endpoint');
-    const token = values.get('token');
-    if (endpoint && token) {
-      setLaunch({ endpoint, token });
+    const bootstrap = values.get('bootstrap');
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    if (!bootstrap) return;
+    void fetch('/v1/ui/bootstrap', {
+      method: 'POST',
+      headers: { 'X-VoxInk-Bootstrap': bootstrap },
+      cache: 'no-store',
+    }).then(async (response) => {
+      if (!response.ok) throw new Error('The UI launch link expired. Run voxink-dev --web again.');
+      const payload = await response.json();
+      const endpoint = window.location.origin.replace(/^http/, 'ws');
+      setLaunch({ endpoint, token: payload.token });
       setMessage('Authenticated local helper ready');
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    }
+    }).catch((error) => {
+      setState('failed');
+      setMessage(error instanceof Error ? error.message : 'Cannot authenticate the local UI');
+    });
   }, []);
 
   useEffect(() => {

@@ -52,7 +52,11 @@ def main() -> None:
     if not secret:
         parser.error("VOXINK_AUTH_SECRET is required")
     app = create_app(
-        ServiceSettings(output_root=args.output, auth_secret=secret),
+        ServiceSettings(
+            output_root=args.output,
+            auth_secret=secret,
+            ui_bootstrap_secret=os.environ.get("VOXINK_UI_BOOTSTRAP_SECRET"),
+        ),
         provider=FakeProvider(),
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")

@@ -45,6 +45,7 @@ class HelperSupervisor:
         self.process_factory = process_factory
         self.diagnostics = diagnostics
         self.auth_secret = secrets.token_urlsafe(32)
+        self.ui_bootstrap_secret = secrets.token_urlsafe(24)
         self.port: int | None = None
         self.process: subprocess.Popen[str] | None = None
 
@@ -60,6 +61,7 @@ class HelperSupervisor:
         self.port = _unused_loopback_port()
         environment = os.environ.copy()
         environment["VOXINK_AUTH_SECRET"] = self.auth_secret
+        environment["VOXINK_UI_BOOTSTRAP_SECRET"] = self.ui_bootstrap_secret
         command = [
             sys.executable,
             "-m",

@@ -54,6 +54,18 @@ controls. Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down
 both capture and the helper. Finalized transcripts default to
 `~/Documents/VoxInk/`, and the saved path is printed when capture exits.
 
+For the local browser interface, run:
+
+```sh
+./scripts/voxink-dev --web --device cpu
+```
+
+VoxInk opens a private recording console in the default browser. The page asks
+for microphone permission, streams audio only to the supervised loopback
+helper, displays finalized captions, and removes its one-time launch token from
+the browser address immediately. Ctrl-C in the launching Terminal closes the
+helper and finalizes open transcript files.
+
 Run only the startup checks with:
 
 ```sh

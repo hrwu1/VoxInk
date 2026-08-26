@@ -195,6 +195,31 @@ class ApiTests(unittest.TestCase):
                 websocket.send_json(_start_message("browser-private", "microphone"))
                 self.assertEqual("stream.ready", websocket.receive_json()["type"])
 
+    def test_ui_bootstrap_exchanges_once_for_launch_credential(self) -> None:
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="launch-secret",
+                ui_bootstrap_secret="one-time-bootstrap",
+            ),
+            provider=self.provider,
+        )
+        with TestClient(app) as client:
+            self.assertEqual(401, client.post("/v1/ui/bootstrap").status_code)
+            response = client.post(
+                "/v1/ui/bootstrap",
+                headers={"X-VoxInk-Bootstrap": "one-time-bootstrap"},
+            )
+            self.assertEqual(200, response.status_code)
+            self.assertEqual({"token": "launch-secret"}, response.json())
+            self.assertEqual(
+                401,
+                client.post(
+                    "/v1/ui/bootstrap",
+                    headers={"X-VoxInk-Bootstrap": "one-time-bootstrap"},
+                ).status_code,
+            )
+
     def test_manual_session_lifecycle(self) -> None:
         created = self.client.post(
             "/v1/sessions",

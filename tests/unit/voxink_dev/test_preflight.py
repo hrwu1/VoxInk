@@ -68,6 +68,20 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(PreflightError, "native capture helper"):
             run_preflight(options, import_available=lambda _: True)
 
+    @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
+    def test_browser_capture_does_not_require_python_audio_packages(self) -> None:
+        options = PreflightOptions(
+            model_path=self.model,
+            output_root=self.root / "output",
+            state_root=self.root / "state",
+            python_capture=False,
+        )
+        report = run_preflight(
+            options,
+            import_available=lambda name: name not in {"sounddevice", "websockets"},
+        )
+        self.assertEqual(1, report.checked_files)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +50,7 @@ class ServiceSettings:
     device: str = "auto"
     max_new_tokens: int = 512
     auth_secret: str | None = None
+    ui_bootstrap_secret: str | None = None
 
 
 class SessionCreateRequest(BaseModel):
@@ -92,6 +94,7 @@ class ServiceRuntime:
         self.paused_streams: dict[str, set[str]] = {}
         self.dedup = OverlapDeduplicator()
         self.stream_ends: dict[tuple[str, str], int] = {}
+        self.ui_bootstrap_secret = settings.ui_bootstrap_secret
 
 
 @dataclass
@@ -153,8 +156,11 @@ def create_app(
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        if request.url.path == "/health" or _authorized(
-            request.headers.get("authorization"), runtime.settings.auth_secret
+        public_ui = request.url.path == "/ui" or request.url.path.startswith("/ui/")
+        if (
+            public_ui
+            or request.url.path in {"/health", "/v1/ui/bootstrap"}
+            or _authorized(request.headers.get("authorization"), runtime.settings.auth_secret)
         ):
             return await call_next(request)
         return JSONResponse(status_code=401, content={"detail": "invalid local service credential"})
@@ -170,7 +176,19 @@ def create_app(
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "capabilities": {"partial_results": False, "streaming_audio": True},
+            "ui_available": (PROJECT_ROOT / "frontend" / "static-dist" / "index.html").is_file(),
         }
+
+    @app.post("/v1/ui/bootstrap")
+    async def bootstrap_ui(request: Request) -> dict[str, str]:
+        supplied = request.headers.get("x-voxink-bootstrap")
+        expected = runtime.ui_bootstrap_secret
+        if not supplied or not expected or not secrets.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="invalid or expired UI bootstrap")
+        if runtime.settings.auth_secret is None:
+            raise HTTPException(status_code=503, detail="authenticated helper is unavailable")
+        runtime.ui_bootstrap_secret = None
+        return {"token": runtime.settings.auth_secret}
 
     @app.get("/v1/providers")
     async def providers() -> dict[str, Any]:
@@ -385,6 +403,10 @@ def create_app(
                 _release_stream(runtime, session_id, context.stream_id)
                 runtime.dedup.reset(context.session_id, context.stream_id)
                 runtime.stream_ends.pop((context.session_id, context.stream_id), None)
+
+    ui_root = PROJECT_ROOT / "frontend" / "static-dist"
+    if (ui_root / "index.html").is_file():
+        app.mount("/ui", StaticFiles(directory=ui_root, html=True), name="local-ui")
 
     return app
 

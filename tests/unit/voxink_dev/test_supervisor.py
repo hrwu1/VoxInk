@@ -27,6 +27,7 @@ class SupervisorIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(supervisor.process)
                 self.assertIsNone(supervisor.process.poll())
                 self.assertNotIn(supervisor.auth_secret, " ".join(supervisor.process.args))
+                self.assertNotIn(supervisor.ui_bootstrap_secret, " ".join(supervisor.process.args))
             finally:
                 process = supervisor.process
                 supervisor.stop()
