@@ -1,46 +1,25 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-
-type SessionState = 'ready' | 'recording' | 'paused';
+import { useEffect } from 'react';
+import { useVoxInkRecorder } from './use-voxink-recorder';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
 
-const demoCaptions = [
-  { time: '00:03', text: 'VoxInk is listening locally.' },
-  { time: '00:08', text: 'Your words appear here as they are finalized.' },
-];
-
 export default function Home() {
-  const [state, setState] = useState<SessionState>('ready');
-  const [seconds, setSeconds] = useState(0);
-  const [captions, setCaptions] = useState(demoCaptions);
+  const recorder = useVoxInkRecorder();
+  const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
 
   useEffect(() => {
-    if (state !== 'recording') return;
-    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [state]);
-
-  const elapsed = useMemo(() => {
-    const minutes = Math.floor(seconds / 60).toString().padStart(2, '0');
-    const remainder = (seconds % 60).toString().padStart(2, '0');
-    return `${minutes}:${remainder}`;
-  }, [seconds]);
-
-  function toggleRecording() {
-    if (state === 'ready') {
-      setSeconds(0);
-      setCaptions([]);
-      setState('recording');
-      return;
+    function handleShortcut(event: KeyboardEvent) {
+      if (event.code !== 'Space' || ['INPUT', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement).tagName)) return;
+      event.preventDefault();
+      if (state === 'ready' || state === 'failed') void recorder.start();
+      else if (state === 'recording') recorder.pause();
+      else if (state === 'paused') recorder.resume();
     }
-    setState(state === 'recording' ? 'paused' : 'recording');
-  }
-
-  function stop() {
-    setState('ready');
-  }
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [recorder, state]);
 
   return (
     <main className="app-shell">
@@ -49,7 +28,7 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span>VoxInk</span>
         </div>
-        <div className="privacy-pill"><span /> Local only</div>
+        <div className="privacy-pill"><span /> {isLive ? 'Local helper' : 'UI preview'}</div>
         <button className="icon-button" aria-label="Open settings">⌘</button>
       </nav>
 
@@ -61,7 +40,7 @@ export default function Home() {
           </div>
           <div className={`connection-state ${state}`}>
             <span />
-            {state === 'ready' ? 'Ready to record' : state === 'paused' ? 'Session paused' : 'Listening now'}
+            {state === 'ready' ? (isLive ? 'Ready to record' : 'Preview ready') : state === 'paused' ? 'Session paused' : state === 'failed' ? 'Needs attention' : state === 'stopping' ? 'Finalizing' : state === 'starting' ? 'Starting' : 'Listening now'}
           </div>
         </header>
 
@@ -90,10 +69,14 @@ export default function Home() {
             </div>
 
             <div className="control-row">
-              <button className="secondary-control" onClick={stop} disabled={state === 'ready'}>Stop</button>
-              <button className={`record-control ${state}`} onClick={toggleRecording}>
+              <button className="secondary-control" onClick={() => void recorder.stop()} disabled={state === 'ready' || state === 'failed'}>Stop</button>
+              <button className={`record-control ${state}`} disabled={state === 'starting' || state === 'stopping'} onClick={() => {
+                if (state === 'ready' || state === 'failed') void recorder.start();
+                else if (state === 'recording') recorder.pause();
+                else if (state === 'paused') recorder.resume();
+              }}>
                 <span aria-hidden="true">{state === 'recording' ? 'Ⅱ' : '●'}</span>
-                {state === 'ready' ? 'Start recording' : state === 'paused' ? 'Resume' : 'Pause'}
+                {state === 'ready' || state === 'failed' ? 'Start recording' : state === 'paused' ? 'Resume' : state === 'starting' ? 'Connecting…' : state === 'stopping' ? 'Finalizing…' : 'Pause'}
               </button>
               <button className="secondary-control" disabled>Mark</button>
             </div>
@@ -107,21 +90,21 @@ export default function Home() {
             </div>
             <div className="caption-list" aria-live="polite">
               {captions.length ? captions.map((caption) => (
-                <article className="caption-line" key={`${caption.time}-${caption.text}`}>
-                  <time>{caption.time}</time>
+                <article className="caption-line" key={caption.id}>
+                  <time>{formatTime(caption.startMs)}</time>
                   <div><span className="speaker-label">MIC</span><p>{caption.text}</p></div>
                 </article>
               )) : (
                 <div className="empty-captions">
                   <span className="listening-orbit"><i /></span>
-                  <strong>{state === 'recording' ? 'Listening…' : state === 'paused' ? 'Paused' : 'Your captions will appear here'}</strong>
-                  <p>Finalized words are saved locally as Markdown.</p>
+                  <strong>{state === 'recording' ? 'Listening…' : state === 'paused' ? 'Paused' : state === 'failed' ? 'Connection failed' : 'Your captions will appear here'}</strong>
+                  <p>{message}. Finalized words are saved locally as Markdown.</p>
                 </div>
               )}
             </div>
             <footer className="caption-footer">
-              <span><i /> 0 dropped frames</span>
-              <button>Open transcript folder ↗</button>
+              <span><i /> {droppedFrames} dropped {droppedFrames === 1 ? 'frame' : 'frames'}</span>
+              <span>{message}</span>
             </footer>
           </aside>
         </div>
@@ -133,4 +116,9 @@ export default function Home() {
       </section>
     </main>
   );
+}
+
+function formatTime(milliseconds: number) {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  return `${Math.floor(totalSeconds / 60).toString().padStart(2, '0')}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
 }

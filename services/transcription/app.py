@@ -262,10 +262,13 @@ def create_app(
 
     @app.websocket("/v1/sessions/{session_id}/stream")
     async def stream_audio(websocket: WebSocket, session_id: str) -> None:
-        if not _authorized(websocket.headers.get("authorization"), runtime.settings.auth_secret):
+        websocket_protocol = _websocket_auth_protocol(
+            websocket.headers.get("sec-websocket-protocol"), runtime.settings.auth_secret
+        )
+        if not _authorized(websocket.headers.get("authorization"), runtime.settings.auth_secret) and websocket_protocol is None:
             await websocket.close(code=4401, reason="invalid local service credential")
             return
-        await websocket.accept()
+        await websocket.accept(subprotocol=websocket_protocol)
         pending_header: dict[str, Any] | None = None
         context: _StreamContext | None = None
         try:
@@ -395,6 +398,17 @@ def _authorized(header: str | None, secret: str | None) -> bool:
         return False
     supplied = header[len(prefix) :]
     return bool(supplied) and secrets.compare_digest(supplied, secret)
+
+
+def _websocket_auth_protocol(header: str | None, secret: str | None) -> str | None:
+    """Authenticate browser WebSockets without putting secrets in their URL."""
+    if secret is None:
+        return None
+    prefix = "voxink.auth."
+    for requested in (item.strip() for item in (header or "").split(",")):
+        if requested.startswith(prefix) and secrets.compare_digest(requested[len(prefix) :], secret):
+            return requested
+    return None
 
 
 def _open_stream(

@@ -186,6 +186,15 @@ class ApiTests(unittest.TestCase):
                 websocket.send_json(_start_message("private", "microphone"))
                 self.assertEqual("stream.ready", websocket.receive_json()["type"])
 
+            protocol = "voxink.auth.correct-secret"
+            with client.websocket_connect(
+                "/v1/sessions/browser-private/stream",
+                subprotocols=[protocol],
+            ) as websocket:
+                self.assertEqual(protocol, websocket.accepted_subprotocol)
+                websocket.send_json(_start_message("browser-private", "microphone"))
+                self.assertEqual("stream.ready", websocket.receive_json()["type"])
+
     def test_manual_session_lifecycle(self) -> None:
         created = self.client.post(
             "/v1/sessions",
