@@ -98,6 +98,32 @@ class ChunkerTests(unittest.TestCase):
         self.assertEqual(len(second), 1)
         self.assertEqual(second[0].start_sample, first[0].end_sample - 20)
 
+    def test_reset_restarts_the_sample_clock(self) -> None:
+        config = self.config()
+        chunker = EnergyVadChunker(config)
+        frame = config.samples_per_frame
+        chunker.feed(pcm_frame(1000, frame) * 5)
+        self.assertEqual(chunker.next_sample_ms, 50.0)
+
+        chunker.reset()
+
+        # Paused wall time is not audio: leaving the clock advanced made every
+        # later chunk report a timestamp inflated by all pre-pause audio.
+        self.assertEqual(chunker.next_sample, 0)
+        self.assertEqual(chunker.next_sample_ms, 0.0)
+        chunks = chunker.feed(
+            pcm_frame(0, frame) + pcm_frame(1000, frame) * 2 + pcm_frame(0, frame) * 3
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].start_ms(config.sample_rate_hz), 0.0)
+
+    def test_sample_clock_tracks_fed_audio(self) -> None:
+        config = self.config()
+        chunker = EnergyVadChunker(config)
+        self.assertEqual(chunker.next_sample_ms, 0.0)
+        chunker.feed(pcm_frame(0, config.samples_per_frame) * 3)
+        self.assertEqual(chunker.next_sample_ms, 30.0)
+
     def test_accepts_arbitrary_input_boundaries(self) -> None:
         config = self.config(pre_roll_ms=0)
         chunker = EnergyVadChunker(config)

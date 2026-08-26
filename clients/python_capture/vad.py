@@ -116,6 +116,16 @@ class EnergyVadChunker:
     def active(self) -> bool:
         return bool(self._active)
 
+    @property
+    def next_sample(self) -> int:
+        """Sample index the next fed frame will occupy."""
+        return self._next_sample
+
+    @property
+    def next_sample_ms(self) -> float:
+        """Position of the sample clock, for anchoring chunks to capture time."""
+        return self._next_sample * 1000.0 / self.config.sample_rate_hz
+
     def feed(self, pcm: bytes) -> list[AudioChunk]:
         """Consume arbitrary-length PCM and return zero or more final chunks."""
         self._pending.extend(pcm)
@@ -142,12 +152,19 @@ class EnergyVadChunker:
         return chunks
 
     def reset(self) -> None:
-        """Discard buffered audio, for example when capture is paused."""
+        """Discard buffered audio and restart the sample clock.
+
+        Used when capture pauses. The clock restarts at zero because paused
+        wall time is not audio: callers re-anchor the next chunk to the capture
+        timeline instead of letting pre-pause samples inflate every later
+        timestamp.
+        """
         self._pending.clear()
         self._active.clear()
         self._pre_roll.clear()
         self._speech_frames = 0
         self._trailing_silence_frames = 0
+        self._next_sample = 0
 
     def _feed_frame(self, frame: bytes) -> list[AudioChunk]:
         start_sample = self._next_sample

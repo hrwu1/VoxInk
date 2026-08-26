@@ -114,6 +114,12 @@ class SessionConfig:
             object.__setattr__(self, "output_directory", Path(self.output_directory))
         if not self.audio_saved and self.save_combined_audio:
             raise ValueError("combined audio cannot be saved when audio_saved is false")
+        # Recording every source and then discarding both the separate and the
+        # combined tracks would burn disk for nothing, so reject it up front.
+        if self.audio_saved and not (self.save_separate_audio or self.save_combined_audio):
+            raise ValueError(
+                "audio_saved requires save_separate_audio, save_combined_audio, or both"
+            )
 
 
 @dataclass(frozen=True)

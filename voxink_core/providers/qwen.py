@@ -43,6 +43,10 @@ class QwenLocalProvider:
         self._model_loader = model_loader
         self._model: Any = None
         self._load_lock = asyncio.Lock()
+        # One model is shared by every source stream, so inference must be
+        # serialized: the model is built with max_inference_batch_size=1 and
+        # concurrent generate calls would corrupt its state.
+        self._inference_lock = asyncio.Lock()
 
     @property
     def is_loaded(self) -> bool:
@@ -75,13 +79,18 @@ class QwenLocalProvider:
         else:
             raise TypeError("audio must be a path or bytes")
 
-        result = await asyncio.to_thread(
-            self._model.transcribe,
-            audio=audio_value,
-            language=_qwen_language(options.language),
-        )
-        if inspect.isawaitable(result):
-            result = await result
+        # The load lock is released by now, so waiting here cannot deadlock it.
+        async with self._inference_lock:
+            model = self._model
+            if model is None:
+                raise RuntimeError("the model was unloaded before transcription began")
+            result = await asyncio.to_thread(
+                model.transcribe,
+                audio=audio_value,
+                language=_qwen_language(options.language),
+            )
+            if inspect.isawaitable(result):
+                result = await result
         if not result:
             raise RuntimeError("Qwen returned no transcription result")
         first = result[0]

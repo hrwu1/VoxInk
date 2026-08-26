@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from services.transcription.app import ServiceSettings, create_app
-from voxink_core.models import TranscriptEvent
+from clients.python_capture.vad import EnergyVadChunker, VadConfig
+from services.transcription.app import (
+    ServiceSettings,
+    _finalize_audio,
+    _StreamContext,
+    create_app,
+)
+from voxink_core.models import SessionConfig, Source, TranscriptEvent
+from voxink_core.persistence.audio import AudioRetentionWriter
 
 
 class FakeProvider:
@@ -42,6 +50,81 @@ class FakeProvider:
 
     async def unload(self) -> None:
         self.is_loaded = False
+
+
+class ScriptedProvider(FakeProvider):
+    """Return prepared phrases so overlap-induced repetition is observable."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__()
+        self.texts = list(texts)
+
+    async def transcribe_file(self, audio, options):
+        event = await super().transcribe_file(audio, options)
+        text = self.texts.pop(0) if self.texts else ""
+        return replace(event, text=text)
+
+
+def _start_message(
+    session_id: str,
+    source: str,
+    *,
+    sources: list[str] | None = None,
+    vad: dict | None = None,
+    language: str | None = None,
+) -> dict:
+    message = {
+        "type": "stream.start",
+        "schema_version": 1,
+        "session_id": session_id,
+        "session_sources": sources or [source],
+        "stream_id": f"{source}-1",
+        "source": source,
+        "audio": {
+            "encoding": "pcm_s16le",
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "frame_duration_ms": 20,
+        },
+        "vad": vad
+        or {
+            "threshold_rms": 500,
+            "min_speech_duration_ms": 20,
+            "silence_duration_ms": 40,
+            "pre_roll_ms": 0,
+            "overlap_ms": 0,
+        },
+    }
+    if language is not None:
+        message["language"] = language
+    return message
+
+
+VOICED = int(1000).to_bytes(2, "little", signed=True) * 320
+SILENCE = bytes(640)
+
+
+def _send_frame(websocket, source: str, pcm: bytes, start_ms: int) -> dict:
+    websocket.send_json(
+        {
+            "type": "audio.frame",
+            "sequence": start_ms // 20,
+            "stream_id": f"{source}-1",
+            "start_ms": start_ms,
+            "duration_ms": 20,
+            "byte_length": len(pcm),
+        }
+    )
+    websocket.send_bytes(pcm)
+    return websocket.receive_json()
+
+
+def _utterance(websocket, source: str, start_ms: int) -> list[dict]:
+    """Send one voiced frame plus enough silence to finalize it."""
+    responses = []
+    for offset, pcm in enumerate((VOICED, SILENCE, SILENCE)):
+        responses.append(_send_frame(websocket, source, pcm, start_ms + offset * 20))
+    return responses
 
 
 class ApiTests(unittest.TestCase):
@@ -290,5 +373,288 @@ class ApiTests(unittest.TestCase):
         self.assertEqual("stopped", self.client.get("/v1/sessions/dual").json()["state"])
 
 
+class StreamTimelineTests(unittest.TestCase):
+    """Chunk timestamps must follow the capture clock the client reports."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        self.provider = FakeProvider()
+        self.client = TestClient(
+            create_app(ServiceSettings(output_root=self.output_root), provider=self.provider)
+        )
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _events(self, responses: list[dict]) -> list[dict]:
+        return [item["event"] for item in responses if item["type"] == "transcript.final"]
+
+    def test_late_joining_stream_shares_the_session_timeline(self) -> None:
+        sources = ["microphone", "system"]
+        with self.client.websocket_connect("/v1/sessions/dual/stream") as mic:
+            mic.send_json(_start_message("dual", "microphone", sources=sources))
+            self.assertEqual("stream.ready", mic.receive_json()["type"])
+            mic_events = self._events(_utterance(mic, "microphone", 0))
+
+            # The system source joins thirty seconds into the same session.
+            with self.client.websocket_connect("/v1/sessions/dual/stream") as system:
+                system.send_json(_start_message("dual", "system", sources=sources))
+                self.assertEqual("stream.ready", system.receive_json()["type"])
+                system_events = self._events(_utterance(system, "system", 30_000))
+                system.send_json({"type": "stream.stop", "stream_id": "system-1"})
+                self.assertEqual("stream.stopped", system.receive_json()["type"])
+            mic.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", mic.receive_json()["type"])
+
+        self.assertEqual(0, mic_events[0]["start_ms"])
+        self.assertEqual(
+            30_000,
+            system_events[0]["start_ms"],
+            "a stream joining late must not restart the transcript clock at zero",
+        )
+        transcript = next((self.output_root / "dual").glob("transcript-part-*.md")).read_text()
+        self.assertIn("[00:00:00.000", transcript)
+        self.assertIn("[00:00:30.000", transcript)
+
+    def test_timeline_survives_pause_and_resume(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/paused/stream") as websocket:
+            websocket.send_json(_start_message("paused", "microphone"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            _utterance(websocket, "microphone", 0)
+
+            websocket.send_json({"type": "stream.pause", "stream_id": "microphone-1"})
+            self.assertEqual("stream.paused", websocket.receive_json()["type"])
+            websocket.send_json(
+                {"type": "stream.resume", "stream_id": "microphone-1", "at_ms": 60_000}
+            )
+            self.assertEqual("stream.resumed", websocket.receive_json()["type"])
+
+            # Sixty seconds of paused wall time must not be added twice.
+            events = self._events(_utterance(websocket, "microphone", 60_000))
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+
+        self.assertEqual(60_000, events[0]["start_ms"])
+
+    def test_audio_while_paused_is_ignored_without_dropping_the_stream(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/gated/stream") as websocket:
+            websocket.send_json(_start_message("gated", "microphone"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            websocket.send_json({"type": "stream.pause", "stream_id": "microphone-1"})
+            self.assertEqual("stream.paused", websocket.receive_json()["type"])
+
+            ignored = _utterance(websocket, "microphone", 0)
+            self.assertTrue(all(item["type"] == "audio.ignored" for item in ignored), ignored)
+            self.assertEqual(0, self.provider.calls)
+
+            # The connection is still healthy and resumes transcribing.
+            websocket.send_json(
+                {"type": "stream.resume", "stream_id": "microphone-1", "at_ms": 1_000}
+            )
+            self.assertEqual("stream.resumed", websocket.receive_json()["type"])
+            events = self._events(_utterance(websocket, "microphone", 1_000))
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+
+        self.assertEqual(1, len(events))
+        transcript = next((self.output_root / "gated").glob("transcript-part-*.md")).read_text()
+        self.assertEqual(1, transcript.count("Local transcription works."))
+
+    def test_both_streams_must_pause_before_the_shared_session_pauses(self) -> None:
+        sources = ["microphone", "system"]
+        with self.client.websocket_connect("/v1/sessions/shared/stream") as mic:
+            mic.send_json(_start_message("shared", "microphone", sources=sources))
+            self.assertEqual("stream.ready", mic.receive_json()["type"])
+            with self.client.websocket_connect("/v1/sessions/shared/stream") as system:
+                system.send_json(_start_message("shared", "system", sources=sources))
+                self.assertEqual("stream.ready", system.receive_json()["type"])
+
+                mic.send_json({"type": "stream.pause", "stream_id": "microphone-1"})
+                self.assertEqual("running", mic.receive_json()["session_state"])
+
+                # The second pause used to raise InvalidSessionTransition.
+                system.send_json({"type": "stream.pause", "stream_id": "system-1"})
+                self.assertEqual("paused", system.receive_json()["session_state"])
+
+                # Either source resuming reopens the shared session.
+                system.send_json({"type": "stream.resume", "stream_id": "system-1"})
+                self.assertEqual("running", system.receive_json()["session_state"])
+
+                system.send_json({"type": "stream.stop", "stream_id": "system-1"})
+                self.assertEqual("stream.stopped", system.receive_json()["type"])
+            mic.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", mic.receive_json()["type"])
+        self.assertEqual("stopped", self.client.get("/v1/sessions/shared").json()["state"])
+
+    def test_manual_language_override_reaches_the_provider(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/zh/stream") as websocket:
+            websocket.send_json(_start_message("zh", "microphone", language="zh"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            events = self._events(_utterance(websocket, "microphone", 0))
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+        self.assertEqual("zh", events[0]["language"])
+
+
+class OverlapDeduplicationTests(unittest.TestCase):
+    """Chunk overlap must not put repeated phrases into the transcript."""
+
+    def test_repeated_overlap_text_is_removed_before_persistence(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output_root = Path(temporary.name) / "outputs"
+        provider = ScriptedProvider(
+            ["we should ship the beta", "the beta on Friday"]
+        )
+        client = TestClient(
+            create_app(ServiceSettings(output_root=output_root), provider=provider)
+        )
+        self.addCleanup(client.close)
+
+        overlapping = {
+            "threshold_rms": 500,
+            "min_speech_duration_ms": 20,
+            "silence_duration_ms": 40,
+            "pre_roll_ms": 0,
+            "overlap_ms": 40,
+        }
+        with client.websocket_connect("/v1/sessions/overlap/stream") as websocket:
+            websocket.send_json(
+                _start_message("overlap", "microphone", vad=overlapping)
+            )
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            texts = []
+            for index in range(2):
+                # Contiguous capture time: chunk two starts inside chunk one's
+                # range, which is exactly the overlap the chunker introduces.
+                for item in _utterance(websocket, "microphone", index * 60):
+                    if item["type"] == "transcript.final":
+                        texts.append(item["event"]["text"])
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+
+        self.assertEqual(["we should ship the beta", "on Friday"], texts)
+        transcript = next((output_root / "overlap").glob("transcript-part-*.md")).read_text()
+        self.assertEqual(1, transcript.count("the beta"))
+
+
+class RuntimeGuardTests(unittest.TestCase):
+    def test_finalizing_audio_twice_never_overwrites_or_raises(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output_root = Path(temporary.name) / "outputs"
+        app = create_app(ServiceSettings(output_root=output_root), provider=FakeProvider())
+        runtime = app.state.runtime
+
+        session = runtime.sessions.create(
+            SessionConfig(
+                session_id="repeat",
+                sources=(Source.SYSTEM,),
+                audio_saved=True,
+                save_combined_audio=True,
+            )
+        )
+        session.start()
+        writer = AudioRetentionWriter(output_root / "repeat")
+        writer.append_pcm(Source.SYSTEM, bytes(640), start_ms=0)
+        runtime.audio_writers["repeat"] = writer
+        _finalize_audio(runtime, session)
+        combined = output_root / "repeat" / "combined-part-001.wav"
+        self.assertTrue(combined.is_file())
+        original = combined.read_bytes()
+
+        # A recovered session finalizes again; existing audio must survive.
+        runtime.audio_writers["repeat"] = writer
+        _finalize_audio(runtime, session)
+        self.assertEqual(original, combined.read_bytes())
+
+    def test_lag_is_reported_only_after_a_full_window_of_slow_work(self) -> None:
+        context = _StreamContext(
+            session_id="s",
+            start={},
+            stream_id="microphone-1",
+            source=Source.MICROPHONE,
+            chunker=EnergyVadChunker(VadConfig()),
+            sample_rate=16000,
+        )
+        self.assertIsNone(context.record_work(1_000.0, 4_000.0), "one slow chunk is not lag")
+        self.assertIsNone(context.record_work(2_000.0, 8_000.0))
+        factor = context.record_work(3_000.0, 12_000.0)
+        self.assertIsNotNone(factor)
+        self.assertAlmostEqual(4.0, factor)
+        # The window resets, so keeping up again stops the warnings.
+        self.assertIsNone(context.record_work(6_000.0, 600.0))
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_shutdown_closes_sessions_left_running(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output_root = Path(temporary.name) / "outputs"
+        app = create_app(ServiceSettings(output_root=output_root), provider=FakeProvider())
+
+        with TestClient(app) as client:
+            client.post(
+                "/v1/transcriptions",
+                data={"session_id": "batch", "source": "microphone"},
+                files={"file": ("a.wav", b"fake-wave-data", "audio/wav")},
+            )
+            self.assertEqual("running", client.get("/v1/sessions/batch").json()["state"])
+
+        transcript = next((output_root / "batch").glob("transcript-part-*.md")).read_text()
+        self.assertIn("voxink-part-status: complete", transcript)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamSessionErrorTests(unittest.TestCase):
+    """A stream that cannot join its session must say why, not just drop."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=FakeProvider()
+        )
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _start(self, stream_id: str, source: str) -> dict:
+        return {
+            "type": "stream.start",
+            "schema_version": 1,
+            "session_id": "closed",
+            "stream_id": stream_id,
+            "source": source,
+            "audio": {"encoding": "pcm_s16le", "sample_rate_hz": 16_000, "channels": 1},
+            "stream_mode": "frames",
+        }
+
+    def test_joining_a_stopped_session_reports_a_readable_error(self) -> None:
+        self.client.post("/v1/sessions", json={"session_id": "closed"})
+        self.client.post("/v1/sessions/closed/start")
+        self.client.post("/v1/sessions/closed/stop")
+        with self.client.websocket_connect("/v1/sessions/closed/stream") as websocket:
+            websocket.send_json(self._start("microphone-1", "microphone"))
+            message = websocket.receive_json()
+        self.assertEqual("error", message["type"])
+        self.assertEqual("session_unavailable", message["code"])
+        self.assertIn("stopped", message["message"])
+
+    def test_a_source_outside_the_session_reports_a_readable_error(self) -> None:
+        self.client.post(
+            "/v1/sessions", json={"session_id": "closed", "sources": ["microphone"]}
+        )
+        with self.client.websocket_connect("/v1/sessions/closed/stream") as websocket:
+            websocket.send_json(self._start("system-1", "system"))
+            message = websocket.receive_json()
+        self.assertEqual("error", message["type"])
+        self.assertEqual("session_unavailable", message["code"])
+        self.assertIn("system", message["message"])

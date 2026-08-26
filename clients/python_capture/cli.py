@@ -25,6 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="vad-chunks",
         help="vad-chunks transcribes live; frames is reserved for server-side VAD",
     )
+    parser.add_argument(
+        "--language",
+        choices=("en", "zh"),
+        default=None,
+        help="force a language; omit for automatic detection",
+    )
     parser.add_argument("--vad-threshold", type=float, default=500.0)
     parser.add_argument("--silence-ms", type=int, default=700)
     parser.add_argument("--min-speech-ms", type=int, default=200)
@@ -59,6 +65,7 @@ async def run(args: argparse.Namespace) -> int:
             frame_duration_ms=args.frame_ms,
             device=device,
             stream_mode=args.stream_mode,
+            language=args.language,
             vad=vad,
         )
     )

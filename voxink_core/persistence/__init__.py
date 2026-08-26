@@ -1,5 +1,6 @@
-"""Durable transcript persistence."""
+"""Durable transcript and audio persistence."""
 
+from .audio import AudioRetentionWriter
 from .markdown import MarkdownTranscriptWriter
 
-__all__ = ["MarkdownTranscriptWriter"]
+__all__ = ["AudioRetentionWriter", "MarkdownTranscriptWriter"]

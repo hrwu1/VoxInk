@@ -36,6 +36,31 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SessionConfig("s", (Source.SYSTEM, Source.SYSTEM))
 
+    def test_audio_retention_combinations_are_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            SessionConfig("s", (Source.MICROPHONE,), save_combined_audio=True)
+        # Recording every track and then discarding all of them is rejected.
+        with self.assertRaises(ValueError):
+            SessionConfig(
+                "s",
+                (Source.MICROPHONE,),
+                audio_saved=True,
+                save_separate_audio=False,
+                save_combined_audio=False,
+            )
+        for separate, combined in ((True, False), (False, True), (True, True)):
+            with self.subTest(separate=separate, combined=combined):
+                config = SessionConfig(
+                    "s",
+                    (Source.MICROPHONE,),
+                    audio_saved=True,
+                    save_separate_audio=separate,
+                    save_combined_audio=combined,
+                )
+                self.assertTrue(config.audio_saved)
+        # Retention off keeps the defaults valid.
+        self.assertFalse(SessionConfig("s", (Source.MICROPHONE,)).audio_saved)
+
     def test_session_id_cannot_escape_output_root(self) -> None:
         for value in ("../escape", "..", ".", "bad\\path"):
             with self.subTest(value=value), self.assertRaises(ValueError):

@@ -50,9 +50,12 @@ class CaptureConfig:
     device: str | int | None = None
     queue_frames: int = 500
     stream_mode: str = "vad-chunks"
+    language: str | None = None
     vad: VadConfig = VadConfig()
 
     def __post_init__(self) -> None:
+        if self.language is not None and self.language not in {"en", "zh"}:
+            raise ValueError("language must be 'en', 'zh', or omitted for automatic detection")
         if self.source != "microphone":
             raise ValueError("the Python capture client currently supports microphone only")
         if self.stream_mode not in {"frames", "vad-chunks"}:
@@ -240,7 +243,7 @@ class MicrophoneCaptureClient:
                 print(f"WebSocket receiver stopped: {exc}")
 
     def _start_message(self) -> dict[str, Any]:
-        return {
+        message: dict[str, Any] = {
             "type": "stream.start",
             "schema_version": 1,
             "session_id": self.config.session_id,
@@ -257,6 +260,10 @@ class MicrophoneCaptureClient:
             "stream_mode": self.config.stream_mode,
             "vad": asdict(self.config.vad),
         }
+        if self.config.language is not None:
+            # Omitted entirely when unset so the service keeps automatic detection.
+            message["language"] = self.config.language
+        return message
 
     async def _send_json(self, message: dict[str, Any]) -> None:
         await self._websocket.send(json.dumps(message, separators=(",", ":")))

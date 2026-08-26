@@ -22,6 +22,9 @@ The default endpoint is
 `ws://127.0.0.1:8765/v1/sessions/{session_id}/stream`. Use `--url` to override
 it. Run `python -m clients.python_capture --help` for VAD and device settings.
 
+Language defaults to automatic detection. `--language en` or `--language zh`
+sends a manual override in `stream.start`; omitting the flag omits the field.
+
 `frames` mode has the lowest latency and leaves utterance formation to the
 service. `vad-chunks` uses the experimental client-side energy VAD, finalizing
 after 700 ms of silence or 15 seconds. It includes 200 ms of pre-roll and
@@ -48,9 +51,13 @@ The client begins with a JSON text message:
   "device": {"id": null, "name": null},
   "client": {"name": "voxink-python-capture", "version": "0.1.0"},
   "stream_mode": "frames",
-  "vad": {}
+  "vad": {},
+  "language": "zh"
 }
 ```
+
+`language` is optional. Omit it for automatic detection; `en` and `zh` force a
+language for every chunk on the stream.
 
 Each binary message is immediately preceded by one JSON text header. The
 binary payload is headerless signed 16-bit little-endian mono PCM and its size
@@ -75,8 +82,12 @@ Local-VAD mode uses `audio.chunk` with `start_ms`, `end_ms`, `speech_ms`,
 `max_duration`, `pause`, or `stop`).
 
 `start_ms` and `end_ms` are relative to session start and therefore retain
-time spent paused; `captured_at_ns` is the local monotonic clock reading and is
-included for diagnostics and precise ordering only.
+time spent paused. In `frames` mode the service anchors its own voice-activity
+chunks to the `start_ms` of the frames it receives, so these values define the
+session timeline: they are what keeps a stream that joins late, pauses, or drops
+frames aligned with the other source instead of restarting at zero.
+`captured_at_ns` is the local monotonic clock reading and is included for
+diagnostics and precise ordering only.
 
 Manual controls are JSON text messages:
 
@@ -86,8 +97,34 @@ Manual controls are JSON text messages:
 {"type":"stream.stop","stream_id":"microphone-1","at_ms":5000.0}
 ```
 
-The server may send `stream.ready`, `transcript.partial`, `transcript.final`,
-or `error` JSON events. The client currently prints all server JSON unchanged.
+A session may carry several source streams. It pauses once every active stream
+has paused and resumes as soon as any one of them resumes, so pausing only the
+microphone leaves system capture running. `at_ms` on `stream.resume` is only a
+fallback anchor for clients that do not stamp each frame with `start_ms`.
+
+While a session is paused its audio is refused rather than buffered: each frame
+is answered with `audio.ignored` so a resume cannot replay stale speech onto the
+timeline.
+
+Server messages:
+
+| Message | Meaning |
+| --- | --- |
+| `stream.ready` | `stream.start` accepted |
+| `audio.accepted` | frame consumed, no segment finalized yet |
+| `audio.ignored` | frame discarded, with a `reason` such as `session_paused` |
+| `transcript.final` | a finalized, deduplicated segment |
+| `stream.paused` / `stream.resumed` | control applied, with the resulting `session_state` |
+| `stream.lag` | transcription is slower than capture (`real_time_factor`) |
+| `stream.stopped` | stream released |
+| `error` | `code` and `message`; the stream survives a `transcript_not_stored` error |
+
+Exactly one of `transcript.final`, `audio.accepted`, or `audio.ignored` answers
+each `audio.frame`. Overlapping audio that the model transcribes twice is
+deduplicated before a segment is persisted, so a chunk that repeats only its
+predecessor's overlap is answered with `audio.accepted` and never written.
+
+The client currently prints all server JSON unchanged.
 
 The endpoint must remain bound to `127.0.0.1`; the client is intentionally a
 microphone-only adapter, so system-audio capture can remain in the native macOS

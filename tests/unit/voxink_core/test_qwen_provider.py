@@ -1,4 +1,6 @@
+import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,24 @@ class FakeModel:
     def transcribe(self, **kwargs):
         self.calls.append(kwargs)
         return [SimpleNamespace(text="  Hello, world.  ", language="English")]
+
+
+class BlockingModel:
+    """Record whether two transcriptions were ever inside the model at once."""
+
+    def __init__(self, hold_seconds: float = 0.05) -> None:
+        self.hold_seconds = hold_seconds
+        self.concurrent = 0
+        self.max_concurrent = 0
+
+    def transcribe(self, **kwargs):
+        self.concurrent += 1
+        self.max_concurrent = max(self.max_concurrent, self.concurrent)
+        try:
+            time.sleep(self.hold_seconds)
+        finally:
+            self.concurrent -= 1
+        return [SimpleNamespace(text="ok", language="English")]
 
 
 class QwenProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -67,6 +87,38 @@ class QwenProviderTests(unittest.IsolatedAsyncioTestCase):
         options = TranscriptionOptions("s", "g", "st", Source.SYSTEM)
         with self.assertRaises(FileNotFoundError):
             await provider.transcribe_file(Path(self.temp.name) / "missing.wav", options)
+
+    async def test_concurrent_transcriptions_never_overlap_in_the_model(self) -> None:
+        # Microphone and system streams share one model built for a batch size
+        # of one, so the provider must serialize inference itself.
+        model = BlockingModel()
+        provider = QwenLocalProvider(self.model_dir, model_loader=lambda *args: model)
+        options = TranscriptionOptions("s", "g", "mic-1", Source.MICROPHONE)
+        system_options = TranscriptionOptions("s", "g", "system-1", Source.SYSTEM)
+
+        results = await asyncio.gather(
+            provider.transcribe_file(self.audio, options),
+            provider.transcribe_file(self.audio, system_options),
+        )
+
+        self.assertEqual(1, model.max_concurrent)
+        self.assertEqual(["ok", "ok"], [result.text for result in results])
+
+    async def test_unloading_between_load_and_inference_is_reported(self) -> None:
+        provider = QwenLocalProvider(self.model_dir, model_loader=lambda *args: FakeModel())
+        await provider.load()
+        await provider.unload()
+        provider._model = None  # simulate an unload racing an in-flight request
+        options = TranscriptionOptions("s", "g", "st", Source.SYSTEM)
+        original_load = provider.load
+
+        async def load_then_drop() -> None:
+            await original_load()
+            provider._model = None
+
+        provider.load = load_then_drop  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            await provider.transcribe_file(self.audio, options)
 
     async def test_streaming_explicitly_delegates_to_future_chunking_layer(self) -> None:
         provider = QwenLocalProvider(self.model_dir, model_loader=lambda *args: FakeModel())

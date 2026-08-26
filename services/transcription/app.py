@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import wave
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,15 +17,25 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
-from clients.python_capture.vad import EnergyVadChunker, VadConfig
-from voxink_core.models import SessionConfig, Source, TranscriptionOptions
+from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
+from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
 from voxink_core.persistence.audio import AudioRetentionWriter
 from voxink_core.providers.base import TranscriptionProvider
 from voxink_core.providers.qwen import QwenLocalProvider
-from voxink_core.sessions import InvalidSessionTransition, SessionManager, SessionState
+from voxink_core.sessions import (
+    InvalidSessionTransition,
+    Session,
+    SessionManager,
+    SessionState,
+)
+from voxink_core.transcripts import OverlapDeduplicator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Report falling behind real time only after this much audio, so one slow chunk
+# during model warm-up does not look like sustained lag.
+_LAG_WINDOW_MS = 5_000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +84,50 @@ class ServiceRuntime:
         self.sessions = sessions or SessionManager(settings.output_root)
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         self.active_streams: dict[str, set[str]] = {}
+        self.paused_streams: dict[str, set[str]] = {}
+        self.dedup = OverlapDeduplicator()
+        self.stream_ends: dict[tuple[str, str], int] = {}
+
+
+@dataclass
+class _StreamContext:
+    """Per-connection state for one source stream."""
+
+    session_id: str
+    start: dict[str, Any]
+    stream_id: str
+    source: Source
+    chunker: EnergyVadChunker
+    sample_rate: int
+    anchor_ms: float = 0.0
+    window_audio_ms: float = 0.0
+    window_compute_ms: float = 0.0
+
+    def anchor_to(self, header: dict[str, Any]) -> None:
+        """Align the VAD sample clock with the capture time a client reports.
+
+        Re-anchoring on every frame keeps chunk timestamps on the session
+        timeline even when a stream joins late, pauses, or drops frames.
+        """
+        start_ms = header.get("start_ms")
+        if start_ms is not None:
+            self.anchor_ms = float(start_ms) - self.chunker.next_sample_ms
+
+    def chunk_bounds(self, chunk: AudioChunk) -> tuple[int, int]:
+        start = max(0.0, self.anchor_ms + chunk.start_ms(self.sample_rate))
+        end = max(start, self.anchor_ms + chunk.end_ms(self.sample_rate))
+        return round(start), round(end)
+
+    def record_work(self, audio_ms: float, compute_ms: float) -> float | None:
+        """Accumulate a window of work, returning its real-time factor when lagging."""
+        self.window_audio_ms += audio_ms
+        self.window_compute_ms += compute_ms
+        if self.window_audio_ms < _LAG_WINDOW_MS:
+            return None
+        factor = self.window_compute_ms / self.window_audio_ms
+        self.window_audio_ms = 0.0
+        self.window_compute_ms = 0.0
+        return factor if factor > 1.0 else None
 
 
 def create_app(
@@ -80,7 +137,13 @@ def create_app(
     sessions: SessionManager | None = None,
 ) -> FastAPI:
     runtime = ServiceRuntime(settings or ServiceSettings(), provider=provider, sessions=sessions)
-    app = FastAPI(title="VoxInk Local Service", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        yield
+        _shutdown(runtime)
+
+    app = FastAPI(title="VoxInk Local Service", version="0.1.0", lifespan=lifespan)
     app.state.runtime = runtime
 
     @app.get("/health")
@@ -144,6 +207,7 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if action == "stop":
             runtime.active_streams.pop(session_id, None)
+            runtime.paused_streams.pop(session_id, None)
             _finalize_audio(runtime, session)
         return _session_view(session)
 
@@ -184,10 +248,7 @@ def create_app(
     async def stream_audio(websocket: WebSocket, session_id: str) -> None:
         await websocket.accept()
         pending_header: dict[str, Any] | None = None
-        start_message: dict[str, Any] | None = None
-        registered_stream_id: str | None = None
-        chunker: EnergyVadChunker | None = None
-        frame_offset_ms = 0
+        context: _StreamContext | None = None
         try:
             while True:
                 message = await websocket.receive()
@@ -195,80 +256,74 @@ def create_app(
                     control = _parse_control(message["text"])
                     message_type = control.get("type")
                     if message_type == "stream.start":
-                        start_message = control
-                        source = Source(control.get("source", "microphone"))
-                        chunker = _stream_chunker(control)
-                        declared_sources = tuple(
-                            Source(item)
-                            for item in control.get("session_sources", [source.value])
-                        )
-                        _ensure_started_session(
-                            runtime, session_id, source, sources=declared_sources
-                        )
-                        registered_stream_id = str(control["stream_id"])
-                        runtime.active_streams.setdefault(session_id, set()).add(
-                            registered_stream_id
-                        )
+                        context = _open_stream(runtime, session_id, control)
                         await websocket.send_json(
                             {"type": "stream.ready", "schema_version": 1, "session_id": session_id}
                         )
                     elif message_type in {"audio.frame", "audio.chunk"}:
-                        if start_message is None:
+                        if context is None:
                             raise ValueError("stream.start must be sent before audio")
                         pending_header = control
                     elif message_type == "stream.pause":
-                        if chunker is not None and start_message is not None:
+                        if context is not None:
                             await _send_chunks(
-                                websocket,
-                                runtime,
-                                session_id,
-                                start_message,
-                                chunker.flush("pause"),
-                                frame_offset_ms,
+                                websocket, runtime, context, context.chunker.flush("pause")
                             )
-                            chunker.reset()
-                        _control_if_possible(runtime, session_id, "pause")
+                            context.chunker.reset()
+                            _pause_stream(runtime, session_id, context.stream_id)
+                            await websocket.send_json(
+                                _stream_state(runtime, session_id, "stream.paused")
+                            )
                     elif message_type == "stream.resume":
-                        frame_offset_ms = int(control.get("at_ms", frame_offset_ms))
-                        _control_if_possible(runtime, session_id, "resume")
-                    elif message_type == "stream.stop":
-                        if chunker is not None and start_message is not None:
-                            await _send_chunks(
-                                websocket,
-                                runtime,
-                                session_id,
-                                start_message,
-                                chunker.flush("stop"),
-                                frame_offset_ms,
+                        if context is not None:
+                            # Only a fallback: clients that stamp every frame with
+                            # start_ms re-anchor on their next frame instead.
+                            context.anchor_ms = float(control.get("at_ms", context.anchor_ms))
+                            _resume_stream(runtime, session_id, context.stream_id)
+                            await websocket.send_json(
+                                _stream_state(runtime, session_id, "stream.resumed")
                             )
-                        _release_stream(runtime, session_id, registered_stream_id)
-                        registered_stream_id = None
+                    elif message_type == "stream.stop":
+                        if context is not None:
+                            await _send_chunks(
+                                websocket, runtime, context, context.chunker.flush("stop")
+                            )
+                            _release_stream(runtime, session_id, context.stream_id)
+                            runtime.dedup.reset(context.session_id, context.stream_id)
+                            runtime.stream_ends.pop((context.session_id, context.stream_id), None)
+                            context = None
                         await websocket.send_json({"type": "stream.stopped", "session_id": session_id})
                         await websocket.close(code=1000)
                         return
                     else:
                         raise ValueError(f"unsupported message type: {message_type!r}")
                 elif message.get("bytes") is not None:
-                    if pending_header is None or start_message is None:
+                    if pending_header is None or context is None:
                         raise ValueError("binary audio must follow an audio.frame or audio.chunk header")
                     pcm = message["bytes"]
                     expected = pending_header.get("byte_length")
                     if expected is not None and len(pcm) != expected:
                         raise ValueError(f"expected {expected} audio bytes, received {len(pcm)}")
-                    _record_audio(runtime, session_id, start_message, pending_header, pcm)
-                    if pending_header["type"] == "audio.frame":
-                        if chunker is None:
-                            raise ValueError("audio frame received without stream VAD configuration")
-                        chunks = chunker.feed(pcm)
-                        await _send_chunks(
-                            websocket,
-                            runtime,
-                            session_id,
-                            start_message,
-                            chunks,
-                            frame_offset_ms,
+                    if _is_paused(runtime, session_id):
+                        # A paused session captures nothing. Dropping the buffered
+                        # audio keeps pre-pause speech out of the next utterance.
+                        context.chunker.reset()
+                        await websocket.send_json(
+                            {
+                                "type": "audio.ignored",
+                                "sequence": pending_header.get("sequence"),
+                                "reason": "session_paused",
+                            }
                         )
-                        if not chunks:
+                        pending_header = None
+                        continue
+                    _record_audio(runtime, session_id, context.start, pending_header, pcm)
+                    if pending_header["type"] == "audio.frame":
+                        context.anchor_to(pending_header)
+                        published = await _send_chunks(
+                            websocket, runtime, context, context.chunker.feed(pcm)
+                        )
+                        if not published:
                             await websocket.send_json(
                                 {
                                     "type": "audio.accepted",
@@ -276,26 +331,149 @@ def create_app(
                                 }
                             )
                     else:
-                        event = await _transcribe_pcm_chunk(
-                            runtime, session_id, start_message, pending_header, pcm
+                        event, elapsed_ms = await _timed_transcription(
+                            runtime, session_id, context.start, pending_header, pcm
                         )
-                        runtime.sessions.append(event)
-                        await websocket.send_json(
-                            {"type": "transcript.final", "event": event.to_dict()}
+                        await _publish_event(websocket, runtime, event)
+                        await _report_lag(
+                            websocket, context, event.end_ms - event.start_ms, elapsed_ms
                         )
                     pending_header = None
                 elif message.get("type") == "websocket.disconnect":
                     return
         except WebSocketDisconnect:
             return
-        except (KeyError, TypeError, ValueError) as exc:
+        except HTTPException as exc:
+            # `_ensure_started_session` is shared with the HTTP routes. On an
+            # accepted WebSocket its HTTPException would make Starlette try to
+            # send an HTTP response, dropping the connection with no diagnosis.
+            await websocket.send_json(
+                {"type": "error", "code": "session_unavailable", "message": str(exc.detail)}
+            )
+            await websocket.close(code=1008)
+        except (InvalidSessionTransition, KeyError, TypeError, ValueError) as exc:
             await websocket.send_json({"type": "error", "code": "invalid_message", "message": str(exc)})
             await websocket.close(code=1003)
         finally:
-            if registered_stream_id is not None:
-                _release_stream(runtime, session_id, registered_stream_id)
+            if context is not None:
+                _release_stream(runtime, session_id, context.stream_id)
+                runtime.dedup.reset(context.session_id, context.stream_id)
+                runtime.stream_ends.pop((context.session_id, context.stream_id), None)
 
     return app
+
+
+def _open_stream(
+    runtime: ServiceRuntime, session_id: str, control: dict[str, Any]
+) -> _StreamContext:
+    """Register one source stream and start (or join) its session."""
+    source = Source(control.get("source", "microphone"))
+    declared_sources = tuple(
+        Source(item) for item in control.get("session_sources", [source.value])
+    )
+    _ensure_started_session(runtime, session_id, source, sources=declared_sources)
+    stream_id = str(control["stream_id"])
+    runtime.active_streams.setdefault(session_id, set()).add(stream_id)
+    runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
+    runtime.dedup.reset(session_id, stream_id)
+    runtime.stream_ends.pop((session_id, stream_id), None)
+    return _StreamContext(
+        session_id=session_id,
+        start=control,
+        stream_id=stream_id,
+        source=source,
+        chunker=_stream_chunker(control),
+        sample_rate=int(control.get("audio", {}).get("sample_rate_hz", 16000)),
+    )
+
+
+def _pause_stream(runtime: ServiceRuntime, session_id: str, stream_id: str) -> None:
+    """Pause the shared session only once every active stream has paused."""
+    paused = runtime.paused_streams.setdefault(session_id, set())
+    paused.add(stream_id)
+    active = runtime.active_streams.get(session_id, set())
+    if active and not active - paused:
+        _control_if_possible(runtime, session_id, "pause")
+
+
+def _resume_stream(runtime: ServiceRuntime, session_id: str, stream_id: str) -> None:
+    """Resume the shared session as soon as any one stream resumes."""
+    paused = runtime.paused_streams.get(session_id)
+    if paused is not None:
+        paused.discard(stream_id)
+    _control_if_possible(runtime, session_id, "resume")
+
+
+def _stream_state(runtime: ServiceRuntime, session_id: str, message_type: str) -> dict[str, Any]:
+    """Acknowledge a control message with the resulting shared session state."""
+    try:
+        state = runtime.sessions.get(session_id).state.value
+    except KeyError:
+        state = SessionState.STOPPED.value
+    return {"type": message_type, "session_id": session_id, "session_state": state}
+
+
+def _is_paused(runtime: ServiceRuntime, session_id: str) -> bool:
+    try:
+        return runtime.sessions.get(session_id).state is SessionState.PAUSED
+    except KeyError:
+        return False
+
+
+async def _publish_event(
+    websocket: WebSocket, runtime: ServiceRuntime, event: TranscriptEvent
+) -> bool:
+    """Deduplicate, persist, and publish one finalized transcript event."""
+    key = (event.session_id, event.stream_id)
+    previous_end = runtime.stream_ends.get(key)
+    if previous_end is None or event.start_ms >= previous_end:
+        # Only chunks that overlap in time can have re-transcribed the same
+        # audio. Forgetting the tail otherwise keeps a genuinely repeated
+        # phrase ("yes. yes.") out of the deduplicator's reach.
+        runtime.dedup.reset(*key)
+    event = runtime.dedup.deduplicate(event)
+    if not event.text.strip():
+        # The chunk repeated its predecessor's overlap and carried nothing new.
+        return False
+    try:
+        runtime.sessions.append(event)
+    except (InvalidSessionTransition, KeyError, ValueError) as exc:
+        # Never drop the connection over session state: report and keep capturing.
+        await websocket.send_json(
+            {"type": "error", "code": "transcript_not_stored", "message": str(exc)}
+        )
+        return True
+    runtime.stream_ends[key] = max(previous_end or 0, event.end_ms)
+    await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
+    return True
+
+
+async def _report_lag(
+    websocket: WebSocket, context: _StreamContext, audio_ms: float, compute_ms: float
+) -> None:
+    factor = context.record_work(audio_ms, compute_ms)
+    if factor is None:
+        return
+    await websocket.send_json(
+        {
+            "type": "stream.lag",
+            "stream_id": context.stream_id,
+            "real_time_factor": round(factor, 2),
+            "message": "Transcription is slower than capture.",
+        }
+    )
+
+
+def _shutdown(runtime: ServiceRuntime) -> None:
+    """Close every open session so no transcript part is left unterminated."""
+    for session in runtime.sessions.list():
+        if session.state not in {SessionState.RUNNING, SessionState.PAUSED}:
+            continue
+        try:
+            runtime.sessions.stop(session.config.session_id)
+        except (InvalidSessionTransition, KeyError):
+            continue
+        _finalize_audio(runtime, session)
 
 
 def _record_audio(
@@ -329,13 +507,18 @@ def _record_audio(
     )
 
 
-def _finalize_audio(runtime: ServiceRuntime, session) -> None:
+def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
     writer = runtime.audio_writers.pop(session.config.session_id, None)
     if writer is None:
         return
     writer.close()
     if session.config.save_combined_audio:
-        writer.generate_combined()
+        try:
+            writer.generate_combined()
+        except FileExistsError:
+            # A recovered or re-stopped session already has combined parts.
+            # Keeping them is required: recovery must never overwrite audio.
+            pass
     if not session.config.save_separate_audio:
         for source in Source:
             for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
@@ -347,6 +530,9 @@ def _release_stream(
 ) -> None:
     if stream_id is None:
         return
+    paused = runtime.paused_streams.get(session_id)
+    if paused is not None:
+        paused.discard(stream_id)
     streams = runtime.active_streams.get(session_id)
     if streams is None:
         return
@@ -354,6 +540,7 @@ def _release_stream(
     if streams:
         return
     runtime.active_streams.pop(session_id, None)
+    runtime.paused_streams.pop(session_id, None)
     try:
         session = runtime.sessions.get(session_id)
     except KeyError:
@@ -383,26 +570,37 @@ def _stream_chunker(start: dict[str, Any]) -> EnergyVadChunker:
 async def _send_chunks(
     websocket: WebSocket,
     runtime: ServiceRuntime,
-    session_id: str,
-    start: dict[str, Any],
-    chunks,
-    offset_ms: int,
-) -> None:
-    sample_rate = int(start.get("audio", {}).get("sample_rate_hz", 16000))
+    context: _StreamContext,
+    chunks: Iterable[AudioChunk],
+) -> int:
+    """Transcribe finalized chunks, returning how many produced a response."""
+    published = 0
     for chunk in chunks:
-        chunk_start = offset_ms + round(chunk.start_ms(sample_rate))
-        chunk_end = offset_ms + round(chunk.end_ms(sample_rate))
+        chunk_start, chunk_end = context.chunk_bounds(chunk)
         header = {
             "type": "audio.chunk",
             "start_ms": chunk_start,
             "end_ms": chunk_end,
             "finalization_reason": chunk.reason,
         }
-        event = await _transcribe_pcm_chunk(
-            runtime, session_id, start, header, chunk.pcm
+        event, elapsed_ms = await _timed_transcription(
+            runtime, context.session_id, context.start, header, chunk.pcm
         )
-        runtime.sessions.append(event)
-        await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
+        published += await _publish_event(websocket, runtime, event)
+        await _report_lag(websocket, context, chunk_end - chunk_start, elapsed_ms)
+    return published
+
+
+async def _timed_transcription(
+    runtime: ServiceRuntime,
+    session_id: str,
+    start: dict[str, Any],
+    header: dict[str, Any],
+    pcm: bytes,
+) -> tuple[TranscriptEvent, float]:
+    began = time.monotonic()
+    event = await _transcribe_pcm_chunk(runtime, session_id, start, header, pcm)
+    return event, (time.monotonic() - began) * 1000.0
 
 
 async def _transcribe_pcm_chunk(
@@ -435,9 +633,20 @@ async def _transcribe_pcm_chunk(
                 source=source,
                 start_ms=start_ms,
                 end_ms=end_ms,
-                language=start.get("language"),
+                language=_stream_language(start),
             ),
         )
+
+
+def _stream_language(start: dict[str, Any]) -> str | None:
+    """Read the optional manual language override from a stream.start message."""
+    language = start.get("language")
+    if language is None:
+        return None
+    if not isinstance(language, str):
+        raise ValueError("language must be a string such as 'en' or 'zh'")
+    language = language.strip()
+    return language or None
 
 
 def _parse_control(raw: str) -> dict[str, Any]:
@@ -476,9 +685,10 @@ def _ensure_started_session(
 
 
 def _control_if_possible(runtime: ServiceRuntime, session_id: str, action: str) -> None:
+    """Apply a session control, ignoring a transition another stream already made."""
     try:
         getattr(runtime.sessions, action)(session_id)
-    except (KeyError, ValueError):
+    except (InvalidSessionTransition, KeyError, ValueError):
         return
 
 
