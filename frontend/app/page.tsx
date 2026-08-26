@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useVoxInkRecorder } from './use-voxink-recorder';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
@@ -8,6 +8,7 @@ const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30
 export default function Home() {
   const recorder = useVoxInkRecorder();
   const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
+  const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -20,6 +21,11 @@ export default function Home() {
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [recorder, state]);
+
+  useEffect(() => {
+    const list = captionListRef.current;
+    if (list) list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+  }, [captions]);
 
   return (
     <main className="app-shell">
@@ -88,7 +94,13 @@ export default function Home() {
               <div><p className="eyebrow">Live transcript</p><h2>Captions</h2></div>
               <span className="language-chip">Auto · EN / 中文</span>
             </div>
-            <div className="caption-list" aria-live="polite">
+            <div
+              ref={captionListRef}
+              className="caption-list"
+              aria-label="Scrollable live transcript"
+              aria-live="polite"
+              tabIndex={0}
+            >
               {captions.length ? captions.map((caption) => (
                 <article className="caption-line" key={caption.id}>
                   <time>{formatTime(caption.startMs)}</time>

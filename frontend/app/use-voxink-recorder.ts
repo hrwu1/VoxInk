@@ -18,6 +18,7 @@ type LaunchConfig = { endpoint: string; token: string };
 const TARGET_SAMPLE_RATE = 16_000;
 const FRAME_SAMPLES = 320;
 const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const MAX_VISIBLE_CAPTIONS = 250;
 
 export function useVoxInkRecorder() {
   const [state, setState] = useState<RecorderState>('ready');
@@ -106,7 +107,11 @@ export function useVoxInkRecorder() {
       };
       setCaptions((current) => {
         const existing = current.findIndex((entry) => entry.id === caption.id);
-        if (existing < 0) return [...current, caption].sort((a, b) => a.startMs - b.startMs);
+        if (existing < 0) {
+          return [...current, caption]
+            .sort((a, b) => a.startMs - b.startMs)
+            .slice(-MAX_VISIBLE_CAPTIONS);
+        }
         const next = [...current];
         next[existing] = caption;
         return next;
