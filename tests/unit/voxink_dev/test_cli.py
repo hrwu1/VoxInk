@@ -4,7 +4,17 @@ from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 
-from voxink_dev.cli import _run_web_ui
+from voxink_dev.cli import _run_web_ui, build_parser
+
+
+class CliParserTests(unittest.TestCase):
+    def test_browser_interface_is_the_default(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertTrue(args.web)
+
+    def test_terminal_interface_can_be_selected_explicitly(self) -> None:
+        args = build_parser().parse_args(["--terminal"])
+        self.assertFalse(args.web)
 
 
 class WebUiLauncherTests(unittest.TestCase):

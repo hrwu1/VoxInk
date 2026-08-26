@@ -38,7 +38,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
     parser.add_argument("--session-id")
-    parser.add_argument("--web", action="store_true", help="open the local browser control surface")
+    interface = parser.add_mutually_exclusive_group()
+    interface.add_argument(
+        "--web",
+        dest="web",
+        action="store_true",
+        help="open the local browser control surface (default)",
+    )
+    interface.add_argument(
+        "--terminal",
+        dest="web",
+        action="store_false",
+        help="use the interactive Terminal microphone controls",
+    )
+    parser.set_defaults(web=True)
     return parser
 
 

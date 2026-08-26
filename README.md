@@ -39,32 +39,33 @@ python3.12 -m venv .venv
 The model weights must already exist locally at `models/Qwen3-ASR-1.7B/`.
 VoxInk never downloads model files while running.
 
-Install the microphone capture dependencies, then start the complete local
-workflow:
+The browser recording interface is the default. Start the complete local
+workflow with:
 
 ```sh
-.venv/bin/python -m pip install -r requirements-capture.txt
 ./scripts/voxink-dev --device cpu
 ```
 
 The command verifies the Python environment and local model checksums, checks
 disk space, chooses a private loopback port, creates a per-launch credential,
-starts the helper, negotiates the protocol version, and opens the microphone
-controls. Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down
-both capture and the helper. Finalized transcripts default to
-`~/Documents/VoxInk/`, and the saved path is printed when capture exits.
+starts the helper, negotiates the protocol version, and opens a private recording
+console in the default browser. The page asks for microphone permission, streams
+audio only to the supervised loopback helper, displays finalized captions, and
+removes its one-time launch token from the browser address immediately. Ctrl-C
+in the launching Terminal closes the helper and finalizes open transcript files.
+Finalized transcripts default to `~/Documents/VoxInk/`.
 
-For the local browser interface, run:
+For interactive Terminal microphone controls, install the capture dependencies
+and select the Terminal interface explicitly:
 
 ```sh
-./scripts/voxink-dev --web --device cpu
+.venv/bin/python -m pip install -r requirements-capture.txt
+./scripts/voxink-dev --terminal --device cpu
 ```
 
-VoxInk opens a private recording console in the default browser. The page asks
-for microphone permission, streams audio only to the supervised loopback
-helper, displays finalized captions, and removes its one-time launch token from
-the browser address immediately. Ctrl-C in the launching Terminal closes the
-helper and finalizes open transcript files.
+Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down both
+capture and the helper, and the saved transcript path is printed when capture
+exits. The former explicit `--web` spelling remains supported for compatibility.
 
 Run only the startup checks with:
 
