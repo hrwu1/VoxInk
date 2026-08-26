@@ -14,13 +14,13 @@ python -m pip install sounddevice websockets
 Run from the repository root:
 
 ```sh
-python -m apps.python_capture --stream-mode frames
+python -m clients.python_capture --stream-mode frames
 ```
 
 The interactive commands are `start`, `pause`, `resume`, `stop`, and `quit`.
 The default endpoint is
 `ws://127.0.0.1:8765/v1/sessions/{session_id}/stream`. Use `--url` to override
-it. Run `python -m apps.python_capture --help` for VAD and device settings.
+it. Run `python -m clients.python_capture --help` for VAD and device settings.
 
 `frames` mode has the lowest latency and leaves utterance formation to the
 service. `vad-chunks` uses the experimental client-side energy VAD, finalizing

@@ -371,28 +371,27 @@ time.
 The initial prototype may use WAV for simplicity. A compressed, lossless format
 such as FLAC should be evaluated for long-running sessions.
 
-## 11. Proposed Component Layout
+## 11. Component Layout
 
 ```text
 VoxInk
-├── apps/
-│   └── macos-capture/          # Native capture and, later, floating UI
-├── service/
-│   ├── api/                    # Local HTTP/WebSocket API
-│   ├── audio/                  # Frames, buffering, VAD, resampling
-│   ├── providers/              # Qwen local and future provider adapters
-│   ├── transcripts/            # Events, normalization, deduplication
+├── clients/
+│   ├── macos_capture/          # Native capture library, CLI, and caption panel
+│   └── python_capture/         # Experimental Python microphone client
+├── services/
+│   └── transcription/          # Local HTTP/WebSocket transcription service
+├── voxink_core/
+│   ├── providers/              # Qwen and future provider adapters
 │   └── persistence/            # Markdown/audio writers and rotation
-├── shared/
-│   └── protocol/               # Versioned schemas and examples
 ├── tests/
-│   ├── fixtures/
-│   ├── integration/
-│   └── unit/
-└── Qwen3-ASR-1.7B/             # Current experimental local model
+│   ├── unit/                   # Core and capture-client unit tests
+│   └── integration/            # Service API and boundary tests
+└── models/
+    └── Qwen3-ASR-1.7B/         # Ignored local model files
 ```
 
-This is a proposed layout, not yet an implemented repository structure.
+The source tree follows this layout. Runtime model weights and local virtual
+environments remain outside version control.
 
 ## 12. Implementation Plan
 
@@ -476,7 +475,7 @@ Exit criterion: the end-to-end macOS experience is usable without a terminal.
 
 ## 14. Current Model State
 
-- The workspace contains `Qwen3-ASR-1.7B`.
+- The workspace contains `models/Qwen3-ASR-1.7B`.
 - The two model weight shards currently occupy approximately 4.4 GB.
 - The model has loaded successfully on CPU and transcribed the English sample
   through both the direct script and the localhost HTTP API.

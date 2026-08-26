@@ -6,8 +6,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from service.app import ServiceSettings, create_app
-from voxink.models import TranscriptEvent
+from services.transcription.app import ServiceSettings, create_app
+from voxink_core.models import TranscriptEvent
 
 
 class FakeProvider:

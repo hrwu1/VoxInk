@@ -1,6 +1,6 @@
 import unittest
 
-from voxink.models import SessionConfig, Source, TranscriptEvent, WordTimestamp
+from voxink_core.models import SessionConfig, Source, TranscriptEvent, WordTimestamp
 
 
 class ModelTests(unittest.TestCase):

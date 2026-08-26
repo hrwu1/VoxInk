@@ -47,4 +47,4 @@ xcuserdata/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 
 # Downloaded local model weights (about 4.4 GB)
-Qwen3-ASR-1.7B/
+models/Qwen3-ASR-1.7B/

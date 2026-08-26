@@ -8,7 +8,7 @@ floating-caption component.
 
 The local API binds only to `127.0.0.1`. The Qwen provider forces Hugging Face
 and Transformers offline modes and loads the model exclusively from the local
-`Qwen3-ASR-1.7B` directory.
+`models/Qwen3-ASR-1.7B` directory.
 
 ## Current capabilities
 
@@ -36,13 +36,13 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-The model weights must already exist locally at `Qwen3-ASR-1.7B/`. VoxInk never
-downloads model files while running.
+The model weights must already exist locally at `models/Qwen3-ASR-1.7B/`.
+VoxInk never downloads model files while running.
 
 Start the service:
 
 ```sh
-.venv/bin/python -m service --device cpu
+.venv/bin/python -m services.transcription --device cpu
 ```
 
 The default service URL is `http://127.0.0.1:8765`, and transcripts default to
@@ -77,7 +77,7 @@ Install the optional capture dependencies:
 Then run the interactive client while the service is running:
 
 ```sh
-.venv/bin/python -m apps.python_capture
+.venv/bin/python -m clients.python_capture
 ```
 
 Enter `start`, `pause`, `resume`, `stop`, or `quit`. The default `vad-chunks`
@@ -89,7 +89,7 @@ frames and uses the service's VAD.
 The Swift package targets macOS 13 or newer and uses only Apple capture APIs:
 
 ```sh
-cd apps/macos-capture
+cd clients/macos_capture
 swift build
 swift run voxink-capture --list-apps
 swift run voxink-capture --mic
@@ -116,8 +116,8 @@ one raw PCM s16le binary message. Transcript responses are normalized
 The service tracks active streams per session. Stopping one source does not
 finalize the shared session while another source remains active.
 
-See [the Python protocol notes](apps/python_capture/README.md) and
-[the macOS capture notes](apps/macos-capture/README.md) for wire examples.
+See [the Python protocol notes](clients/python_capture/README.md) and
+[the macOS capture notes](clients/macos_capture/README.md) for wire examples.
 
 ## Tests
 
@@ -134,7 +134,7 @@ Run the real local model smoke test:
 ```
 
 Swift build and test instructions, including local toolchain limitations, are
-documented in `apps/macos-capture/README.md`.
+documented in `clients/macos_capture/README.md`.
 
 ## Architecture and roadmap
 

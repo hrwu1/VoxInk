@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from voxink.models import SessionConfig, Source, TranscriptEvent
-from voxink.sessions import InvalidSessionTransition, SessionManager, SessionState
+from voxink_core.models import SessionConfig, Source, TranscriptEvent
+from voxink_core.sessions import InvalidSessionTransition, SessionManager, SessionState
 
 
 class SessionManagerTests(unittest.TestCase):

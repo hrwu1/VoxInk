@@ -3,8 +3,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from voxink.models import SessionConfig, Source, TranscriptEvent
-from voxink.persistence.markdown import (
+from voxink_core.models import SessionConfig, Source, TranscriptEvent
+from voxink_core.persistence.markdown import (
     COMPLETE_MARKER,
     RECOVERED_MARKER,
     MarkdownTranscriptWriter,

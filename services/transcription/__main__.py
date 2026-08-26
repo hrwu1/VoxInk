@@ -14,7 +14,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--output", type=Path, default=Path.home() / "Documents" / "VoxInk")
-    parser.add_argument("--model", type=Path, default=PROJECT_ROOT / "Qwen3-ASR-1.7B")
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B",
+    )
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
     args = parser.parse_args()
     app = create_app(

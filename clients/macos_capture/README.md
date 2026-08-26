@@ -19,7 +19,7 @@ service owns those concerns.
 Build and test:
 
 ```sh
-cd apps/macos-capture
+cd clients/macos_capture
 swift build
 swift test
 ```

@@ -14,20 +14,20 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
-from apps.python_capture.vad import EnergyVadChunker, VadConfig
-from voxink.models import SessionConfig, Source, TranscriptionOptions
-from voxink.persistence.audio import AudioRetentionWriter
-from voxink.providers.base import TranscriptionProvider
-from voxink.providers.qwen import QwenLocalProvider
-from voxink.sessions import InvalidSessionTransition, SessionManager, SessionState
+from clients.python_capture.vad import EnergyVadChunker, VadConfig
+from voxink_core.models import SessionConfig, Source, TranscriptionOptions
+from voxink_core.persistence.audio import AudioRetentionWriter
+from voxink_core.providers.base import TranscriptionProvider
+from voxink_core.providers.qwen import QwenLocalProvider
+from voxink_core.sessions import InvalidSessionTransition, SessionManager, SessionState
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
-    model_path: Path = PROJECT_ROOT / "Qwen3-ASR-1.7B"
+    model_path: Path = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
     output_root: Path = Path.home() / "Documents" / "VoxInk"
     device: str = "auto"
     max_new_tokens: int = 512

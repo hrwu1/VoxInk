@@ -4,8 +4,8 @@ import unittest
 import wave
 from pathlib import Path
 
-from voxink.models import Source
-from voxink.persistence.audio import AudioRetentionWriter
+from voxink_core.models import Source
+from voxink_core.persistence.audio import AudioRetentionWriter
 
 
 def pcm(*samples: int) -> bytes:

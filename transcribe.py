@@ -12,7 +12,7 @@ from qwen_asr import Qwen3ASRModel
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL_DIR = PROJECT_DIR / "Qwen3-ASR-1.7B"
+DEFAULT_MODEL_DIR = PROJECT_DIR / "models" / "Qwen3-ASR-1.7B"
 
 
 def parse_args() -> argparse.Namespace:

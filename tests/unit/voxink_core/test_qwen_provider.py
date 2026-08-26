@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from voxink.models import Source, TranscriptionOptions
-from voxink.providers.qwen import QwenLocalProvider
+from voxink_core.models import Source, TranscriptionOptions
+from voxink_core.providers.qwen import QwenLocalProvider
 
 
 class FakeModel:

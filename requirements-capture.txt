@@ -1,3 +1,3 @@
-# Optional dependencies for `python -m apps.python_capture`.
+# Optional dependencies for `python -m clients.python_capture`.
 sounddevice
 websockets
