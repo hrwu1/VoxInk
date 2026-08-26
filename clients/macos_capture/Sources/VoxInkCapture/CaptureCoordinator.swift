@@ -26,6 +26,7 @@ public final class CaptureCoordinator {
         self.configuration = configuration
         self.sink = try sink ?? WebSocketAudioFrameSink(
             endpoint: configuration.serviceURL,
+            authToken: configuration.authToken,
             transcriptHandler: transcriptHandler,
             statusHandler: statusHandler
         )

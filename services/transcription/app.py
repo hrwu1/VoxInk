@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import tempfile
 import time
 import wave
@@ -13,7 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
+from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +38,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Report falling behind real time only after this much audio, so one slow chunk
 # during model warm-up does not look like sustained lag.
 _LAG_WINDOW_MS = 5_000.0
+PROTOCOL_VERSION = 1
+SERVICE_VERSION = "0.2.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,7 @@ class ServiceSettings:
     output_root: Path = Path.home() / "Documents" / "VoxInk"
     device: str = "auto"
     max_new_tokens: int = 512
+    auth_secret: str | None = None
 
 
 class SessionCreateRequest(BaseModel):
@@ -143,8 +148,16 @@ def create_app(
         yield
         _shutdown(runtime)
 
-    app = FastAPI(title="VoxInk Local Service", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="VoxInk Local Service", version=SERVICE_VERSION, lifespan=lifespan)
     app.state.runtime = runtime
+
+    @app.middleware("http")
+    async def authenticate(request: Request, call_next):
+        if request.url.path == "/health" or _authorized(
+            request.headers.get("authorization"), runtime.settings.auth_secret
+        ):
+            return await call_next(request)
+        return JSONResponse(status_code=401, content={"detail": "invalid local service credential"})
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -154,6 +167,9 @@ def create_app(
             "bind_policy": "loopback-only",
             "provider": runtime.provider.name,
             "model_loaded": runtime.provider.is_loaded,
+            "service_version": SERVICE_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "capabilities": {"partial_results": False, "streaming_audio": True},
         }
 
     @app.get("/v1/providers")
@@ -246,6 +262,9 @@ def create_app(
 
     @app.websocket("/v1/sessions/{session_id}/stream")
     async def stream_audio(websocket: WebSocket, session_id: str) -> None:
+        if not _authorized(websocket.headers.get("authorization"), runtime.settings.auth_secret):
+            await websocket.close(code=4401, reason="invalid local service credential")
+            return
         await websocket.accept()
         pending_header: dict[str, Any] | None = None
         context: _StreamContext | None = None
@@ -258,7 +277,11 @@ def create_app(
                     if message_type == "stream.start":
                         context = _open_stream(runtime, session_id, control)
                         await websocket.send_json(
-                            {"type": "stream.ready", "schema_version": 1, "session_id": session_id}
+                            {
+                                "type": "stream.ready",
+                                "schema_version": PROTOCOL_VERSION,
+                                "session_id": session_id,
+                            }
                         )
                     elif message_type in {"audio.frame", "audio.chunk"}:
                         if context is None:
@@ -361,6 +384,17 @@ def create_app(
                 runtime.stream_ends.pop((context.session_id, context.stream_id), None)
 
     return app
+
+
+def _authorized(header: str | None, secret: str | None) -> bool:
+    """Compare bearer credentials without leaking timing or accepting empty secrets."""
+    if secret is None:
+        return True
+    prefix = "Bearer "
+    if not header or not header.startswith(prefix):
+        return False
+    supplied = header[len(prefix) :]
+    return bool(supplied) and secrets.compare_digest(supplied, secret)
 
 
 def _open_stream(

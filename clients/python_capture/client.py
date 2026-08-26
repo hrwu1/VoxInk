@@ -52,6 +52,7 @@ class CaptureConfig:
     stream_mode: str = "vad-chunks"
     language: str | None = None
     vad: VadConfig = VadConfig()
+    auth_token: str | None = None
 
     def __post_init__(self) -> None:
         if self.language is not None and self.language not in {"en", "zh"}:
@@ -100,7 +101,12 @@ class MicrophoneCaptureClient:
         websockets = require_websockets()
         self._loop = asyncio.get_running_loop()
         self._started_ns = time.monotonic_ns()
-        self._websocket = await websockets.connect(self.config.websocket_url)
+        headers = None
+        if self.config.auth_token:
+            headers = {"Authorization": f"Bearer {self.config.auth_token}"}
+        self._websocket = await websockets.connect(
+            self.config.websocket_url, additional_headers=headers
+        )
         await self._send_json(self._start_message())
 
         samples = self.config.sample_rate_hz * self.config.frame_duration_ms // 1000

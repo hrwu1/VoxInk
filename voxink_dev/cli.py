@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 
 from .preflight import (
     DEFAULT_MODEL_PATH,
@@ -14,6 +18,7 @@ from .preflight import (
     PreflightOptions,
     run_preflight,
 )
+from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retain-audio", action="store_true")
     parser.add_argument("--skip-checksums", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
+    parser.add_argument("--session-id")
     return parser
 
 
@@ -54,8 +61,49 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.preflight_only:
         return 0
-    print("Supervisor startup will be added in the next implementation step.", file=sys.stderr)
-    return 2
+    if args.source != "microphone":
+        print("System capture integration is not available in this implementation slice.", file=sys.stderr)
+        return 2
+    session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    supervisor = HelperSupervisor(
+        HelperConfig(report.model_path, report.output_root, device=args.device)
+    )
+    try:
+        health = supervisor.start()
+        print(
+            f"Helper ready on a private loopback port "
+            f"(protocol {health['protocol_version']}, provider {health['provider']})."
+        )
+        endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
+        command = [
+            sys.executable,
+            "-m",
+            "clients.python_capture",
+            "--url",
+            endpoint,
+            "--session-id",
+            session_id,
+        ]
+        capture = subprocess.Popen(command, env=supervisor.capture_environment())
+        try:
+            while capture.poll() is None:
+                helper = supervisor.process
+                if helper is None or helper.poll() is not None:
+                    raise SupervisorError("transcription helper exited unexpectedly")
+                time.sleep(0.1)
+            return int(capture.returncode)
+        except KeyboardInterrupt:
+            capture.send_signal(signal.SIGINT)
+            return capture.wait(timeout=10)
+        finally:
+            if capture.poll() is None:
+                capture.terminate()
+                capture.wait(timeout=5)
+    except (OSError, SupervisorError, subprocess.TimeoutExpired) as exc:
+        print(f"VoxInk failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        supervisor.stop()
 
 
 if __name__ == "__main__":

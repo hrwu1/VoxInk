@@ -16,13 +16,15 @@ public struct CaptureConfiguration: Sendable {
     public var systemAudio: SystemAudioSelection?
     public var sampleRate: Int
     public var serviceURL: URL
+    public var authToken: String?
 
     public init(
         sessionID: String,
         microphoneEnabled: Bool,
         systemAudio: SystemAudioSelection?,
         sampleRate: Int = 16_000,
-        serviceURL: URL? = nil
+        serviceURL: URL? = nil,
+        authToken: String? = ProcessInfo.processInfo.environment["VOXINK_AUTH_SECRET"]
     ) {
         self.sessionID = sessionID
         self.microphoneEnabled = microphoneEnabled
@@ -30,6 +32,7 @@ public struct CaptureConfiguration: Sendable {
         self.sampleRate = sampleRate
         let safeSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
         self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8765/v1/sessions/\(safeSessionID)/stream")!
+        self.authToken = authToken
     }
 }
 

@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from clients.python_capture.vad import EnergyVadChunker, VadConfig
 from services.transcription.app import (
@@ -147,6 +148,43 @@ class ApiTests(unittest.TestCase):
         self.assertEqual("local-only", response.json()["privacy_mode"])
         self.assertFalse(response.json()["model_loaded"])
         self.assertEqual(0, self.provider.calls)
+        self.assertEqual(1, response.json()["protocol_version"])
+
+    def test_authenticated_service_rejects_missing_and_wrong_credentials(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root, auth_secret="correct-secret"),
+            provider=self.provider,
+        )
+        with TestClient(app) as client:
+            self.assertEqual(200, client.get("/health").status_code)
+            self.assertEqual(401, client.get("/v1/providers").status_code)
+            self.assertEqual(
+                401,
+                client.get(
+                    "/v1/providers", headers={"Authorization": "Bearer wrong-secret"}
+                ).status_code,
+            )
+            response = client.get(
+                "/v1/providers", headers={"Authorization": "Bearer correct-secret"}
+            )
+            self.assertEqual(200, response.status_code)
+
+    def test_authenticated_websocket_rejects_missing_credential(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root, auth_secret="correct-secret"),
+            provider=self.provider,
+        )
+        with TestClient(app) as client:
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect("/v1/sessions/private/stream"):
+                    pass
+
+            with client.websocket_connect(
+                "/v1/sessions/private/stream",
+                headers={"Authorization": "Bearer correct-secret"},
+            ) as websocket:
+                websocket.send_json(_start_message("private", "microphone"))
+                self.assertEqual("stream.ready", websocket.receive_json()["type"])
 
     def test_manual_session_lifecycle(self) -> None:
         created = self.client.post(

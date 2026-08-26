@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+import os
 import sys
 
 from .client import CaptureConfig, MicrophoneCaptureClient, MissingDependency
@@ -67,6 +68,7 @@ async def run(args: argparse.Namespace) -> int:
             stream_mode=args.stream_mode,
             language=args.language,
             vad=vad,
+            auth_token=os.environ.get("VOXINK_AUTH_SECRET"),
         )
     )
 

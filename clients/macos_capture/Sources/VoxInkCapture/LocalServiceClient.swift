@@ -54,6 +54,7 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     public typealias StatusHandler = @Sendable (CaptureStatusEvent) -> Void
 
     private let endpoint: URL
+    private let authToken: String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let transcriptHandler: TranscriptHandler?
@@ -73,11 +74,13 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
 
     public init(
         endpoint: URL,
+        authToken: String? = nil,
         transcriptHandler: TranscriptHandler? = nil,
         statusHandler: StatusHandler? = nil
     ) throws {
         try LocalEndpointPolicy.validate(endpoint)
         self.endpoint = endpoint
+        self.authToken = authToken
         self.transcriptHandler = transcriptHandler
         self.statusHandler = statusHandler
         encoder.outputFormatting = [.sortedKeys]
@@ -213,7 +216,9 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     private func socket(for frame: AudioFrame) async throws -> URLSessionWebSocketTask {
         if let socket = sockets[frame.streamID] { return socket }
         guard let session, let sessionID else { throw URLError(.notConnectedToInternet) }
-        let task = session.webSocketTask(with: endpoint)
+        var request = URLRequest(url: endpoint)
+        if let authToken { request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization") }
+        let task = session.webSocketTask(with: request)
         sockets[frame.streamID] = task
         task.resume()
         let start = StreamStartEnvelope(

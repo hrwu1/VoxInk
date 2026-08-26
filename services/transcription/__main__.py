@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
@@ -21,11 +22,15 @@ def main() -> None:
     )
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
     args = parser.parse_args()
+    auth_secret = os.environ.get("VOXINK_AUTH_SECRET")
+    if not auth_secret:
+        parser.error("VOXINK_AUTH_SECRET must be set by the local supervisor")
     app = create_app(
         ServiceSettings(
             model_path=args.model.expanduser().resolve(),
             output_root=args.output.expanduser().resolve(),
             device=args.device,
+            auth_secret=auth_secret,
         )
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)
