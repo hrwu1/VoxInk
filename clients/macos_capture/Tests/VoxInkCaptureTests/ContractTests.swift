@@ -58,6 +58,116 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Array(counts.suffix(4)), [160, 160, 160, 160])
     }
 
+    /// A regression guard for silent system capture: `mutableAudioBufferList`
+    /// sizes its buffers from `frameLength`, so copying into the destination
+    /// before setting `frameLength` clamps every memcpy to zero bytes and
+    /// yields a correctly shaped, correctly counted, entirely silent buffer.
+    func testSystemAudioBufferCopyPreservesDeinterleavedFloatSamples() throws {
+        let frameCount = 960
+        let channelCount = 2
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: 48_000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: UInt32(channelCount),
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        // A distinct ramp per channel catches a silent copy, a short copy and a
+        // channel mix-up alike.
+        var channelData = (0..<channelCount).map { channel in
+            (0..<frameCount).map { Float(channel + 1) * Float($0 + 1) / Float(frameCount) }
+        }
+
+        let sampleBuffer = try channelData.withUnsafeMutableBufferPointer { channels -> CMSampleBuffer in
+            let ablSize = MemoryLayout<AudioBufferList>.size
+                + (channelCount - 1) * MemoryLayout<AudioBuffer>.size
+            let raw = UnsafeMutableRawPointer.allocate(
+                byteCount: ablSize,
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { raw.deallocate() }
+            let ablPointer = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+            ablPointer.pointee.mNumberBuffers = UInt32(channelCount)
+            let abl = UnsafeMutableAudioBufferListPointer(ablPointer)
+            for channel in 0..<channelCount {
+                abl[channel] = AudioBuffer(
+                    mNumberChannels: 1,
+                    mDataByteSize: UInt32(frameCount * 4),
+                    mData: UnsafeMutableRawPointer(channels[channel].withUnsafeMutableBufferPointer { $0.baseAddress! })
+                )
+            }
+
+            var formatDescription: CMAudioFormatDescription?
+            XCTAssertEqual(CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbd,
+                layoutSize: 0,
+                layout: nil,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            ), noErr)
+
+            var timing = CMSampleTimingInfo(
+                duration: CMTime(value: 1, timescale: 48_000),
+                presentationTimeStamp: .zero,
+                decodeTimeStamp: .invalid
+            )
+            var sampleBuffer: CMSampleBuffer?
+            XCTAssertEqual(CMSampleBufferCreate(
+                allocator: kCFAllocatorDefault,
+                dataBuffer: nil,
+                dataReady: false,
+                makeDataReadyCallback: nil,
+                refcon: nil,
+                formatDescription: formatDescription,
+                sampleCount: CMItemCount(frameCount),
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
+                sampleSizeEntryCount: 0,
+                sampleSizeArray: nil,
+                sampleBufferOut: &sampleBuffer
+            ), noErr)
+            let created = try XCTUnwrap(sampleBuffer)
+            XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(
+                created,
+                blockBufferAllocator: kCFAllocatorDefault,
+                blockBufferMemoryAllocator: kCFAllocatorDefault,
+                flags: 0,
+                bufferList: ablPointer
+            ), noErr)
+            return created
+        }
+
+        let buffer = try SystemAudioCapture.pcmBuffer(from: sampleBuffer)
+        XCTAssertEqual(Int(buffer.frameLength), frameCount)
+        XCTAssertEqual(Int(buffer.format.channelCount), channelCount)
+
+        let copied = try XCTUnwrap(buffer.floatChannelData)
+        for channel in 0..<channelCount {
+            for frame in 0..<frameCount {
+                XCTAssertEqual(
+                    copied[channel][frame],
+                    Float(channel + 1) * Float(frame + 1) / Float(frameCount),
+                    accuracy: 1e-6,
+                    "channel \(channel) frame \(frame) did not survive the copy"
+                )
+            }
+        }
+
+        // The peak the capture summary reports must reflect the real signal.
+        XCTAssertEqual(SystemAudioCapture.pcmPeakAmplitude(buffer), 2.0, accuracy: 1e-6)
+        let activity = SystemAudioCapture.pcmByteActivity(buffer)
+        XCTAssertEqual(activity.total, frameCount * channelCount * 4)
+        XCTAssertGreaterThan(activity.nonzero, 0)
+    }
+
     func testSystemPCMLevelSummaryReadsSignedLittleEndianSamples() {
         let pcm = Data([0x00, 0x00, 0xD2, 0x04, 0x30, 0xF8]) // 0, 1234, -2000
         XCTAssertEqual(SystemAudioCapture.pcmPeakAmplitude(pcm), 2000)

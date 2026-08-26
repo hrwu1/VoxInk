@@ -343,7 +343,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return (nonzero, total)
     }
 
-    private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer {
+    static func pcmBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
               let format = AVAudioFormat(streamDescription: streamDescription)
@@ -383,6 +383,11 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == noErr else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
 
+        // `mutableAudioBufferList` sizes each buffer from `frameLength`, which
+        // starts at zero, so the destination has to be sized before the copy:
+        // otherwise every memcpy clamps to zero bytes and the buffer stays
+        // silent while still reporting the right frame count and format.
+        pcmBuffer.frameLength = frameCount
         let sources = UnsafeMutableAudioBufferListPointer(sourceList)
         let destinations = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
         guard sources.count == destinations.count else {
@@ -392,7 +397,6 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let sourceData = source.mData, let destinationData = destination.mData else { continue }
             memcpy(destinationData, sourceData, min(Int(source.mDataByteSize), Int(destination.mDataByteSize)))
         }
-        pcmBuffer.frameLength = frameCount
         return pcmBuffer
     }
 }
