@@ -276,6 +276,12 @@ def create_app(
                 ),
             )
         runtime.sessions.append(event)
+        if session_id is None:
+            # A caller that named no session wanted one file transcribed, not an
+            # open session. Closing it here writes the completion marker and
+            # releases the transcript handle instead of leaking both until exit.
+            runtime.sessions.stop(session.config.session_id)
+            _finalize_audio(runtime, session)
         return {"event": event.to_dict()}
 
     @app.websocket("/v1/sessions/{session_id}/stream")

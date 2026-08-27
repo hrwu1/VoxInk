@@ -827,3 +827,50 @@ class StreamDeclaredSessionTests(unittest.TestCase):
         self.assertEqual("error", reply["type"])
         self.assertIn("seperate", reply["message"])
 
+
+class BatchSessionLifetimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=FakeProvider()
+        )
+        self.runtime = app.state.runtime
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _transcribe(self, **data: str) -> dict:
+        response = self.client.post(
+            "/v1/transcriptions",
+            data=data,
+            files={"file": ("a.wav", b"fake-wave-data", "audio/wav")},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()
+
+    def test_an_unnamed_batch_call_closes_the_session_it_created(self) -> None:
+        for _ in range(3):
+            self._transcribe(source="microphone")
+
+        sessions = self.runtime.sessions.list()
+        self.assertEqual(3, len(sessions))
+        self.assertEqual(
+            ["stopped", "stopped", "stopped"], [item.state.value for item in sessions]
+        )
+        self.assertFalse(any(item.writer.is_open for item in sessions))
+        for session in sessions:
+            part = next(
+                (self.output_root / session.config.session_id).glob("transcript-part-*.md")
+            )
+            self.assertIn("voxink-part-status: complete", part.read_text())
+
+    def test_a_named_batch_session_stays_open_for_more_audio(self) -> None:
+        self._transcribe(session_id="named", source="microphone")
+        self._transcribe(session_id="named", source="microphone")
+
+        self.assertEqual("running", self.client.get("/v1/sessions/named").json()["state"])
+        part = next((self.output_root / "named").glob("transcript-part-*.md"))
+        self.assertEqual(2, part.read_text().count("[MIC]"))
