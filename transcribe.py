@@ -6,6 +6,11 @@ import os
 from pathlib import Path
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+# Set, not defaulted: this script is the documented real-model smoke test, and
+# "VoxInk never downloads model files while running" has to hold here too, even
+# in a shell that has already opted back into online model resolution.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import torch
 from qwen_asr import Qwen3ASRModel
@@ -73,6 +78,7 @@ def main() -> None:
         attn_implementation="sdpa",
         max_inference_batch_size=1,
         max_new_tokens=args.max_new_tokens,
+        local_files_only=True,
     )
 
     print(f"Transcribing {audio_path.name}...", flush=True)
