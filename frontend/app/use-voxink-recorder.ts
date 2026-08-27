@@ -133,11 +133,17 @@ export function useVoxInkRecorder() {
   const sendFrame = useCallback((samples: Int16Array) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN || !acceptingAudio.current) return;
+    // The clock counts captured audio, not delivered audio. Advancing it before
+    // the backpressure check leaves a dropped frame as a gap on the session
+    // timeline; skipping it would pull every later caption earlier instead, and
+    // the shift would accumulate for the rest of the session. Paused time is
+    // deliberately not counted: the check above returns before this point.
+    const startMs = sentSamples.current * 1000 / TARGET_SAMPLE_RATE;
+    sentSamples.current += samples.length;
     if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       setDroppedFrames((value) => value + 1);
       return;
     }
-    const startMs = sentSamples.current * 1000 / TARGET_SAMPLE_RATE;
     socket.send(JSON.stringify({
       type: 'audio.frame',
       sequence: sequence.current++,
@@ -148,7 +154,6 @@ export function useVoxInkRecorder() {
       byte_length: samples.byteLength,
     }));
     socket.send(samples.buffer);
-    sentSamples.current += samples.length;
   }, []);
 
   const captureAudio = useCallback((input: Float32Array, inputRate: number) => {

@@ -104,7 +104,7 @@ export default function Home() {
               {captions.length ? captions.map((caption) => (
                 <article className="caption-line" key={caption.id}>
                   <time>{formatTime(caption.startMs)}</time>
-                  <div><span className="speaker-label">MIC</span><p>{caption.text}</p></div>
+                  <div><span className="speaker-label">{caption.source === 'system' ? 'SYSTEM' : 'MIC'}</span><p>{caption.text}</p></div>
                 </article>
               )) : (
                 <div className="empty-captions">
