@@ -215,6 +215,30 @@ finalize the shared session while another source remains active.
 See [the Python protocol notes](clients/python_capture/README.md) and
 [the macOS capture notes](clients/macos_capture/README.md) for wire examples.
 
+## Measured performance
+
+`benchmarks/cpu-baseline.json` records the current CPU baseline, produced by:
+
+```sh
+./scripts/voxink-bench --device cpu --json benchmarks/cpu-baseline.json
+```
+
+On Apple Silicon with the CPU-only Torch build, transcription is comfortably
+faster than real time at every utterance length the VAD produces:
+
+| Utterance | Median inference | Real-time factor |
+| --- | --- | --- |
+| 2 s | 1.18 s | 0.59x |
+| 5 s | 1.91 s | 0.38x |
+| 10 s | 3.02 s | 0.30x |
+| 15 s | 4.16 s | 0.28x |
+
+Model load takes about 12 s and peak resident memory reaches roughly 9 GiB, so
+memory headroom — not inference speed — is the binding constraint on the current
+runtime. Accelerated Apple Silicon inference is an optimization, not a
+prerequisite for live captions. Re-run the benchmark and compare against this
+file before changing the model or runtime.
+
 ## Tests
 
 Run all fast Python tests:
