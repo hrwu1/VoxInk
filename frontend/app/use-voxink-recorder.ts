@@ -49,7 +49,10 @@ export function useVoxInkRecorder() {
       cache: 'no-store',
     }).then(async (response) => {
       if (!response.ok) throw new Error('The UI launch link expired. Run voxink-dev --web again.');
-      const payload = await response.json();
+      const payload = (await response.json()) as { token?: unknown };
+      if (typeof payload.token !== 'string' || !payload.token) {
+        throw new Error('The local helper returned no launch credential.');
+      }
       const endpoint = window.location.origin.replace(/^http/, 'ws');
       setLaunch({ endpoint, token: payload.token, retainAudio });
       setMessage(retainAudio ? 'Local helper ready — saving audio' : 'Authenticated local helper ready');
