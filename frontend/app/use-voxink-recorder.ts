@@ -13,7 +13,7 @@ export type Caption = {
   isFinal: boolean;
 };
 
-type LaunchConfig = { endpoint: string; token: string };
+type LaunchConfig = { endpoint: string; token: string; retainAudio: boolean };
 
 const TARGET_SAMPLE_RATE = 16_000;
 const FRAME_SAMPLES = 320;
@@ -40,6 +40,7 @@ export function useVoxInkRecorder() {
   useEffect(() => {
     const values = new URLSearchParams(window.location.hash.slice(1));
     const bootstrap = values.get('bootstrap');
+    const retainAudio = values.get('retain_audio') === '1';
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
     if (!bootstrap) return;
     void fetch('/v1/ui/bootstrap', {
@@ -50,8 +51,8 @@ export function useVoxInkRecorder() {
       if (!response.ok) throw new Error('The UI launch link expired. Run voxink-dev --web again.');
       const payload = await response.json();
       const endpoint = window.location.origin.replace(/^http/, 'ws');
-      setLaunch({ endpoint, token: payload.token });
-      setMessage('Authenticated local helper ready');
+      setLaunch({ endpoint, token: payload.token, retainAudio });
+      setMessage(retainAudio ? 'Local helper ready — saving audio' : 'Authenticated local helper ready');
     }).catch((error) => {
       setState('failed');
       setMessage(error instanceof Error ? error.message : 'Cannot authenticate the local UI');
@@ -202,6 +203,7 @@ export function useVoxInkRecorder() {
         session_sources: ['microphone'], stream_id: 'microphone-1', source: 'microphone',
         audio: { encoding: 'pcm_s16le', sample_rate_hz: TARGET_SAMPLE_RATE, channels: 1, frame_duration_ms: 20 },
         client: { name: 'voxink-web', version: '0.1.0' }, stream_mode: 'frames',
+        retention: { audio: launch.retainAudio, separate: true, combined: false },
       }));
       const media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
       const context = new AudioContext();

@@ -53,6 +53,7 @@ class CaptureConfig:
     language: str | None = None
     vad: VadConfig = VadConfig()
     auth_token: str | None = None
+    retain_audio: bool = False
 
     def __post_init__(self) -> None:
         if self.language is not None and self.language not in {"en", "zh"}:
@@ -265,6 +266,11 @@ class MicrophoneCaptureClient:
             "client": {"name": "voxink-python-capture", "version": __version__},
             "stream_mode": self.config.stream_mode,
             "vad": asdict(self.config.vad),
+            "retention": {
+                "audio": self.config.retain_audio,
+                "separate": True,
+                "combined": False,
+            },
         }
         if self.config.language is not None:
             # Omitted entirely when unset so the service keeps automatic detection.

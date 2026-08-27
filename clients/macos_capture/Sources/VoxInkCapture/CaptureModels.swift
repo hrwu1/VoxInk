@@ -17,6 +17,15 @@ public struct CaptureConfiguration: Sendable {
     public var sampleRate: Int
     public var serviceURL: URL
     public var authToken: String?
+    public var retainAudio: Bool
+
+    /// Bundle identifiers this session captures, empty for microphone-only or
+    /// all-system capture. Every stream reports the same list so whichever one
+    /// opens first records it in the transcript metadata.
+    public var selectedApplications: [String] {
+        guard case .applications(let identifiers) = systemAudio else { return [] }
+        return identifiers.sorted()
+    }
 
     public init(
         sessionID: String,
@@ -24,12 +33,14 @@ public struct CaptureConfiguration: Sendable {
         systemAudio: SystemAudioSelection?,
         sampleRate: Int = 16_000,
         serviceURL: URL? = nil,
-        authToken: String? = ProcessInfo.processInfo.environment["VOXINK_AUTH_SECRET"]
+        authToken: String? = ProcessInfo.processInfo.environment["VOXINK_AUTH_SECRET"],
+        retainAudio: Bool = false
     ) {
         self.sessionID = sessionID
         self.microphoneEnabled = microphoneEnabled
         self.systemAudio = systemAudio
         self.sampleRate = sampleRate
+        self.retainAudio = retainAudio
         let safeSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
         self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8765/v1/sessions/\(safeSessionID)/stream")!
         self.authToken = authToken

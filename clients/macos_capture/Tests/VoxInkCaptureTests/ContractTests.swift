@@ -12,6 +12,66 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(event.captionItem.isFinal)
     }
 
+    /// Every stream of a session reports the selected applications and the
+    /// retention request, because the service records whichever stream.start
+    /// arrives first and the microphone socket usually opens before the system
+    /// one.
+    func testStreamStartCarriesApplicationsAndRetention() throws {
+        let envelope = StreamStartEnvelope(
+            sessionID: "session-1",
+            streamID: "microphone-1",
+            source: .microphone,
+            sessionSources: [.microphone, .system],
+            sampleRate: 16_000,
+            channels: 1,
+            frameDurationMilliseconds: 20,
+            applicationBundleIdentifiers: ["com.apple.Safari", "us.zoom.xos"],
+            retainAudio: true
+        )
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) as? [String: Any]
+        )
+        XCTAssertEqual(
+            json["application_bundle_identifiers"] as? [String],
+            ["com.apple.Safari", "us.zoom.xos"]
+        )
+        let retention = try XCTUnwrap(json["retention"] as? [String: Bool])
+        XCTAssertEqual(retention, ["audio": true, "separate": true, "combined": false])
+        XCTAssertEqual(json["session_sources"] as? [String], ["microphone", "system"])
+    }
+
+    func testRetentionStaysOffUnlessRequested() throws {
+        let envelope = StreamStartEnvelope(
+            sessionID: "session-1",
+            streamID: "microphone-1",
+            source: .microphone,
+            sessionSources: [.microphone],
+            sampleRate: 16_000,
+            channels: 1,
+            frameDurationMilliseconds: 20,
+            applicationBundleIdentifiers: nil,
+            retainAudio: false
+        )
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) as? [String: Any]
+        )
+        let retention = try XCTUnwrap(json["retention"] as? [String: Bool])
+        XCTAssertEqual(retention["audio"], false)
+    }
+
+    func testConfigurationExposesSelectedApplicationsForEveryStream() {
+        let apps = CaptureConfiguration(
+            sessionID: "s",
+            microphoneEnabled: true,
+            systemAudio: .applications(bundleIdentifiers: ["us.zoom.xos", "com.apple.Safari"])
+        )
+        XCTAssertEqual(apps.selectedApplications, ["com.apple.Safari", "us.zoom.xos"])
+        XCTAssertFalse(apps.retainAudio)
+
+        let all = CaptureConfiguration(sessionID: "s", microphoneEnabled: true, systemAudio: .all)
+        XCTAssertEqual(all.selectedApplications, [])
+    }
+
     func testDefaultEndpointIncludesSessionID() {
         let configuration = CaptureConfiguration(
             sessionID: "session-1",

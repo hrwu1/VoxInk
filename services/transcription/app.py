@@ -441,7 +441,14 @@ def _open_stream(
     declared_sources = tuple(
         Source(item) for item in control.get("session_sources", [source.value])
     )
-    _ensure_started_session(runtime, session_id, source, sources=declared_sources)
+    _ensure_started_session(
+        runtime,
+        session_id,
+        source,
+        sources=declared_sources,
+        applications=_stream_applications(control),
+        retention=_stream_retention(control),
+    )
     stream_id = str(control["stream_id"])
     runtime.active_streams.setdefault(session_id, set()).add(stream_id)
     runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
@@ -708,6 +715,50 @@ async def _transcribe_pcm_chunk(
         )
 
 
+def _stream_applications(start: dict[str, Any]) -> tuple[str, ...]:
+    """Read the selected application bundle identifiers a capture client reports.
+
+    Every stream of a session carries the same list, so whichever stream opens
+    first records them in the transcript's front matter.
+    """
+    applications = start.get("application_bundle_identifiers")
+    if applications is None:
+        return ()
+    if isinstance(applications, str) or not isinstance(applications, (list, tuple)):
+        raise ValueError("application_bundle_identifiers must be a list of strings")
+    identifiers = []
+    for item in applications:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("application bundle identifiers must be non-empty strings")
+        identifiers.append(item.strip())
+    return tuple(dict.fromkeys(identifiers))
+
+
+def _stream_retention(start: dict[str, Any]) -> dict[str, bool]:
+    """Read the optional audio-retention request from a stream.start message.
+
+    Retention stays off unless a client asks for it, and the combination is
+    validated by `SessionConfig` so an impossible request fails at stream start
+    rather than silently recording nothing.
+    """
+    requested = start.get("retention")
+    if requested is None:
+        return {}
+    if not isinstance(requested, dict):
+        raise ValueError("retention must be an object")
+    names = {"audio": "audio_saved", "separate": "save_separate_audio", "combined": "save_combined_audio"}
+    unknown = set(requested) - set(names)
+    if unknown:
+        raise ValueError(f"unsupported retention fields: {', '.join(sorted(unknown))}")
+    values = {}
+    for name, field in names.items():
+        if name in requested:
+            if not isinstance(requested[name], bool):
+                raise ValueError(f"retention.{name} must be true or false")
+            values[field] = requested[name]
+    return values
+
+
 def _stream_language(start: dict[str, Any]) -> str | None:
     """Read the optional manual language override from a stream.start message."""
     language = start.get("language")
@@ -732,6 +783,8 @@ def _ensure_started_session(
     source: Source,
     *,
     sources: tuple[Source, ...] | None = None,
+    applications: tuple[str, ...] = (),
+    retention: dict[str, bool] | None = None,
 ):
     if session_id is None:
         session_id = _new_session_id()
@@ -739,7 +792,12 @@ def _ensure_started_session(
         session = runtime.sessions.get(session_id)
     except KeyError:
         session = runtime.sessions.create(
-            SessionConfig(session_id=session_id, sources=sources or (source,))
+            SessionConfig(
+                session_id=session_id,
+                sources=sources or (source,),
+                applications=applications,
+                **(retention or {}),
+            )
         )
     if source not in session.config.sources:
         raise HTTPException(

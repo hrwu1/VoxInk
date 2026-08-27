@@ -76,6 +76,20 @@ class CliParserTests(unittest.TestCase):
             command,
         )
 
+    def test_native_command_forwards_audio_retention(self) -> None:
+        plan = _build_capture_plan(["system"], [])
+        endpoint = "ws://127.0.0.1:4321/v1/sessions/demo/stream"
+        self.assertNotIn(
+            "--retain-audio",
+            _native_capture_command(Path("/tmp/voxink-capture"), endpoint, "demo", plan),
+        )
+        self.assertIn(
+            "--retain-audio",
+            _native_capture_command(
+                Path("/tmp/voxink-capture"), endpoint, "demo", plan, True
+            ),
+        )
+
     def test_all_system_audio_maps_to_native_system_flag(self) -> None:
         plan = _build_capture_plan(["system"], [])
         command = _native_capture_command(
@@ -115,8 +129,33 @@ class WebUiLauncherTests(unittest.TestCase):
         self.assertEqual(0, result)
         url = opened.call_args.args[0]
         self.assertIn("bootstrap=temporary-bootstrap", url)
+        self.assertIn("retain_audio=0", url)
         self.assertNotIn("persistent-service-secret", url)
         diagnostics.emit.assert_called_once_with("ui.opened", component="ui", port=43210)
+
+    def test_audio_retention_reaches_the_browser_recorder(self) -> None:
+        process = MagicMock()
+        process.poll.return_value = None
+        supervisor = MagicMock()
+        supervisor.ui_bootstrap_secret = "temporary-bootstrap"
+        supervisor.base_url = "http://127.0.0.1:43210"
+        supervisor.port = 43210
+        supervisor.process = process
+
+        with (
+            patch("voxink_dev.cli.webbrowser.open", return_value=True) as opened,
+            patch("voxink_dev.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch("builtins.print"),
+        ):
+            _run_web_ui(
+                supervisor,
+                {"ui_available": True},
+                MagicMock(),
+                Path("/tmp/voxink-test-output"),
+                True,
+            )
+
+        self.assertIn("retain_audio=1", opened.call_args.args[0])
 
 
 if __name__ == "__main__":

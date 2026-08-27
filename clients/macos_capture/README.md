@@ -68,7 +68,11 @@ non-WebSocket scheme.
 Each source stream gets an independent WebSocket so microphone and system state
 never mix. The connection begins with a `stream.start` JSON message containing
 the session, stream, source, full `session_sources` list, 16 kHz mono PCM
-description, client metadata, and server-side VAD settings. Every PCM payload is sent as an `audio.frame` JSON
+description, client metadata, server-side VAD settings, the selected
+`application_bundle_identifiers`, and a `retention` block. Every stream of a
+session carries the same application list and retention request, because the
+service records whichever `stream.start` arrives first and the microphone socket
+usually opens before the system one. Every PCM payload is sent as an `audio.frame` JSON
 header immediately followed by a raw binary message:
 
 ```json

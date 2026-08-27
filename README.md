@@ -18,7 +18,7 @@ and Transformers offline modes and loads the model exclusively from the local
 - Independent microphone and system streams with source-labeled events.
 - Manual session start, pause, resume, and stop.
 - Markdown rotation at six hours or 5 MiB with recovery markers.
-- Optional one-hour rotating microphone/system WAV files.
+- Optional one-hour rotating microphone/system WAV files, off unless requested.
 - Optional combined WAV generation using aligned saturating mixing.
 - Native ScreenCaptureKit filtering for all system audio or multiple apps.
 - Automatic selected-app reconnection by bundle identifier.
@@ -66,6 +66,21 @@ and select the Terminal interface explicitly:
 Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down both
 capture and the helper, and the saved transcript path is printed when capture
 exits. The former explicit `--web` spelling remains supported for compatibility.
+
+### Keeping the audio
+
+Audio retention is off by default. Add `--retain-audio` to any workflow to save
+the captured audio as rotating WAV parts beside the transcript:
+
+```sh
+./scripts/voxink-dev --retain-audio
+./scripts/voxink-dev --terminal --retain-audio
+./scripts/voxink-dev --source microphone --source system --retain-audio
+```
+
+Microphone and system audio are saved as separate tracks so their sources stay
+distinguishable. The flag reaches whichever interface you selected, and preflight
+requires 2 GiB free instead of 512 MiB before it will start.
 
 ### Native system and application capture
 

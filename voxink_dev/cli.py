@@ -136,7 +136,9 @@ def main(argv: list[str] | None = None) -> int:
             f"(protocol {health['protocol_version']}, provider {health['provider']})."
         )
         if args.web and not capture_plan.uses_native_capture:
-            return _run_web_ui(supervisor, health, diagnostics, report.output_root)
+            return _run_web_ui(
+                supervisor, health, diagnostics, report.output_root, args.retain_audio
+            )
         endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
         if capture_plan.uses_native_capture:
             command = _native_capture_command(
@@ -144,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
                 endpoint,
                 session_id,
                 capture_plan,
+                args.retain_audio,
             )
             print(
                 "Starting native macOS capture. Approve Microphone and/or "
@@ -159,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--session-id",
                 session_id,
             ]
+            if args.retain_audio:
+                command.append("--retain-audio")
         return _run_capture_process(
             supervisor,
             command,
@@ -198,6 +203,7 @@ def _native_capture_command(
     endpoint: str,
     session_id: str,
     plan: CapturePlan,
+    retain_audio: bool = False,
 ) -> list[str]:
     command = [
         str(executable.expanduser().resolve()),
@@ -206,6 +212,8 @@ def _native_capture_command(
         "--session-id",
         session_id,
     ]
+    if retain_audio:
+        command.append("--retain-audio")
     if "microphone" in plan.modes:
         command.append("--mic")
     if "system" in plan.modes:
@@ -275,12 +283,17 @@ def _run_web_ui(
     health: dict[str, object],
     diagnostics: DiagnosticLog,
     output_root: Path,
+    retain_audio: bool = False,
 ) -> int:
     if not health.get("ui_available"):
         raise SupervisorError(
             "the local UI build is missing; run the frontend build:local script"
         )
-    fragment = urlencode({"bootstrap": supervisor.ui_bootstrap_secret})
+    # The fragment never reaches the helper, and the recorder strips it from the
+    # address bar as soon as it has read both values.
+    fragment = urlencode(
+        {"bootstrap": supervisor.ui_bootstrap_secret, "retain_audio": "1" if retain_audio else "0"}
+    )
     url = f"{supervisor.base_url}/ui/#{fragment}"
     if not webbrowser.open(url):
         raise SupervisorError("the browser could not be opened")

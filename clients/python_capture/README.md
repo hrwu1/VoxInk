@@ -22,6 +22,9 @@ The default endpoint is
 `ws://127.0.0.1:8765/v1/sessions/{session_id}/stream`. Use `--url` to override
 it. Run `python -m clients.python_capture --help` for VAD and device settings.
 
+Audio retention is off by default. `--retain-audio` asks the service to save the
+captured microphone audio as rotating WAV parts next to the transcript.
+
 Language defaults to automatic detection. `--language en` or `--language zh`
 sends a manual override in `stream.start`; omitting the flag omits the field.
 
@@ -52,12 +55,19 @@ The client begins with a JSON text message:
   "client": {"name": "voxink-python-capture", "version": "0.1.0"},
   "stream_mode": "frames",
   "vad": {},
+  "retention": {"audio": false, "separate": true, "combined": false},
   "language": "zh"
 }
 ```
 
 `language` is optional. Omit it for automatic detection; `en` and `zh` force a
 language for every chunk on the stream.
+
+`retention` configures optional audio saving for the session this stream opens.
+It is honoured only by the stream that creates the session, and every stream of
+one session should send the same values. `audio` is off by default, so omitting
+the block keeps the privacy default. Pass `--retain-audio` to request rotating
+WAV parts alongside the transcript.
 
 Each binary message is immediately preceded by one JSON text header. The
 binary payload is headerless signed 16-bit little-endian mono PCM and its size

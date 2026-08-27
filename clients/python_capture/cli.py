@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="force a language; omit for automatic detection",
     )
+    parser.add_argument(
+        "--retain-audio",
+        action="store_true",
+        help="also save the captured microphone audio as rotating WAV parts",
+    )
     parser.add_argument("--vad-threshold", type=float, default=500.0)
     parser.add_argument("--silence-ms", type=int, default=700)
     parser.add_argument("--min-speech-ms", type=int, default=200)
@@ -68,6 +73,7 @@ async def run(args: argparse.Namespace) -> int:
             stream_mode=args.stream_mode,
             language=args.language,
             vad=vad,
+            retain_audio=args.retain_audio,
             auth_token=os.environ.get("VOXINK_AUTH_SECRET"),
         )
     )

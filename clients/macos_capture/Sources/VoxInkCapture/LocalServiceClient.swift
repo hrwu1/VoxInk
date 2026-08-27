@@ -55,6 +55,8 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
 
     private let endpoint: URL
     private let authToken: String?
+    private let applications: [String]
+    private let retainAudio: Bool
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let transcriptHandler: TranscriptHandler?
@@ -75,12 +77,16 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     public init(
         endpoint: URL,
         authToken: String? = nil,
+        applications: [String] = [],
+        retainAudio: Bool = false,
         transcriptHandler: TranscriptHandler? = nil,
         statusHandler: StatusHandler? = nil
     ) throws {
         try LocalEndpointPolicy.validate(endpoint)
         self.endpoint = endpoint
         self.authToken = authToken
+        self.applications = applications
+        self.retainAudio = retainAudio
         self.transcriptHandler = transcriptHandler
         self.statusHandler = statusHandler
         encoder.outputFormatting = [.sortedKeys]
@@ -229,7 +235,12 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
             sampleRate: frame.sampleRate,
             channels: frame.channels,
             frameDurationMilliseconds: 20,
+            // The microphone stream carries no per-frame application list, but
+            // the session's selection belongs in the transcript metadata no
+            // matter which stream opens first.
             applicationBundleIdentifiers: frame.applicationBundleIdentifiers
+                ?? (applications.isEmpty ? nil : applications),
+            retainAudio: retainAudio
         )
         try await sendJSON(start, on: task)
         Task { [weak self, task] in await self?.receiveLoop(task: task, streamID: frame.streamID) }
@@ -281,7 +292,7 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     }
 }
 
-private struct StreamStartEnvelope: Encodable {
+struct StreamStartEnvelope: Encodable {
     let type = "stream.start"
     let schemaVersion = 1
     let sessionID: String
@@ -293,6 +304,7 @@ private struct StreamStartEnvelope: Encodable {
     let streamMode = "frames"
     let vad = VADDescription()
     let applicationBundleIdentifiers: [String]?
+    let retention: RetentionDescription
 
     init(
         sessionID: String,
@@ -302,8 +314,10 @@ private struct StreamStartEnvelope: Encodable {
         sampleRate: Int,
         channels: Int,
         frameDurationMilliseconds: Double,
-        applicationBundleIdentifiers: [String]?
+        applicationBundleIdentifiers: [String]?,
+        retainAudio: Bool
     ) {
+        retention = RetentionDescription(audio: retainAudio, separate: true, combined: false)
         self.sessionID = sessionID
         self.streamID = streamID
         self.source = source
@@ -318,7 +332,7 @@ private struct StreamStartEnvelope: Encodable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, source, audio, client, vad
+        case type, source, audio, client, vad, retention
         case schemaVersion = "schema_version"
         case sessionID = "session_id"
         case streamID = "stream_id"
@@ -328,7 +342,13 @@ private struct StreamStartEnvelope: Encodable {
     }
 }
 
-private struct AudioDescription: Encodable {
+struct RetentionDescription: Encodable {
+    let audio: Bool
+    let separate: Bool
+    let combined: Bool
+}
+
+struct AudioDescription: Encodable {
     let encoding: String
     let sampleRate: Int
     let channels: Int
@@ -340,8 +360,8 @@ private struct AudioDescription: Encodable {
     }
 }
 
-private struct ClientDescription: Encodable { let name: String; let version: String }
-private struct VADDescription: Encodable {
+struct ClientDescription: Encodable { let name: String; let version: String }
+struct VADDescription: Encodable {
     let thresholdRMS = 500.0
     let silenceDurationMilliseconds = 700
     let minSpeechDurationMilliseconds = 200

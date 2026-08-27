@@ -730,3 +730,100 @@ class StreamSessionErrorTests(unittest.TestCase):
         self.assertEqual("error", message["type"])
         self.assertEqual("session_unavailable", message["code"])
         self.assertIn("system", message["message"])
+
+
+class StreamDeclaredSessionTests(unittest.TestCase):
+    """A stream.start must be able to configure the session it implicitly creates.
+
+    Every shipped client opens a session this way rather than through
+    `POST /v1/sessions`, so anything only that route can set is unreachable in
+    practice.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=FakeProvider()
+        )
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _front_matter(self, session_id: str) -> str:
+        part = next((self.output_root / session_id).glob("transcript-part-*.md"))
+        return part.read_text()
+
+    def test_selected_applications_reach_the_transcript_metadata(self) -> None:
+        message = _start_message("apps", "system")
+        message["application_bundle_identifiers"] = [
+            "com.apple.Safari",
+            "us.zoom.xos",
+            "com.apple.Safari",
+        ]
+        with self.client.websocket_connect("/v1/sessions/apps/stream") as websocket:
+            websocket.send_json(message)
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            _utterance(websocket, "system", 0)
+            websocket.send_json({"type": "stream.stop", "stream_id": "system-1"})
+
+        front_matter = self._front_matter("apps")
+        self.assertIn('applications: ["com.apple.Safari", "us.zoom.xos"]', front_matter)
+
+    def test_microphone_stream_carries_the_sessions_application_list(self) -> None:
+        """The native client opens the mic socket first; the list must survive."""
+        message = _start_message("mixed", "microphone", sources=["microphone", "system"])
+        message["application_bundle_identifiers"] = ["us.zoom.xos"]
+        with self.client.websocket_connect("/v1/sessions/mixed/stream") as websocket:
+            websocket.send_json(message)
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            _utterance(websocket, "microphone", 0)
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+
+        self.assertIn('applications: ["us.zoom.xos"]', self._front_matter("mixed"))
+
+    def test_requested_retention_saves_audio_without_a_session_route_call(self) -> None:
+        message = _start_message("kept", "microphone")
+        message["retention"] = {"audio": True, "separate": True, "combined": False}
+        with self.client.websocket_connect("/v1/sessions/kept/stream") as websocket:
+            websocket.send_json(message)
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            _utterance(websocket, "microphone", 0)
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+
+        session_dir = self.output_root / "kept"
+        saved = sorted(path.name for path in session_dir.glob("*.wav"))
+        self.assertEqual(["microphone-part-001.wav"], saved)
+        self.assertIn("audio_saved: true", self._front_matter("kept"))
+
+    def test_retention_stays_off_when_no_client_asks_for_it(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/plain/stream") as websocket:
+            websocket.send_json(_start_message("plain", "microphone"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            _utterance(websocket, "microphone", 0)
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1"})
+
+        self.assertEqual([], list((self.output_root / "plain").glob("*.wav")))
+        self.assertIn("audio_saved: false", self._front_matter("plain"))
+
+    def test_an_impossible_retention_request_is_reported_not_ignored(self) -> None:
+        message = _start_message("bad", "microphone")
+        message["retention"] = {"audio": True, "separate": False, "combined": False}
+        with self.client.websocket_connect("/v1/sessions/bad/stream") as websocket:
+            websocket.send_json(message)
+            reply = websocket.receive_json()
+        self.assertEqual("error", reply["type"])
+        self.assertEqual("invalid_message", reply["code"])
+        self.assertIn("save_separate_audio", reply["message"])
+
+    def test_unknown_retention_fields_are_rejected(self) -> None:
+        message = _start_message("typo", "microphone")
+        message["retention"] = {"audio": True, "seperate": True}
+        with self.client.websocket_connect("/v1/sessions/typo/stream") as websocket:
+            websocket.send_json(message)
+            reply = websocket.receive_json()
+        self.assertEqual("error", reply["type"])
+        self.assertIn("seperate", reply["message"])
+
