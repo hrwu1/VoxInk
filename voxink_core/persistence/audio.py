@@ -65,6 +65,11 @@ class AudioRetentionWriter:
         self.max_data_bytes = self.frames_per_part * self.frame_bytes
         self.durable_flush = durable_flush
         self._tracks: dict[Source, _Track] = {}
+        # Part numbers stay time-aligned within one run so microphone and system
+        # parts of the same number always cover the same audio. A run that finds
+        # a previous run's parts in the directory numbers its own above them, and
+        # every source shares the offset so that alignment survives.
+        self._part_base = 0
         self._lock = threading.RLock()
 
     def append_pcm(
@@ -93,12 +98,12 @@ class AudioRetentionWriter:
         with self._lock:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             start_frame = start_ms * self.sample_rate // 1000
+            chunk_frames = len(pcm_s16le) // self.frame_bytes
             track = self._tracks.get(source)
             if track is None:
-                track = self._recover_or_open(source, start_frame)
+                track = self._recover_or_open(source, start_frame, chunk_frames)
 
             overlap = max(0, track.written_until_frame - start_frame)
-            chunk_frames = len(pcm_s16le) // self.frame_bytes
             if overlap >= chunk_frames:
                 return ()
             if overlap:
@@ -110,12 +115,12 @@ class AudioRetentionWriter:
             offset = 0
             remaining = len(pcm_s16le) // self.frame_bytes
             while remaining:
-                part = cursor // self.frames_per_part + 1
+                part = self._part_for(cursor)
                 if track.part != part:
                     self._close_track(track)
                     track = self._open_track(source, part)
                     self._tracks[source] = track
-                part_start = (part - 1) * self.frames_per_part
+                part_start = self._part_start(part)
                 position = cursor - part_start
                 existing_frames = track.data_bytes // self.frame_bytes
                 if position > existing_frames:
@@ -147,7 +152,14 @@ class AudioRetentionWriter:
         overwrite: bool = False,
         chunk_frames: int = 8192,
     ) -> tuple[Path, ...]:
-        """Create aligned combined parts with a chunked saturating sample mix."""
+        """Create aligned combined parts with a chunked saturating sample mix.
+
+        Parts that already have a combined file are left untouched and skipped
+        rather than aborting the run: a session directory can hold parts from an
+        earlier run whose combined output is already final, and stopping at the
+        first of those would leave this run's parts unmixed. Only the parts
+        written here are returned.
+        """
         if chunk_frames <= 0:
             raise ValueError("chunk_frames must be positive")
         with self._lock:
@@ -162,7 +174,7 @@ class AudioRetentionWriter:
                     continue
                 output = self.session_dir / f"combined-part-{part:03d}.wav"
                 if output.exists() and not overwrite:
-                    raise FileExistsError(f"combined audio already exists: {output}")
+                    continue
                 temporary = output.with_suffix(".wav.tmp")
                 if temporary.exists():
                     temporary.unlink()
@@ -181,17 +193,63 @@ class AudioRetentionWriter:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def _recover_or_open(self, source: Source, requested_start: int) -> _Track:
+    def _part_for(self, frame: int) -> int:
+        return self._part_base + frame // self.frames_per_part + 1
+
+    def _part_start(self, part: int) -> int:
+        return (part - 1 - self._part_base) * self.frames_per_part
+
+    def _recover_or_open(
+        self, source: Source, requested_start: int, chunk_frames: int
+    ) -> _Track:
+        """Resume the previous writer's last part, or roll past a finished run.
+
+        A process that stops and continues hands the next writer audio that
+        carries on from where the last one stopped, and resuming its part is
+        what keeps one recording in one file. Such a chunk normally starts a
+        little behind the stored cursor, because chunkers retain overlap, but it
+        still reaches past it.
+
+        A *new* run reusing the session directory restarts its clock instead, so
+        its first chunk ends before the cursor and carries nothing new. That is
+        indistinguishable from a fully repeated chunk, and treating it as one
+        would silently discard the whole recording, so the run is given fresh
+        part numbers above everything already stored, the way the Markdown
+        writer does. A restarted run whose first chunk is longer than the whole
+        previous run still loses that much to overlap trimming, which is the
+        most these two cases can be told apart from the audio alone.
+        """
         parts = self._part_numbers(source)
-        requested_part = requested_start // self.frames_per_part + 1
-        if parts and parts[-1] >= requested_part:
-            part = parts[-1]
-            track = self._open_existing_track(source, part)
+        committed = self._committed_end(source, parts[-1]) if parts else None
+        if committed is not None and requested_start + chunk_frames > committed:
+            track = self._open_existing_track(source, parts[-1])
             self._tracks[source] = track
             return track
-        track = self._open_track(source, requested_part)
+        if parts:
+            self._part_base = max(self._part_base, self._highest_part())
+        track = self._open_track(source, self._part_for(requested_start))
         self._tracks[source] = track
         return track
+
+    def _committed_end(self, source: Source, part: int) -> int | None:
+        """Frame index one past the last sample committed to a part's header.
+
+        `None` means the part cannot be read, and therefore cannot prove that
+        incoming audio duplicates it. The caller rolls to a fresh part rather
+        than resuming a corrupt file and discarding live audio into it.
+        """
+        try:
+            with self._path(source, part).open("rb") as handle:
+                _, _, data_bytes = _read_header(handle)
+        except (OSError, ValueError):
+            return None
+        return self._part_start(part) + data_bytes // self.frame_bytes
+
+    def _highest_part(self) -> int:
+        return max(
+            (numbers[-1] for numbers in map(self._part_numbers, Source) if numbers),
+            default=0,
+        )
 
     def _open_track(self, source: Source, part: int) -> _Track:
         path = self._path(source, part)
@@ -207,7 +265,7 @@ class AudioRetentionWriter:
             path=path,
             handle=handle,
             data_bytes=0,
-            written_until_frame=(part - 1) * self.frames_per_part,
+            written_until_frame=self._part_start(part),
         )
 
     def _open_existing_track(self, source: Source, part: int) -> _Track:
@@ -227,10 +285,9 @@ class AudioRetentionWriter:
         except Exception:
             handle.close()
             raise
-        part_start = (part - 1) * self.frames_per_part
         return _Track(
             source, part, path, handle, data_bytes,
-            part_start + data_bytes // self.frame_bytes,
+            self._part_start(part) + data_bytes // self.frame_bytes,
         )
 
     def _write_bytes(self, track: _Track, data: bytes) -> None:
