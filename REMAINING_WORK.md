@@ -214,6 +214,17 @@ an app or helper crash can be recovered safely.
 Provide one coherent interface for configuration, source selection, capture,
 captions, and transcript access.
 
+### Current status (2026-08-28)
+
+- The browser now provides microphone, all-system, selected-application, and
+  combined microphone/system capture modes.
+- Authenticated loopback endpoints start, pause, resume, stop, and report the
+  native helper while preserving source-labelled live captions.
+- The UI lists currently running applications by bundle identifier and can
+  refresh that catalog without restarting VoxInk.
+- Remaining controls in this milestone are microphone-device selection,
+  transcript open/quit actions, and richer queue/device error reporting.
+
 ### Work
 
 - Add an interactive terminal interface with clear states:
@@ -239,8 +250,8 @@ captions, and transcript access.
 - Print and optionally open the transcript when a session stops.
 - Translate permission, device, selected-application, model, disk, and helper
   failures into user-readable messages with a next action.
-- Extend the Swift development CLI with interactive pause/resume if the native
-  helper remains a separate process.
+- The Swift development CLI accepts supervisor pause/resume signals while it
+  remains a separate process.
 
 ### Acceptance criteria
 
@@ -458,6 +469,7 @@ The first focused slice should deliver:
 
 This slice now also discovers and supervises the built native capture helper,
 passes its private endpoint and per-launch credential, accepts repeatable source
-and application selections, and owns coordinated shutdown. The remaining work
-is the richer unified control surface, recovery, reliability validation, and the
-eventual native application.
+and application selections, and owns coordinated shutdown. The browser control
+surface now exposes these modes as well. The remaining work is recovery,
+reliability validation, the controls listed under Milestone 4, and the eventual
+native application.

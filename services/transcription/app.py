@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import secrets
+import signal
+import subprocess
 import tempfile
 import time
 import wave
@@ -51,6 +55,7 @@ class ServiceSettings:
     max_new_tokens: int = 512
     auth_secret: str | None = None
     ui_bootstrap_secret: str | None = None
+    native_capture_path: Path | None = None
 
 
 class SessionCreateRequest(BaseModel):
@@ -74,6 +79,14 @@ class SessionView(BaseModel):
     applications: list[str]
 
 
+class NativeCaptureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[Source]
+    applications: list[str] = Field(default_factory=list)
+    retain_audio: bool = False
+
+
 class ServiceRuntime:
     def __init__(
         self,
@@ -95,6 +108,11 @@ class ServiceRuntime:
         self.dedup = OverlapDeduplicator()
         self.stream_ends: dict[tuple[str, str], int] = {}
         self.ui_bootstrap_secret = settings.ui_bootstrap_secret
+        self.ui_events: dict[str, list[dict[str, Any]]] = {}
+        self.native_process: subprocess.Popen[str] | None = None
+        self.native_session_id: str | None = None
+        self.native_capture_state = "ready"
+        self.native_error: str | None = None
 
 
 @dataclass
@@ -202,6 +220,118 @@ def create_app(
                 }
             ]
         }
+
+    @app.get("/v1/ui/capture/capabilities")
+    async def capture_capabilities() -> dict[str, Any]:
+        native = runtime.settings.native_capture_path
+        available = bool(native and native.is_file() and os.access(native, os.X_OK))
+        return {
+            "native_capture_available": available,
+            "modes": ["microphone"] + (
+                ["system", "applications", "microphone_system", "microphone_applications"]
+                if available
+                else []
+            ),
+        }
+
+    @app.get("/v1/ui/capture/applications")
+    async def capture_applications() -> dict[str, Any]:
+        executable = _native_capture_executable(runtime)
+        try:
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                [str(executable), "--list-apps"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(status_code=503, detail=f"cannot list applications: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or "native capture helper failed"
+            raise HTTPException(status_code=503, detail=detail)
+        applications = []
+        seen_bundle_ids: set[str] = set()
+        for line in completed.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2 or not parts[0] or not parts[1] or parts[0] in seen_bundle_ids:
+                continue
+            seen_bundle_ids.add(parts[0])
+            applications.append({"bundle_id": parts[0], "name": parts[1]})
+        return {"applications": applications}
+
+    @app.post("/v1/ui/capture/start")
+    async def start_native_capture(request: Request, options: NativeCaptureRequest) -> dict[str, Any]:
+        executable = _native_capture_executable(runtime)
+        if runtime.native_process is not None and runtime.native_process.poll() is None:
+            raise HTTPException(status_code=409, detail="a native capture session is already running")
+        sources = tuple(dict.fromkeys(options.sources))
+        applications = tuple(dict.fromkeys(item.strip() for item in options.applications if item.strip()))
+        if Source.SYSTEM not in sources:
+            raise HTTPException(status_code=422, detail="native UI capture must include system audio")
+        if any(source not in {Source.MICROPHONE, Source.SYSTEM} for source in sources):
+            raise HTTPException(status_code=422, detail="unsupported native capture source")
+        if options.applications and not applications:
+            raise HTTPException(status_code=422, detail="selected-application capture needs an application")
+        session_id = _new_session_id()
+        server = request.scope.get("server")
+        port = request.url.port or (int(server[1]) if server else None)
+        if port is None:
+            raise HTTPException(status_code=503, detail="local helper port is unavailable")
+        endpoint = f"ws://127.0.0.1:{port}/v1/sessions/{session_id}/stream"
+        command = [
+            str(executable), "--endpoint", endpoint, "--session-id", session_id, "--no-captions"
+        ]
+        if options.retain_audio:
+            command.append("--retain-audio")
+        if Source.MICROPHONE in sources:
+            command.append("--mic")
+        if applications:
+            for bundle_id in applications:
+                command.extend(("--app", bundle_id))
+        else:
+            command.append("--system-all")
+        try:
+            process = subprocess.Popen(
+                command,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail=f"cannot start native capture: {exc}") from exc
+        runtime.native_process = process
+        runtime.native_session_id = session_id
+        runtime.native_capture_state = "recording"
+        runtime.native_error = None
+        runtime.ui_events[session_id] = []
+        return _native_capture_view(runtime, after=0)
+
+    @app.get("/v1/ui/capture/status")
+    async def native_capture_status(after: int = 0) -> dict[str, Any]:
+        return _native_capture_view(runtime, after=max(0, after))
+
+    @app.post("/v1/ui/capture/{action}")
+    async def control_native_capture(action: str) -> dict[str, Any]:
+        process = runtime.native_process
+        if process is None or process.poll() is not None:
+            runtime.native_capture_state = "ready"
+            raise HTTPException(status_code=409, detail="no native capture session is running")
+        if action == "pause":
+            process.send_signal(signal.SIGUSR1)
+            runtime.native_capture_state = "paused"
+        elif action == "resume":
+            process.send_signal(signal.SIGUSR2)
+            runtime.native_capture_state = "recording"
+        elif action == "stop":
+            runtime.native_capture_state = "stopping"
+            await asyncio.to_thread(_stop_native_capture, runtime)
+        else:
+            raise HTTPException(status_code=404, detail="unknown native capture action")
+        return _native_capture_view(runtime, after=0)
 
     @app.post("/v1/sessions", response_model=SessionView, status_code=201)
     async def create_session(request: SessionCreateRequest) -> SessionView:
@@ -527,6 +657,7 @@ async def _publish_event(
         )
         return True
     runtime.stream_ends[key] = max(previous_end or 0, event.end_ms)
+    runtime.ui_events.setdefault(event.session_id, []).append(event.to_dict())
     await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
     return True
 
@@ -549,6 +680,7 @@ async def _report_lag(
 
 def _shutdown(runtime: ServiceRuntime) -> None:
     """Close every open session so no transcript part is left unterminated."""
+    _stop_native_capture(runtime)
     for session in runtime.sessions.list():
         if session.state not in {SessionState.RUNNING, SessionState.PAUSED}:
             continue
@@ -557,6 +689,64 @@ def _shutdown(runtime: ServiceRuntime) -> None:
         except (InvalidSessionTransition, KeyError):
             continue
         _finalize_audio(runtime, session)
+
+
+def _native_capture_executable(runtime: ServiceRuntime) -> Path:
+    executable = runtime.settings.native_capture_path
+    if executable is None or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise HTTPException(
+            status_code=503,
+            detail="native capture is unavailable; run ./scripts/build-macos-capture and restart VoxInk",
+        )
+    return executable
+
+
+def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, Any]:
+    process = runtime.native_process
+    exit_code = process.poll() if process is not None else None
+    if process is not None and exit_code is not None and runtime.native_capture_state != "ready":
+        runtime.native_capture_state = "ready" if exit_code == 0 else "failed"
+        _read_native_error(runtime, process)
+    session_id = runtime.native_session_id
+    events = runtime.ui_events.get(session_id or "", [])
+    cursor = min(after, len(events))
+    return {
+        "state": runtime.native_capture_state,
+        "session_id": session_id,
+        "events": events[cursor:],
+        "next_cursor": len(events),
+        "exit_code": exit_code,
+        "error": runtime.native_error,
+    }
+
+
+def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None:
+    process = runtime.native_process
+    if process is None:
+        runtime.native_capture_state = "ready"
+        return
+    if process.poll() is None:
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+    runtime.native_capture_state = "ready" if process.returncode == 0 else "failed"
+    _read_native_error(runtime, process)
+
+
+def _read_native_error(runtime: ServiceRuntime, process: subprocess.Popen[str]) -> None:
+    if runtime.native_error is not None or process.stderr is None or process.poll() is None:
+        return
+    detail = process.stderr.read().strip()
+    if detail:
+        runtime.native_error = detail.splitlines()[-1]
+    process.stderr.close()
 
 
 def _record_audio(

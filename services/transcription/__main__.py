@@ -32,6 +32,11 @@ def main() -> None:
             device=args.device,
             auth_secret=auth_secret,
             ui_bootstrap_secret=os.environ.get("VOXINK_UI_BOOTSTRAP_SECRET"),
+            native_capture_path=(
+                Path(value).expanduser().resolve()
+                if (value := os.environ.get("VOXINK_NATIVE_CAPTURE"))
+                else None
+            ),
         )
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)

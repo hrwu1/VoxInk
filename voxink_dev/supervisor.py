@@ -31,6 +31,7 @@ class HelperConfig:
     device: str = "auto"
     readiness_timeout: float = 30.0
     service_module: str = "services.transcription"
+    native_capture_path: Path | None = None
 
 
 class HelperSupervisor:
@@ -62,6 +63,10 @@ class HelperSupervisor:
         environment = os.environ.copy()
         environment["VOXINK_AUTH_SECRET"] = self.auth_secret
         environment["VOXINK_UI_BOOTSTRAP_SECRET"] = self.ui_bootstrap_secret
+        if self.config.native_capture_path is not None:
+            environment["VOXINK_NATIVE_CAPTURE"] = str(
+                self.config.native_capture_path.expanduser().resolve()
+            )
         command = [
             sys.executable,
             "-m",

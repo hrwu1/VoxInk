@@ -126,7 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
     diagnostics = DiagnosticLog(report.log_root)
     supervisor = HelperSupervisor(
-        HelperConfig(report.model_path, report.output_root, device=args.device),
+        HelperConfig(
+            report.model_path,
+            report.output_root,
+            device=args.device,
+            native_capture_path=args.native_capture if args.web else None,
+        ),
         diagnostics=diagnostics,
     )
     try:

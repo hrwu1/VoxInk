@@ -123,7 +123,7 @@ private struct VoxInkCaptureCommand {
             )
             try await coordinator.start()
             print("Capture started for session \(options.sessionID). Press Ctrl-C to stop.")
-            await waitForInterrupt()
+            await waitForInterrupt(coordinator: coordinator)
             await coordinator.stop()
             if let captionPanel {
                 await MainActor.run { captionPanel.hideWindow() }
@@ -136,14 +136,24 @@ private struct VoxInkCaptureCommand {
         }
     }
 
-    private static func waitForInterrupt() async {
+    private static func waitForInterrupt(coordinator: CaptureCoordinator) async {
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
+        signal(SIGUSR1, SIG_IGN)
+        signal(SIGUSR2, SIG_IGN)
         await withCheckedContinuation { continuation in
             var resumed = false
-            signalSources = [SIGINT, SIGTERM].map { signalNumber -> DispatchSourceSignal in
+            signalSources = [SIGINT, SIGTERM, SIGUSR1, SIGUSR2].map { signalNumber -> DispatchSourceSignal in
                 let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
                 source.setEventHandler {
+                    if signalNumber == SIGUSR1 {
+                        Task { await coordinator.pause() }
+                        return
+                    }
+                    if signalNumber == SIGUSR2 {
+                        Task { await coordinator.resume() }
+                        return
+                    }
                     guard !resumed else { return }
                     resumed = true
                     signalSources.forEach { $0.cancel() }

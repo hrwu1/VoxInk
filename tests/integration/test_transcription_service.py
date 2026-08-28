@@ -4,6 +4,9 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+import signal
+import subprocess
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -219,6 +222,81 @@ class ApiTests(unittest.TestCase):
                     headers={"X-VoxInk-Bootstrap": "one-time-bootstrap"},
                 ).status_code,
             )
+
+    def test_native_capture_ui_builds_selected_application_command_and_controls_it(self) -> None:
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        process = MagicMock()
+        process.pid = 1234
+        process.returncode = 0
+        process.stderr = None
+        process.poll.return_value = None
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="ui-secret",
+                native_capture_path=executable,
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned:
+            with TestClient(app) as client:
+                capabilities = client.get("/v1/ui/capture/capabilities", headers=headers)
+                self.assertTrue(capabilities.json()["native_capture_available"])
+                started = client.post(
+                    "/v1/ui/capture/start",
+                    headers=headers,
+                    json={
+                        "sources": ["microphone", "system"],
+                        "applications": ["com.apple.Safari"],
+                        "retain_audio": True,
+                    },
+                )
+                self.assertEqual(200, started.status_code, started.text)
+                command = spawned.call_args.args[0]
+                self.assertIn("--mic", command)
+                self.assertIn("--app", command)
+                self.assertIn("com.apple.Safari", command)
+                self.assertIn("--retain-audio", command)
+                self.assertIn("--no-captions", command)
+                self.assertNotIn("--system-all", command)
+
+                self.assertEqual(200, client.post("/v1/ui/capture/pause", headers=headers).status_code)
+                process.send_signal.assert_called_with(signal.SIGUSR1)
+                self.assertEqual(200, client.post("/v1/ui/capture/resume", headers=headers).status_code)
+                process.send_signal.assert_called_with(signal.SIGUSR2)
+                stopped = client.post("/v1/ui/capture/stop", headers=headers)
+                self.assertEqual(200, stopped.status_code, stopped.text)
+                self.assertEqual("ready", stopped.json()["state"])
+                process.send_signal.assert_called_with(signal.SIGINT)
+
+    def test_native_application_catalog_is_parsed_for_the_ui(self) -> None:
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        app = create_app(
+            ServiceSettings(output_root=self.output_root, native_capture_path=executable),
+            provider=self.provider,
+        )
+        listed = subprocess.CompletedProcess(
+            [str(executable), "--list-apps"],
+            0,
+            "com.apple.Safari\tSafari\tpid=42\ncom.apple.Safari\tSafari Helper\tpid=43\ncom.google.Chrome\tGoogle Chrome\tpid=84\n",
+            "",
+        )
+        with patch("services.transcription.app.subprocess.run", return_value=listed):
+            with TestClient(app) as client:
+                response = client.get("/v1/ui/capture/applications")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(
+            [
+                {"bundle_id": "com.apple.Safari", "name": "Safari"},
+                {"bundle_id": "com.google.Chrome", "name": "Google Chrome"},
+            ],
+            response.json()["applications"],
+        )
 
     def test_manual_session_lifecycle(self) -> None:
         created = self.client.post(
