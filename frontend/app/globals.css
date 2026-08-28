@@ -20,6 +20,22 @@ body {
 button, select { font: inherit; }
 button { color: inherit; }
 .app-shell { min-height: 100vh; }
+.application-picker { margin: 18px 0 2px; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(242,241,235,.58); }
+.application-picker-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 11px; }
+.application-picker-heading span { display: flex; flex-direction: column; gap: 3px; }
+.application-picker-heading small, .application-options small { color: var(--muted); font-size: 10px; }
+.application-picker-heading strong { font-size: 13px; }
+.application-picker-heading em { color: var(--green); font-size: 11px; font-style: normal; font-weight: 650; }
+.application-picker-heading > div { display: flex; align-items: center; gap: 9px; }
+.application-picker-heading button { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); font-size: 10px; cursor: pointer; }
+.application-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; max-height: 142px; overflow-y: auto; }
+.application-options label { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px; border: 1px solid rgba(23,24,20,.08); border-radius: 10px; background: var(--card); cursor: pointer; }
+.application-options label:has(input:checked) { border-color: rgba(79,118,95,.5); background: rgba(79,118,95,.07); }
+.application-options input { accent-color: var(--green); }
+.application-options label span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.application-options label strong, .application-options label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.application-options label strong { font-size: 12px; }
+.application-options p { grid-column: 1 / -1; margin: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .topbar { height: 76px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 clamp(24px, 5vw, 76px); border-bottom: 1px solid rgba(23, 24, 20, 0.1); }
 .brand-lockup { display: flex; align-items: center; gap: 11px; font-size: 18px; font-weight: 690; letter-spacing: -0.03em; }
 .brand-mark { width: 29px; height: 29px; display: flex; align-items: center; justify-content: center; gap: 2px; border-radius: 9px; color: white; background: var(--ink); }

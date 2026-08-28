@@ -1,13 +1,15 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useVoxInkRecorder } from './use-voxink-recorder';
+import { CaptureMode, useVoxInkRecorder } from './use-voxink-recorder';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
 
 export default function Home() {
   const recorder = useVoxInkRecorder();
   const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
+  const choosingApplications = recorder.mode === 'applications' || recorder.mode === 'microphone_applications';
+  const selectionLocked = !['ready', 'failed'].includes(state);
   const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -55,13 +57,44 @@ export default function Home() {
             <div className="recorder-topline">
               <label className="source-control">
                 <span className="source-icon">◉</span>
-                <span><small>Input source</small><strong>MacBook Microphone</strong></span>
-                <select aria-label="Input source" defaultValue="microphone">
-                  <option value="microphone">MacBook Microphone</option>
+                <span><small>Capture mode</small><strong>{modeLabel(recorder.mode)}</strong></span>
+                <select
+                  aria-label="Capture mode"
+                  value={recorder.mode}
+                  disabled={selectionLocked}
+                  onChange={(event) => recorder.setMode(event.target.value as CaptureMode)}
+                >
+                  <option value="microphone">Microphone</option>
+                  <option value="system" disabled={!recorder.nativeAvailable}>All system audio</option>
+                  <option value="applications" disabled={!recorder.nativeAvailable}>Selected applications</option>
+                  <option value="microphone_system" disabled={!recorder.nativeAvailable}>Microphone + system</option>
+                  <option value="microphone_applications" disabled={!recorder.nativeAvailable}>Microphone + applications</option>
                 </select>
               </label>
               <div className="model-label"><small>Model</small><strong>Qwen3 · Local</strong></div>
             </div>
+
+            {choosingApplications && (
+              <div className="application-picker">
+                <div className="application-picker-heading">
+                  <span><small>Running applications</small><strong>Select one or more</strong></span>
+                  <div><em>{recorder.selectedApplications.length} selected</em><button type="button" disabled={selectionLocked} onClick={() => void recorder.refreshApplications()}>Refresh</button></div>
+                </div>
+                <div className="application-options">
+                  {recorder.applications.length ? recorder.applications.map((application) => (
+                    <label key={application.bundleId}>
+                      <input
+                        type="checkbox"
+                        checked={recorder.selectedApplications.includes(application.bundleId)}
+                        disabled={selectionLocked}
+                        onChange={() => recorder.toggleApplication(application.bundleId)}
+                      />
+                      <span><strong>{application.name}</strong><small>{application.bundleId}</small></span>
+                    </label>
+                  )) : <p>Open the application you want to capture, then press Refresh.</p>}
+                </div>
+              </div>
+            )}
 
             <div className={`waveform ${state}`} aria-label={`${state} waveform`}>
               {bars.map((height, index) => (
@@ -104,7 +137,7 @@ export default function Home() {
               {captions.length ? captions.map((caption) => (
                 <article className="caption-line" key={caption.id}>
                   <time>{formatTime(caption.startMs)}</time>
-                  <div><span className="speaker-label">{caption.source === 'system' ? 'SYSTEM' : 'MIC'}</span><p>{caption.text}</p></div>
+                  <div><span className="speaker-label">{caption.source === 'system' ? 'SYSTEM / APP' : 'MIC'}</span><p>{caption.text}</p></div>
                 </article>
               )) : (
                 <div className="empty-captions">
@@ -133,4 +166,14 @@ export default function Home() {
 function formatTime(milliseconds: number) {
   const totalSeconds = Math.floor(milliseconds / 1000);
   return `${Math.floor(totalSeconds / 60).toString().padStart(2, '0')}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
+}
+
+function modeLabel(mode: CaptureMode) {
+  return {
+    microphone: 'Microphone',
+    system: 'All system audio',
+    applications: 'Selected applications',
+    microphone_system: 'Microphone + system',
+    microphone_applications: 'Microphone + applications',
+  }[mode];
 }

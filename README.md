@@ -55,6 +55,13 @@ removes its one-time launch token from the browser address immediately. Ctrl-C
 in the launching Terminal closes the helper and finalizes open transcript files.
 Finalized transcripts default to `~/Documents/VoxInk/`.
 
+The browser's **Capture mode** menu supports microphone, all system audio,
+selected running applications, and both microphone/system combinations. Build
+the native helper once with `./scripts/build-macos-capture` to enable every mode.
+For selected-application capture, open the target app, choose it from the list,
+and press **Refresh** if it was opened after VoxInk. Start, pause, resume, and
+stop work from the same browser controls for every mode.
+
 For interactive Terminal microphone controls, install the capture dependencies
 and select the Terminal interface explicitly:
 
@@ -115,17 +122,12 @@ Then the same `voxink-dev` supervisor can run every native source combination:
   --app com.apple.Safari
 ```
 
-Native workflows use the Swift floating-caption panel rather than the browser
-recorder. `voxink-dev` supplies the private loopback endpoint and per-launch
+Native workflows selected with command-line `--source` flags use the Swift
+floating-caption panel. The default browser workflow can select the same modes
+from its Capture mode menu. `voxink-dev` supplies the private loopback endpoint and per-launch
 credential, monitors the native capture process and transcription helper, and
 shuts both down on Ctrl-C. macOS requests Microphone and/or Screen & System Audio
 Recording permission when each protected source is first used.
-
-Current target-Mac note: on macOS 26.5.1, a controlled Chrome playback test
-started the authorized ScreenCaptureKit stream but macOS returned zero-filled
-system-audio buffers. The supervisor and source selection are wired; live
-system/application acceptance on this OS remains open and is tracked in
-`REMAINING_WORK.md`.
 
 Run only the startup checks with:
 
