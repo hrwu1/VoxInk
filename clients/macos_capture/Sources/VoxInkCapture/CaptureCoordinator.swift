@@ -1,9 +1,13 @@
 import Foundation
 
-public final class CaptureCoordinator {
+/// An actor so the signal handler that drives pause and resume cannot mutate
+/// this state concurrently with a stop arriving on another task.
+public actor CaptureCoordinator {
     public enum State: String, Sendable {
         case idle
         case recording
+        /// Draining the sources before the pause is complete.
+        case pausing
         case paused
     }
 
@@ -12,6 +16,8 @@ public final class CaptureCoordinator {
     private var microphone: MicrophoneCapture?
     private var systemAudio: SystemAudioCapture?
     private var state: State = .idle
+    /// A resume that arrived while `pause()` was still draining.
+    private var pendingResume = false
 
     public init(
         configuration: CaptureConfiguration,
@@ -83,13 +89,28 @@ public final class CaptureCoordinator {
     /// audio arrives after the service has paused the session.
     public func pause() async {
         guard state == .recording else { return }
+        state = .pausing
         await microphone?.pause()
         await systemAudio?.pause()
         await sink.pause(sessionID: configuration.sessionID)
+        // A stop can land while the drain is in flight; it owns the state then.
+        guard state == .pausing else { return }
         state = .paused
+        if pendingResume {
+            pendingResume = false
+            await resume()
+        }
     }
 
     public func resume() async {
+        if state == .pausing {
+            // The drain has not finished, so resuming now would restart sources
+            // that pause() is still stopping. The service has already told the
+            // user this was accepted, so record it and let pause() honour it
+            // rather than dropping it and recording nothing.
+            pendingResume = true
+            return
+        }
         guard state == .paused else { return }
         await sink.resume(sessionID: configuration.sessionID)
         microphone?.resume()
@@ -99,6 +120,7 @@ public final class CaptureCoordinator {
 
     public func stop() async {
         guard state != .idle else { return }
+        pendingResume = false
         await microphone?.stop()
         microphone = nil
         await systemAudio?.stop()

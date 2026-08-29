@@ -89,6 +89,12 @@ private struct VoxInkCaptureCommand {
             } else {
                 systemAudio = nil
             }
+            // The service enables Pause the moment /capture/start returns, while
+            // this process may still be blocked on a permission prompt. At their
+            // default disposition SIGUSR1 and SIGUSR2 terminate the helper and
+            // the recording is lost, so take them off it before start().
+            signal(SIGUSR1, SIG_IGN)
+            signal(SIGUSR2, SIG_IGN)
             let configuration = CaptureConfiguration(
                 sessionID: options.sessionID,
                 microphoneEnabled: options.microphone,
@@ -139,8 +145,7 @@ private struct VoxInkCaptureCommand {
     private static func waitForInterrupt(coordinator: CaptureCoordinator) async {
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
-        signal(SIGUSR1, SIG_IGN)
-        signal(SIGUSR2, SIG_IGN)
+        // SIGUSR1 and SIGUSR2 were ignored before start(), above.
         await withCheckedContinuation { continuation in
             var resumed = false
             signalSources = [SIGINT, SIGTERM, SIGUSR1, SIGUSR2].map { signalNumber -> DispatchSourceSignal in
