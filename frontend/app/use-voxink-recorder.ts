@@ -96,14 +96,13 @@ export function useVoxInkRecorder() {
       .then((payload) => {
         const capabilities = payload as { native_capture_available?: boolean };
         setNativeAvailable(Boolean(capabilities.native_capture_available));
-      });
-    void authorizedFetch('/v1/ui/capture/applications')
-      .then((response) => response.json())
-      .then((payload) => {
-        const catalog = payload as { applications?: Array<{ bundle_id: string; name: string }> };
-        setApplications((catalog.applications || []).map((item) => ({ bundleId: item.bundle_id, name: item.name })));
       })
-      .catch(() => setApplications([]));
+      .catch(() => {
+        // A stale token or a restarted helper would otherwise leave every native
+        // mode disabled with nothing said about why.
+        setNativeAvailable(false);
+        setMessage('Cannot read local capture capabilities; native modes are unavailable');
+      });
   }, [authorizedFetch, launch]);
 
   useEffect(() => {
@@ -296,8 +295,15 @@ export function useVoxInkRecorder() {
   }, [applyNativeStatus, authorizedFetch, captureKind, fail, launch]);
 
   const setMode = useCallback((value: CaptureMode) => {
-    if (state === 'ready' || state === 'failed') setModeState(value);
-  }, [state]);
+    if (state !== 'ready' && state !== 'failed') return;
+    setModeState(value);
+    // Listing applications starts the capture helper, which calls
+    // SCShareableContent and prompts for Screen & System Audio Recording.
+    // Asking on load would demand that permission from someone recording only
+    // their microphone, and an unanswered prompt blocks the helper for the full
+    // request timeout, so only ask once a mode that needs the list is chosen.
+    if (value === 'applications' || value === 'microphone_applications') void refreshApplications();
+  }, [state, refreshApplications]);
   const toggleApplication = useCallback((bundleId: string) => {
     setSelectedApplications((current) => current.includes(bundleId) ? current.filter((item) => item !== bundleId) : [...current, bundleId]);
   }, []);
