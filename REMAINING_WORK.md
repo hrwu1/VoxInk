@@ -1,475 +1,134 @@
 # VoxInk Remaining Work
 
-Status: Developer-edition implementation plan
-Last updated: 2026-08-26
+Status: Active roadmap
 
 ## Purpose
 
-VoxInk already has a working local transcription prototype: Qwen inference,
-localhost HTTP and WebSocket APIs, microphone and macOS system-audio capture,
-selected-application filtering, source-labeled Markdown, optional audio
-retention, VAD finalization, and a basic floating caption panel.
-
-The next target is a cohesive developer edition that works as one program even
-before Xcode, Developer ID signing, notarization, and public distribution are
-available. A user of the repository should not need to start several processes,
-choose ports, send `curl` requests, or coordinate multiple Terminal windows.
-
-`SHIP_SPEC.md` remains the specification for the eventual signed production
-release. This document describes the code that can be completed now and the
-small amount of native packaging work that remains toolchain-dependent.
-
-## Developer-Edition Goal
-
-One command, provisionally:
-
-```sh
-./scripts/voxink-dev
-```
-
-must:
-
-1. Validate the Python runtime, dependencies, model files, output location,
-   permissions, and available disk space.
-2. Start the local transcription helper automatically.
-3. Wait for the helper to become ready and report model-loading progress.
-4. Let the user select microphone, all-system, or selected-application audio.
-5. Start, pause, resume, and stop a session.
-6. Display live source-labeled captions and useful status information.
-7. Shut down capture and transcription cleanly.
-8. Report and optionally open the saved transcript.
-9. Detect and recover an interrupted session without overwriting files.
-
-The developer edition may use a terminal interface and ad-hoc local app
-packaging. It does not need Developer ID signing or notarization.
-
-## Current Constraints
-
-- The Python service and tests run in the repository's Python 3.12 virtual
-  environment.
-- The local Qwen3-ASR-1.7B model occupies approximately 4.4 GB.
-- The native capture code exists as a Swift package plus a generated,
-  background-only development app, not as a complete macOS application.
-  `scripts/voxink-dev` supervises it for all-system, selected-application, and
-  combined microphone/system workflows.
-- Full Xcode 26.6 is selected, the native helper builds, and its Swift tests
-  pass. An interactive macOS 26.5.1 check confirmed TCC access and a running
-  ScreenCaptureKit stream, but the OS supplied zero-filled system-audio buffers
-  during verified Chrome playback. Target-device acceptance remains open until
-  that OS/framework behavior is resolved or a fallback capture backend lands.
-- A paid Apple Developer account is not required for local development or
-  ad-hoc signing. It is required later for Developer ID signing and notarized
-  distribution.
-
-Code, Python tests, and Swift tests can proceed now. Native system-audio
-acceptance remains separate from build correctness because it depends on the
-target Mac's capture framework and privacy state.
-
-## Priority Overview
-
-| Priority | Milestone | Outcome |
-| --- | --- | --- |
-| P0 | One-command supervisor | One process owns startup, readiness, capture, and shutdown |
-| P0 | Authenticated local protocol | Other local processes cannot control or observe VoxInk |
-| P0 | Durable session registry | Interrupted work is recoverable and sessions are discoverable |
-| P0 | Unified developer controls | Sources and the full session lifecycle are controlled in one place |
-| P0 | Reliability harness | Crashes, slow inference, offline use, and long sessions are tested |
-| P1 | Responsive partial captions | Replaceable text appears before finalization |
-| P1 | Ad-hoc local macOS app | Finder-launchable developer app without public signing |
-| Deferred | Production distribution | Xcode release build, Developer ID, notarization, DMG, and updates |
-
-## Milestone 1: One-Command Local Supervisor
-
-### Goal
-
-Replace manual service and capture startup with one process that owns the whole
-developer workflow.
-
-### Work
-
-- Add a `voxink_dev` Python package and a small `scripts/voxink-dev` entrypoint.
-- Add preflight checks for:
-  - Python version and required imports.
-  - Complete local model directory and expected model files.
-  - Model manifest and cryptographic checksums.
-  - Writable transcript and log directories.
-  - Available disk space, including the cost of audio retention.
-  - Native capture executable availability when system audio is selected.
-- Choose an unused loopback port rather than assuming port 8765 is free.
-- Start the transcription service as a supervised child process.
-- Wait for health, protocol compatibility, and readiness before enabling Start.
-- Report model-loading progress and readable failures.
-- Start the selected capture client with the correct session configuration.
-- Monitor child processes and distinguish clean exit from unexpected failure.
-- Restart the helper only when recovery is safe.
-- Forward termination signals and flush finalized work before exit.
-- Store structured local diagnostics without transcript text, raw audio, secrets,
-  or unnecessary sensitive paths.
-
-### Acceptance criteria
-
-- One command reaches a ready state from a configured checkout.
-- No manual server startup, port choice, `curl`, or second Terminal is required.
-- Missing dependencies or model files are reported before capture begins.
-- Stop, Quit, and Ctrl-C close capture, helper, transcript, and audio files.
-- An unexpected helper exit is visible and never silently discards finalized
-  transcript text.
-- Microphone-only operation works even when the native capture executable is
-  unavailable.
-
-### Suggested commits
-
-1. `feat: add developer supervisor and preflight checks`
-2. `feat: supervise helper readiness and shutdown`
-3. `feat: add private structured diagnostics`
-
-## Milestone 2: Authenticated and Versioned Local Protocol
-
-### Goal
-
-Keep the local API convenient for development while preventing unrelated local
-processes from controlling sessions or reading transcript events.
-
-### Work
-
-- Generate a cryptographically random secret for every supervisor launch.
-- Pass the secret to the helper through its environment, not command-line
-  arguments or persistent configuration.
-- Require authentication for session HTTP routes and WebSocket upgrades.
-- Send authentication from Python and Swift clients using request headers.
-- Add a service, protocol, and client compatibility handshake.
-- Define provider capability fields such as partial-result support.
-- Enforce size limits for JSON controls, audio headers, and binary frames.
-- Strictly validate message type, schema version, source, stream, sequence,
-  timing, and declared byte length.
-- Cancel pending work when a stream or session stops.
-- Keep `/health` lightweight; expose only the minimum unauthenticated status
-  required for supervision, or authenticate it as well.
-- Add tests proving missing or incorrect credentials cannot control or observe a
-  session.
-
-### Acceptance criteria
-
-- A process without the per-launch secret cannot create sessions, send audio,
-  stop capture, or receive transcripts.
-- Credentials never appear in process arguments, transcript metadata, or logs.
-- Unsupported protocol versions fail before audio capture begins.
-- Oversized and malformed messages are rejected without killing healthy
-  sessions.
-- Existing Python and Swift contract fixtures cover the same schema.
-
-### Suggested commits
-
-1. `feat: authenticate local helper communication`
-2. `feat: add protocol compatibility negotiation`
-3. `test: harden local message validation and limits`
-
-## Milestone 3: Durable Session Registry and Recovery
-
-### Goal
-
-Make session state independent of in-memory objects and Markdown front matter so
-an app or helper crash can be recovered safely.
-
-### Work
-
-- Add a versioned `session.json` manifest or a small SQLite registry.
-- Persist:
-  - Session ID, lifecycle state, and start/end timestamps.
-  - Enabled sources, selected applications, and language preference.
-  - Provider/model versions and protocol version.
-  - Transcript and audio part inventory.
-  - Whether the session stopped normally or requires recovery.
-- Update lifecycle state atomically.
-- On startup, detect incomplete sessions and mark them recovered.
-- Continue with new monotonically numbered parts; never overwrite an existing
-  transcript or audio file.
-- List sessions without scanning Markdown contents.
-- Add commands to open a transcript or its folder.
-- Add explicit deletion semantics for transcript, audio, and application-managed
-  metadata.
-- Check disk space before writes fail.
-- Disable audio retention safely under low-disk conditions while preserving
-  transcript integrity where possible.
-- Add configurable retention policies and disk-usage reporting.
-
-### Acceptance criteria
-
-- Killing the supervisor or helper cannot corrupt or overwrite finalized text.
-- The next launch discovers and recovers an interrupted session.
-- Completed, recovered, and multi-part sessions can all be listed and opened.
-- Low disk space produces an actionable error and does not silently lose text.
-- Session metadata contains no secrets.
-
-### Suggested commits
-
-1. `feat: persist normalized session manifests`
-2. `feat: recover interrupted sessions without overwrite`
-3. `feat: add session listing and disk safeguards`
-
-## Milestone 4: Unified Developer Controls
-
-### Goal
-
-Provide one coherent interface for configuration, source selection, capture,
-captions, and transcript access.
-
-### Current status (2026-08-28)
-
-- The browser now provides microphone, all-system, selected-application, and
-  combined microphone/system capture modes.
-- Authenticated loopback endpoints start, pause, resume, stop, and report the
-  native helper while preserving source-labelled live captions.
-- The UI lists currently running applications by bundle identifier and can
-  refresh that catalog without restarting VoxInk.
-- Remaining controls in this milestone are microphone-device selection,
-  transcript open/quit actions, and richer queue/device error reporting.
-
-### Work
-
-- Add an interactive terminal interface with clear states:
-  - Not ready.
-  - Ready.
-  - Starting.
-  - Recording.
-  - Paused.
-  - Stopping.
-  - Failed.
-- Provide microphone selection.
-- Provide system-audio selection:
-  - None.
-  - All system audio.
-  - One or more running applications.
-- Prevent invalid source combinations before Start.
-- Expose Start, Pause, Resume, Stop, Open, and Quit commands.
-- Show elapsed time, Local-only status, active model/provider, queue lag, and
-  dropped-frame count.
-- Render microphone and system captions in chronological order with textual
-  source labels.
-- Replace partial captions by stable segment ID rather than appending duplicates.
-- Print and optionally open the transcript when a session stops.
-- Translate permission, device, selected-application, model, disk, and helper
-  failures into user-readable messages with a next action.
-- The Swift development CLI accepts supervisor pause/resume signals while it
-  remains a separate process.
-
-### Acceptance criteria
-
-- A user can complete a microphone session without knowing the service API.
-- When the Swift executable is available, the same workflow supports all-system,
-  selected-application, and simultaneous microphone/system capture.
-- Every lifecycle state is visible and invalid transitions are blocked.
-- Captions and saved Markdown retain source identity.
-- Selected applications disappearing and returning do not require a new logical
-  session.
-
-### Suggested commits
-
-1. `feat: add unified developer session controls`
-2. `feat: integrate source selection and live status`
-3. `feat: add transcript discovery and readable errors`
-
-## Milestone 5: Reliability and Test Harness
-
-### Goal
-
-Prove that the developer edition remains bounded and preserves finalized work
-during realistic failure and long-session conditions.
-
-### Work
-
-- Add subprocess end-to-end tests for supervisor, helper, and fake capture.
-- Add a deterministic replay capture source for real-time and accelerated tests.
-- Test helper crash, restart, stop, Ctrl-C, and forced termination.
-- Test malformed messages, wrong credentials, and protocol mismatch.
-- Test inference slower than capture.
-- Bound all audio, transcript, inference, and diagnostics queues.
-- Expose queue depth, dropped frames, and lag without logging transcript content.
-- Test network-disabled local operation and monitor for unexpected outbound
-  traffic.
-- Test missing/corrupt models and partial model installation.
-- Test Markdown rotation at six hours and 5 MiB.
-- Test WAV rotation at one hour and the safe RIFF byte limit.
-- Test combined audio generation across rotated parts.
-- Test low disk, failed writes, and output-directory removal.
-- Add one-hour replay tests and a synthetic 24-hour soak test.
-- When native builds are available, test device changes, sleep/wake, permission
-  removal, and selected-application exit/restart on real hardware.
-
-### Acceptance criteria
-
-- A 24-hour synthetic run has bounded memory and temporary storage.
-- Slow inference never creates an unbounded queue.
-- Finalized transcript text survives every tested process failure.
-- Local-only mode works with network access disabled and produces no unexpected
-  outbound traffic.
-- Rotation and recovery never overwrite an existing part.
-- Native device/source loss is visible while unaffected sources continue.
-
-### Suggested commits
-
-1. `test: add supervised end-to-end replay harness`
-2. `test: cover crash recovery and network isolation`
-3. `test: add long-session and queue-pressure soak tests`
-4. `feat: handle low disk and native source changes`
-
-## Milestone 6: Performance and Partial Captions
-
-### Goal
-
-Improve perceived responsiveness while keeping final transcript output stable
-and durable.
-
-### Work
-
-- Build a reproducible evaluation set covering:
-  - English and Mandarin.
-  - English/Chinese code-switching.
-  - Short utterances and long meetings.
-  - Silence, noise, music, and overlapping sources.
-  - Microphone and system-audio recordings.
-- Record CPU model-load time, first-result latency, finalization latency,
-  real-time factor, memory, and transcript quality.
-- Benchmark rolling-window inference using the current Qwen model.
-- Once available, compare MPS, MLX, and a smaller model profile.
-- Add provider capability negotiation for partial and streaming support.
-- Assign one stable segment ID to every revision of an active utterance.
-- Emit ordered `transcript.partial` events and exactly one durable
-  `transcript.final` event.
-- Cancel obsolete rolling inference when a newer revision supersedes it.
-- Keep partial text out of Markdown.
-- Measure first-visible-text and silence-to-final latency separately.
-- Detect and report when inference falls behind real time.
-
-### Acceptance criteria
-
-- Partial revisions replace each other and never create duplicate Markdown.
-- Slow inference cannot reorder transcript events.
-- Pause and Stop deterministically cancel or finalize the active utterance.
-- The selected default model/runtime meets a documented real-time target on the
-  supported development machine.
-- Model/runtime changes are compared against the recorded bilingual baseline.
-
-### Suggested commits
-
-1. `bench: add bilingual accuracy and latency baseline`
-2. `feat: add provider capability negotiation`
-3. `feat: emit revision-safe partial transcripts`
-4. `test: cover partial ordering and cancellation`
-
-## Milestone 7: Ad-Hoc Local macOS Application
-
-### Goal
-
-Provide a Finder-launchable developer app without requiring a paid developer
-account or public distribution credentials.
-
-### Dependency
-
-This milestone requires a matching Swift compiler and macOS SDK. Full Xcode is
-not conceptually required, but the current Command Line Tools mismatch must be
-fixed before the result can be compiled or verified.
-
-### Work
-
-- Add a SwiftPM menu-bar executable target using SwiftUI and AppKit.
-- Reuse `VoxInkCapture`, `CaptureCoordinator`, `LocalServiceClient`, and the
-  floating caption panel.
-- Integrate the developer supervisor and the same state machine used by the
-  terminal workflow.
-- Add source selection, permissions, session controls, settings, diagnostics,
-  and transcript-folder actions.
-- Assemble a local `.app` bundle from the SwiftPM release build.
-- Include `Info.plist`, usage descriptions, entitlements, icons, and helper
-  resources.
-- Ad-hoc sign local executables and the app with `codesign --sign -`.
-- Document that rebuilds may reset macOS privacy grants because the app lacks a
-  stable Developer ID identity.
-
-### Acceptance criteria
-
-- The local app launches from Finder without manually starting the helper.
-- It completes microphone, system, selected-application, and dual-source
-  sessions using the same persisted session contract as the terminal workflow.
-- Permission denial produces recovery guidance rather than a crash.
-- All bundled executables are covered by local ad-hoc signing.
-- The limitations of the non-notarized developer build are documented clearly.
-
-### Suggested commits
-
-1. `feat: add SwiftPM developer menu-bar app`
-2. `feat: integrate supervisor and native session controls`
-3. `build: assemble and ad-hoc sign local app bundle`
-
-## Deferred Until Production Distribution
-
-The following are not required to make the developer edition work as a whole:
-
-- Developer ID signing and stable signing identities.
-- Apple notarization and stapling.
-- A polished DMG installer.
-- An authenticated automatic-update channel.
-- App Store distribution.
-- Production crash reporting or support upload workflows.
-- Speaker diarization.
-- Forced-alignment word timestamps.
-- Online transcription providers.
-- Windows and Linux capture adapters.
-- Direct typing into other applications.
-
-These remain governed by `SHIP_SPEC.md` and should start only after the local
-developer edition passes its reliability and privacy gates.
-
-## Recommended Implementation Sequence
-
-1. Add the one-command supervisor and preflight checks.
-2. Authenticate and version all local helper communication.
-3. Add durable session manifests and interrupted-session recovery.
-4. Build the unified terminal controls and transcript discovery workflow.
-5. Add subprocess, crash, offline, queue-pressure, rotation, and soak tests.
-6. Establish the bilingual CPU baseline and implement partial captions.
-7. Repair the Swift toolchain and verify the existing native package.
-8. Build and ad-hoc sign the local menu-bar application.
-9. Return to `SHIP_SPEC.md` for production runtime packaging, Developer ID
-   signing, notarization, installation, and updates.
-
-## Developer-Edition Release Gates
-
-The developer edition is workable as a whole when all of the following are
-true:
-
-1. One command starts VoxInk and reaches a ready state.
-2. No manual helper, port, WebSocket, or HTTP management is required.
-3. Microphone capture completes an end-to-end session in every checkout.
-4. System and selected-application capture work whenever the native helper is
-   available.
-5. Start, Pause, Resume, Stop, captions, and transcript access share one
-   coherent interface.
-6. Local IPC is authenticated and versioned.
-7. Model, permission, device, helper, and disk failures have readable recovery
+This is the maintained list of work that remains after the developer workflow
+and native capture integration. Completed implementation plans are removed once
+their durable requirements are reflected here, in `README.md`, or in tests.
+
+`PROJECT_SPEC.md` remains the architecture and data-format reference.
+`SHIP_SPEC.md` remains the specification for a signed production release.
+
+## Documentation cleanup
+
+Goal: keep only Markdown that is current, useful, and has a clear owner.
+
+Steps:
+
+- [x] Inventory tracked Markdown and find inbound references.
+- [x] Separate durable specifications from completed task plans.
+- [x] Remove completed task plans and repair documentation links.
+- [x] Verify the remaining Markdown set and commit the cleanup.
+
+Completion criteria:
+
+- Completed one-off plans are absent from the repository.
+- The README links to each maintained specification or roadmap.
+- This file contains only unfinished product work and durable release gates.
+- Markdown links resolve and the worktree is clean after the cleanup commit.
+
+## Current state
+
+The repository currently provides:
+
+- A one-command browser workflow through `./scripts/voxink-dev`.
+- Local-only Qwen transcription over authenticated loopback HTTP/WebSocket APIs.
+- Microphone, all-system, selected-application, and combined capture modes.
+- Browser controls for start, pause, resume, and stop.
+- Source-labelled live captions and rotating Markdown transcripts.
+- Optional separate and combined rotating WAV retention.
+- Bounded native audio queues, UI event history, and helper diagnostics.
+- Recovery of interrupted transcript parts without overwriting earlier output.
+- Python, Swift, and frontend automated tests.
+
+The native helper builds and its automated tests pass. Real system-audio
+delivery still requires acceptance on the target Mac because the last manual
+check received zero-filled ScreenCaptureKit buffers despite successful
+permission and stream setup.
+
+## Current priorities
+
+### P0: Target-Mac capture acceptance
+
+- Repeat the native system-audio test with known audible applications.
+- Confirm microphone, all-system, selected-application, and combined sessions.
+- Record permission state, audio delivery, source labels, and saved output.
+- If ScreenCaptureKit still supplies silence, isolate the OS/framework cause or
+  add a replaceable capture backend without weakening local-only behavior.
+
+Complete when every capture mode delivers real audio end to end on a supported
+Mac, or a documented platform limitation has a tested fallback.
+
+### P0: Durable session discovery and recovery
+
+- Add a versioned session manifest or small local registry.
+- Persist lifecycle state, enabled sources, model/protocol versions, and part
+  inventory without secrets or transcript text.
+- Discover interrupted sessions without scanning Markdown contents.
+- Add transcript and transcript-folder actions.
+- Add explicit low-disk behavior and retention reporting.
+
+Complete when interrupted and completed sessions can be found, resumed safely,
+and opened without overwriting prior transcript or audio parts.
+
+### P0: Reliability validation
+
+- Add deterministic replay capture for end-to-end failure tests.
+- Exercise helper failure, slow inference, malformed traffic, model corruption,
+  low disk, output removal, and network-disabled operation.
+- Add accelerated one-hour replay and synthetic 24-hour soak coverage.
+- Verify bounded memory, queues, diagnostics, and temporary storage.
+
+Complete when finalized text survives tested failures and long runs stay
+bounded with no unexpected outbound traffic.
+
+### P1: Complete developer controls
+
+- Add microphone-device selection.
+- Add open-transcript, open-folder, and quit actions.
+- Improve queue, device, permission, and recovery messages.
+- Show model/provider identity and inference lag in the browser status surface.
+
+Complete when the full session lifecycle and its common recovery actions are
+available without direct API or Terminal coordination.
+
+### P1: Responsive partial captions and performance
+
+- Build a reproducible English, Mandarin, and code-switching evaluation set.
+- Measure first-visible-text, silence-to-final latency, real-time factor,
+  memory, and transcript quality.
+- Evaluate rolling inference and Apple Silicon acceleration behind the existing
+  provider interface.
+- Emit revision-safe partial events while keeping partial text out of Markdown.
+
+Complete when revisions replace one another without reordering or duplication,
+and the selected local runtime meets a documented target on supported hardware.
+
+### P2: Local macOS application
+
+- Add a Finder-launchable menu-bar application that reuses the existing capture,
+  service, caption, and session interfaces.
+- Include source selection, permissions, settings, diagnostics, and transcript
+  actions.
+- Assemble and ad-hoc sign the local development app.
+
+Complete when the local app can finish all supported capture modes without a
+Terminal. Developer ID signing, notarization, installation, and updates remain
+production work governed by `SHIP_SPEC.md`.
+
+## Developer-edition gates
+
+The developer edition is ready when:
+
+1. One command reaches a ready state without manual port or helper management.
+2. All advertised capture modes pass target-Mac acceptance.
+3. Local IPC remains authenticated, versioned, and loopback-only.
+4. Finalized transcripts survive interruption and recovery without overwrite.
+5. Slow inference and long sessions keep memory and storage bounded.
+6. Offline tests detect no unexpected network access.
+7. Model, permission, device, helper, and disk failures have useful recovery
    actions.
-8. Finalized transcript text survives forced termination and recovery.
-9. All queues and temporary storage remain bounded under slow inference.
-10. Local-only mode works with network access disabled.
-11. Automated Python tests, protocol contract tests, real-model smoke tests,
-    replay integration tests, and the synthetic soak test pass.
-12. Native tests pass once a matching Swift toolchain is available.
-
-## First Implementation Slice
-
-The first focused slice should deliver:
-
-- `scripts/voxink-dev` and its Python supervisor package.
-- Model, dependency, output-directory, and disk preflight checks.
-- Automatic helper startup on a private loopback port.
-- Readiness waiting, readable status, signal forwarding, and clean shutdown.
-- A per-launch authentication secret shared with the helper.
-- A microphone-only end-to-end test proving that one command produces a saved
-  transcript.
-
-This slice now also discovers and supervises the built native capture helper,
-passes its private endpoint and per-launch credential, accepts repeatable source
-and application selections, and owns coordinated shutdown. The browser control
-surface now exposes these modes as well. The remaining work is recovery,
-reliability validation, the controls listed under Milestone 4, and the eventual
-native application.
+8. Python, Swift, frontend, real-model smoke, replay, and soak checks pass in
+   the supported development environment.

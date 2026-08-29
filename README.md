@@ -260,5 +260,7 @@ documented in `clients/macos_capture/README.md`.
 
 ## Architecture and roadmap
 
-The full design, event schema, file formats, implementation phases, and open
-extensions are documented in [PROJECT_SPEC.md](PROJECT_SPEC.md).
+- [PROJECT_SPEC.md](PROJECT_SPEC.md) is the architecture, event-schema, and
+  file-format reference.
+- [REMAINING_WORK.md](REMAINING_WORK.md) is the maintained developer roadmap.
+- [SHIP_SPEC.md](SHIP_SPEC.md) defines the signed production release.

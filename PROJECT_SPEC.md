@@ -1,7 +1,6 @@
 # VoxInk Project Specification
 
-Status: Working prototype implemented
-Last updated: 2026-08-25
+Status: Architecture reference
 
 ## 1. Product Summary
 
@@ -393,73 +392,7 @@ VoxInk
 The source tree follows this layout. Runtime model weights and local virtual
 environments remain outside version control.
 
-## 12. Implementation Plan
-
-### Phase 0: Prove local batch inference
-
-- Create an isolated Python environment and pin dependencies.
-- Load the local Qwen3-ASR-1.7B model without downloading anything at runtime.
-- Transcribe a local WAV fixture through a provider abstraction.
-- Normalize the result into the transcript-event schema.
-- Write finalized output to a Markdown part with metadata.
-- Add a health endpoint and batch transcription endpoint.
-- Verify that the complete flow works with network access disabled.
-
-Exit criterion: a local audio file becomes a source-labeled Markdown transcript
-through the localhost API.
-
-### Phase 1: Live microphone pipeline
-
-- Capture live microphone PCM.
-- Add resampling and channel normalization.
-- Add voice activity detection and chunk formation.
-- Produce replaceable partial results and finalized results.
-- Exercise pause/resume/stop and crash-safe Markdown output.
-- Measure transcription latency and memory usage.
-
-Exit criterion: an unlimited manually controlled microphone session produces
-near-live captions/events and durable Markdown.
-
-### Phase 2: Native macOS system capture
-
-- Build a minimal Swift ScreenCaptureKit capture component.
-- Enumerate all-system and selected-app capture choices.
-- Support multiple selected applications.
-- Emit normalized system-audio frames to the local service.
-- Capture mic and system as distinct simultaneous streams.
-- Exclude VoxInk audio.
-- Reconnect restarted applications by bundle identifier.
-- Handle permissions and error states.
-
-Exit criterion: mic and selected system sources can be transcribed together with
-correct source labels.
-
-### Phase 3: Floating caption experience
-
-- Add the always-on-top caption window.
-- Add source badges, partial/final styling, and overlap layout.
-- Add optional click-through behavior.
-- Add capture controls and visible privacy/provider state.
-- Add transcript destination and audio-retention settings.
-
-Exit criterion: the end-to-end macOS experience is usable without a terminal.
-
-### Phase 4: Accuracy and resilience
-
-- Tune VAD, chunk duration, overlap, and deduplication for English and Chinese.
-- Evaluate Qwen forced alignment for improved timestamps.
-- Add session recovery, file rotation tests, and long-duration soak tests.
-- Add optional audio compression.
-- Design a diarization plug-in point without enabling it by default.
-
-### Phase 5: Extensibility
-
-- Add push-to-talk and meeting-mode presets.
-- Add provider configuration and explicit online-provider consent flow.
-- Evaluate cross-platform UI strategy.
-- Implement Windows and Linux capture adapters.
-
-## 13. Testing Strategy
+## 12. Testing Strategy
 
 - Unit tests for event schemas, time calculations, overlap deduplication, and
   file rotation.
@@ -473,40 +406,10 @@ Exit criterion: the end-to-end macOS experience is usable without a terminal.
 - Crash recovery and multi-part session tests.
 - Long-duration soak tests before declaring sessions unlimited in production.
 
-## 14. Current Model State
+Current implementation status and priorities are maintained in
+`REMAINING_WORK.md`; setup and test commands are maintained in `README.md`.
 
-- The workspace contains `models/Qwen3-ASR-1.7B`.
-- The two model weight shards currently occupy approximately 4.4 GB.
-- The model has loaded successfully on CPU and transcribed the English sample
-  through both the direct script and the localhost HTTP API.
-- The installed Torch build currently reports MPS unavailable, so Apple GPU
-  acceleration remains an optimization task.
-- Model choice and runtime are replaceable implementation details, not permanent
-  product constraints.
-
-## 15. Remaining Work
-
-The prototype resolves the initial platform and protocol decisions: macOS 13+,
-native Swift/AppKit/SwiftUI capture and captions, a loopback-only versioned
-HTTP/WebSocket API, automatic English/Chinese detection with overrides,
-`~/Documents/VoxInk/` output, 700 ms energy-VAD finalization, and rotating WAV
-retention.
-
-The following remain after the initial implementation:
-
-1. Package the native components as a signed menu-bar `.app` with reliable
-   privacy permission identity.
-2. Produce true incremental model partials; the current live path emits stable
-   results after VAD finalization.
-3. Benchmark and enable an accelerated Apple Silicon inference runtime.
-4. Add push-to-talk clipboard behavior and global-shortcut configuration.
-5. Add Qwen forced alignment for word-level timestamps.
-6. Add optional speaker diarization.
-7. Add explicit-consent online-provider adapters.
-8. Add Windows and Linux capture implementations.
-9. Run long-duration capture and file-recovery soak tests on real meetings.
-
-## 16. Design Principles
+## 13. Design Principles
 
 - Local-only means no network activity, not merely no cloud transcription.
 - Capture sources remain separate until after transcription.

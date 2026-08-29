@@ -2,8 +2,6 @@
 
 Status: Proposed
 
-Last updated: 2026-08-25
-
 ## 1. Shipping Goal
 
 Ship VoxInk as a signed, notarized macOS menu-bar application that can be
@@ -383,14 +381,8 @@ VoxInk is ready to ship only when all of the following are true:
 12. Privacy, licensing, third-party notices, support, update, and uninstall
     documentation are complete.
 
-## 12. Immediate Next Work
+## 12. Roadmap ownership
 
-The next implementation slice should create the macOS application target and a
-small application state machine covering not-ready, ready, starting, recording,
-paused, stopping, and failed states. It should expose microphone/system source
-selection and Start/Stop controls while reusing the current capture library and
-caption panel.
-
-In parallel with that product shell, align and pin the Xcode/Swift toolchain so
-native builds are reproducible, then benchmark the current CPU inference path
-to establish the baseline used for the production runtime decision.
+This file defines production scope and release gates. The current implementation
+sequence is maintained in `REMAINING_WORK.md` so completed work is not repeated
+here as an outdated "next" task.
