@@ -6,6 +6,14 @@ export type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'sto
 export type CaptureMode = 'microphone' | 'system' | 'applications' | 'microphone_system' | 'microphone_applications';
 export type Caption = { id: string; source: string; text: string; startMs: number; endMs: number; isFinal: boolean };
 export type CaptureApplication = { bundleId: string; name: string };
+export type LocalModel = {
+  id: string;
+  displayName: string;
+  profile: string;
+  description: string;
+  sizeBytes: number;
+  active: boolean;
+};
 
 type LaunchConfig = { origin: string; token: string; retainAudio: boolean };
 type NativeStatus = {
@@ -32,6 +40,9 @@ export function useVoxInkRecorder() {
   const [nativeAvailable, setNativeAvailable] = useState(false);
   const [applications, setApplications] = useState<CaptureApplication[]>([]);
   const [selectedApplications, setSelectedApplications] = useState<string[]>([]);
+  const [models, setModels] = useState<LocalModel[]>([]);
+  const [activeModel, setActiveModel] = useState('Qwen3-ASR-1.7B');
+  const [modelSwitching, setModelSwitching] = useState(false);
   const [captureKind, setCaptureKind] = useState<'browser' | 'native' | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -102,6 +113,37 @@ export function useVoxInkRecorder() {
         // mode disabled with nothing said about why.
         setNativeAvailable(false);
         setMessage('Cannot read local capture capabilities; native modes are unavailable');
+      });
+  }, [authorizedFetch, launch]);
+
+  useEffect(() => {
+    if (!launch) return;
+    void authorizedFetch('/v1/models')
+      .then((response) => response.json())
+      .then((payload) => {
+        const catalog = payload as {
+          active_model?: string;
+          models?: Array<{
+            id: string;
+            display_name: string;
+            profile: string;
+            description: string;
+            size_bytes: number;
+            active: boolean;
+          }>;
+        };
+        setActiveModel(catalog.active_model || 'Qwen3-ASR-1.7B');
+        setModels((catalog.models || []).map((item) => ({
+          id: item.id,
+          displayName: item.display_name,
+          profile: item.profile,
+          description: item.description,
+          sizeBytes: item.size_bytes,
+          active: item.active,
+        })));
+      })
+      .catch((error) => {
+        setMessage(error instanceof Error ? error.message : 'Cannot read installed local models');
       });
   }, [authorizedFetch, launch]);
 
@@ -217,6 +259,7 @@ export function useVoxInkRecorder() {
   }, [sendFrame]);
 
   const start = useCallback(async () => {
+    if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
     if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); setSeconds(0); setCaptions([]); setState('recording'); return; }
     setState('starting'); setSeconds(0); setCaptions([]); setDroppedFrames(0);
     sentSamples.current = 0; sequence.current = 0; nativeCursor.current = 0;
@@ -262,7 +305,7 @@ export function useVoxInkRecorder() {
       streamRef.current = media; contextRef.current = context; sourceRef.current = source; processorRef.current = processor;
       acceptingAudio.current = true; setCaptureKind('browser'); setState('recording'); setMessage('Listening locally');
     } catch (error) { await fail(error); }
-  }, [authorizedFetch, captureAudio, fail, handleMessage, launch, mode, selectedApplications]);
+  }, [authorizedFetch, captureAudio, fail, handleMessage, launch, mode, modelSwitching, selectedApplications]);
 
   const pause = useCallback(async () => {
     if (captureKind === 'native') {
@@ -308,11 +351,35 @@ export function useVoxInkRecorder() {
     setSelectedApplications((current) => current.includes(bundleId) ? current.filter((item) => item !== bundleId) : [...current, bundleId]);
   }, []);
 
+  const selectModel = useCallback(async (modelId: string) => {
+    if (!launch || modelId === activeModel || modelSwitching) return;
+    if (state !== 'ready' && state !== 'failed') return;
+    setModelSwitching(true);
+    setMessage('Verifying and changing the local model…');
+    try {
+      const response = await authorizedFetch('/v1/models/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId }),
+      });
+      const selected = await response.json() as { id: string };
+      setActiveModel(selected.id);
+      setModels((current) => current.map((item) => ({ ...item, active: item.id === selected.id })));
+      setState('ready');
+      setMessage('Local model selected — ready to record');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Cannot change the local model');
+    } finally {
+      setModelSwitching(false);
+    }
+  }, [activeModel, authorizedFetch, launch, modelSwitching, state]);
+
   useEffect(() => () => { void cleanupAudio(); socketRef.current?.close(); }, [cleanupAudio]);
 
   return {
     state, elapsed, captions, droppedFrames, message, isLive: Boolean(launch), mode, setMode,
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
+    models, activeModel, selectModel, modelSwitching,
     start, pause, resume, stop,
   };
 }

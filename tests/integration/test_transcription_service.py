@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import hashlib
+import json
 import tempfile
 import unittest
 from collections import deque
@@ -25,6 +27,7 @@ from services.transcription.app import (
     create_app,
 )
 from voxink_core.models import SessionConfig, Source, TranscriptEvent
+from voxink_core.local_models import MODEL_MANIFEST
 from voxink_core.persistence.audio import AudioRetentionWriter
 
 
@@ -73,6 +76,34 @@ class ScriptedProvider(FakeProvider):
         event = await super().transcribe_file(audio, options)
         text = self.texts.pop(0) if self.texts else ""
         return replace(event, text=text)
+
+
+def _write_model_package(root: Path, model_id: str) -> Path:
+    path = root / model_id
+    path.mkdir(parents=True)
+    payload = model_id.encode("utf-8")
+    (path / "weights.bin").write_bytes(payload)
+    (path / MODEL_MANIFEST).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model": model_id,
+                "display_name": model_id.replace("-", " "),
+                "profile": "Efficient" if "0.6B" in model_id else "High accuracy",
+                "description": "Test local model",
+                "provider": "fake-local",
+                "files": [
+                    {
+                        "path": "weights.bin",
+                        "size": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _start_message(
@@ -167,6 +198,7 @@ class ApiTests(unittest.TestCase):
         with TestClient(app) as client:
             self.assertEqual(200, client.get("/health").status_code)
             self.assertEqual(401, client.get("/v1/providers").status_code)
+            self.assertEqual(401, client.get("/v1/models").status_code)
             self.assertEqual(
                 401,
                 client.get(
@@ -177,6 +209,13 @@ class ApiTests(unittest.TestCase):
                 "/v1/providers", headers={"Authorization": "Bearer correct-secret"}
             )
             self.assertEqual(200, response.status_code)
+            self.assertEqual(
+                200,
+                client.get(
+                    "/v1/models", headers={"Authorization": "Bearer correct-secret"}
+                ).status_code,
+            )
+
 
     def test_authenticated_websocket_rejects_missing_credential(self) -> None:
         app = create_app(
@@ -656,6 +695,110 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual("stream.stopped", system.receive_json()["type"])
         self.assertEqual("stopped", self.client.get("/v1/sessions/dual").json()["state"])
+
+
+class ModelSelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.models_root = self.root / "models"
+        self.small = _write_model_package(self.models_root, "Qwen3-ASR-0.6B")
+        self.large = _write_model_package(self.models_root, "Qwen3-ASR-1.7B")
+        self.initial_provider = FakeProvider()
+        self.created_paths: list[Path] = []
+
+        def provider_factory(path: Path):
+            self.created_paths.append(path)
+            return FakeProvider()
+
+        self.app = create_app(
+            ServiceSettings(
+                model_path=self.large,
+                models_root=self.models_root,
+                output_root=self.root / "outputs",
+            ),
+            provider=self.initial_provider,
+            provider_factory=provider_factory,
+        )
+        self.client = TestClient(self.app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def test_lists_installed_models_and_the_active_profile(self) -> None:
+        response = self.client.get("/v1/models")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("Qwen3-ASR-1.7B", payload["active_model"])
+        self.assertEqual(
+            ["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B"],
+            [item["id"] for item in payload["models"]],
+        )
+        self.assertEqual(
+            [False, True], [item["active"] for item in payload["models"]]
+        )
+
+    def test_switches_provider_and_uses_the_model_in_session_metadata(self) -> None:
+        self.initial_provider.is_loaded = True
+
+        response = self.client.post(
+            "/v1/models/active", json={"model": "Qwen3-ASR-0.6B"}
+        )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertFalse(self.initial_provider.is_loaded)
+        self.assertEqual([self.small.resolve()], self.created_paths)
+        self.assertEqual("Qwen3-ASR-0.6B", self.client.get("/health").json()["model"])
+        created = self.client.post(
+            "/v1/sessions",
+            json={"session_id": "small", "sources": ["microphone"]},
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        config = self.app.state.runtime.sessions.get("small").config
+        self.assertEqual("Qwen3-ASR-0.6B", config.model)
+        self.assertEqual("fake-local", config.provider)
+
+    def test_rejects_switching_while_a_session_is_active(self) -> None:
+        self.client.post(
+            "/v1/sessions", json={"session_id": "live", "sources": ["microphone"]}
+        )
+        self.client.post("/v1/sessions/live/start")
+
+        response = self.client.post(
+            "/v1/models/active", json={"model": "Qwen3-ASR-0.6B"}
+        )
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("stop", response.json()["detail"])
+        self.assertEqual([], self.created_paths)
+
+    def test_rejects_session_start_while_model_is_switching(self) -> None:
+        self.app.state.runtime.model_switching = True
+
+        response = self.client.post(
+            "/v1/sessions", json={"session_id": "racing", "sources": ["microphone"]}
+        )
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("changing", response.json()["detail"])
+
+    def test_rejects_uninstalled_or_inactive_model_claims(self) -> None:
+        missing = self.client.post(
+            "/v1/models/active", json={"model": "Qwen3-ASR-missing"}
+        )
+        claimed = self.client.post(
+            "/v1/sessions",
+            json={
+                "session_id": "wrong",
+                "sources": ["microphone"],
+                "model": "Qwen3-ASR-0.6B",
+            },
+        )
+
+        self.assertEqual(404, missing.status_code)
+        self.assertEqual(409, claimed.status_code)
 
 
 class StreamTimelineTests(unittest.TestCase):

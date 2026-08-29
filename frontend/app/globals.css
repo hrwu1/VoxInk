@@ -56,10 +56,15 @@ h1 { margin: 0; max-width: 780px; font-family: Georgia, 'Times New Roman', serif
 .recorder-topline { display: flex; justify-content: space-between; align-items: center; }
 .source-control { display: flex; align-items: center; gap: 12px; position: relative; }
 .source-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: #e7e6de; }
-.source-control small, .model-label small { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-.source-control strong, .model-label strong { font-size: 13px; font-weight: 650; }
+.source-control small, .model-control small { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.source-control strong, .model-control strong { font-size: 13px; font-weight: 650; }
 .source-control select { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-.model-label { text-align: right; }
+.model-control { position: relative; display: block; max-width: 250px; text-align: right; cursor: pointer; }
+.model-control strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-control select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
+.model-control:has(select:focus-visible) { border-radius: 6px; outline: 2px solid rgba(238, 93, 50, .34); outline-offset: 4px; }
+.model-control:has(select:disabled) { cursor: default; }
+.model-control select:disabled { cursor: default; }
 .waveform { height: 156px; display: flex; align-items: center; justify-content: center; gap: clamp(4px, .6vw, 8px); margin: auto 0 0; }
 .waveform span { width: clamp(3px, .38vw, 5px); height: var(--bar-height); min-height: 8px; border-radius: 99px; background: #c7c8be; transition: height .35s, background .25s; }
 .waveform.recording span { background: var(--orange); animation: breathe .85s ease-in-out infinite alternate; animation-delay: var(--delay); }
@@ -124,7 +129,8 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
   .connection-state { width: fit-content; margin-top: 20px; }
   h1 { font-size: 43px; }
   .recorder-card { min-height: 480px; padding: 24px 18px; }
-  .model-label { display: none; }
+  .model-control { max-width: 190px; }
+  .model-control strong { font-size: 11px; }
   .control-row { grid-template-columns: 78px 1fr 78px; }
   .panel-heading, .caption-list, .caption-footer { padding-left: 20px; padding-right: 20px; }
   .recent-strip { display: none; }

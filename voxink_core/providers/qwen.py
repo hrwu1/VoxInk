@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import os
 from collections.abc import AsyncIterable, Callable
@@ -118,7 +119,10 @@ class QwenLocalProvider:
         yield  # pragma: no cover - keeps this an async generator
 
     async def unload(self) -> None:
-        self._model = None
+        model, self._model = self._model, None
+        if model is not None:
+            del model
+            await asyncio.to_thread(_release_model_memory)
 
     def _validate_local_model(self) -> None:
         if not self.model_path.is_dir():
@@ -167,3 +171,14 @@ def _normalize_language(language: Any) -> str | None:
     return {"english": "en", "chinese": "zh", "mandarin": "zh"}.get(
         value.lower(), value
     )
+
+
+def _release_model_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except (ImportError, RuntimeError):
+        pass

@@ -15,4 +15,8 @@ Compare it with the default profile using:
 ./scripts/voxink-bench --model models/Qwen3-ASR-0.6B --device auto
 ```
 
+The local browser UI discovers complete immediate-child model packages through
+their `voxink-model-manifest.json` files. It can switch installed profiles while
+capture is stopped; command-line selection remains the default for each launch.
+
 Model weights are runtime assets and are intentionally excluded from Git.

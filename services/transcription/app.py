@@ -13,7 +13,7 @@ import threading
 import time
 import wave
 from collections import deque
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +28,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
+from voxink_core.local_models import (
+    LocalModelPackage,
+    discover_local_models,
+    inspect_model_package,
+)
 from voxink_core.persistence.audio import AudioRetentionWriter
 from voxink_core.providers.base import TranscriptionProvider
 from voxink_core.providers.qwen import QwenLocalProvider
@@ -54,6 +59,7 @@ SERVICE_VERSION = "0.2.0"
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
     model_path: Path = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
+    models_root: Path = PROJECT_ROOT / "models"
     output_root: Path = Path.home() / "Documents" / "VoxInk"
     device: str = "auto"
     max_new_tokens: int = 512
@@ -68,8 +74,8 @@ class SessionCreateRequest(BaseModel):
     session_id: str | None = None
     sources: list[Source] = Field(default_factory=lambda: [Source.MICROPHONE])
     applications: list[str] = Field(default_factory=list)
-    provider: str = "qwen-local"
-    model: str = "Qwen3-ASR-1.7B"
+    provider: str | None = None
+    model: str | None = None
     languages: list[str] = Field(default_factory=lambda: ["en", "zh"])
     audio_saved: bool = False
     save_separate_audio: bool = True
@@ -91,20 +97,49 @@ class NativeCaptureRequest(BaseModel):
     retain_audio: bool = False
 
 
+class ModelSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+
+
+ProviderFactory = Callable[[Path], TranscriptionProvider]
+
+
 class ServiceRuntime:
     def __init__(
         self,
         settings: ServiceSettings,
         *,
         provider: TranscriptionProvider | None = None,
+        provider_factory: ProviderFactory | None = None,
         sessions: SessionManager | None = None,
     ) -> None:
         self.settings = settings
-        self.provider = provider or QwenLocalProvider(
-            settings.model_path,
-            device=settings.device,
-            max_new_tokens=settings.max_new_tokens,
+        self.provider_factory = provider_factory or (
+            lambda path: QwenLocalProvider(
+                path,
+                device=settings.device,
+                max_new_tokens=settings.max_new_tokens,
+            )
         )
+        self.provider = provider or self.provider_factory(settings.model_path)
+        self.models = {
+            package.model_id: package
+            for package in discover_local_models(settings.models_root)
+            if package.provider == self.provider.name
+        }
+        self.active_model_id = settings.model_path.expanduser().resolve().name
+        active_inspection = inspect_model_package(settings.model_path)
+        if (
+            active_inspection.package is not None
+            and not active_inspection.failures
+            and active_inspection.package.provider == self.provider.name
+        ):
+            self.models.setdefault(
+                active_inspection.package.model_id, active_inspection.package
+            )
+        self.model_switching = False
         self.sessions = sessions or SessionManager(settings.output_root)
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         self.active_streams: dict[str, set[str]] = {}
@@ -168,9 +203,15 @@ def create_app(
     settings: ServiceSettings | None = None,
     *,
     provider: TranscriptionProvider | None = None,
+    provider_factory: ProviderFactory | None = None,
     sessions: SessionManager | None = None,
 ) -> FastAPI:
-    runtime = ServiceRuntime(settings or ServiceSettings(), provider=provider, sessions=sessions)
+    runtime = ServiceRuntime(
+        settings or ServiceSettings(),
+        provider=provider,
+        provider_factory=provider_factory,
+        sessions=sessions,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -198,6 +239,7 @@ def create_app(
             "privacy_mode": "local-only",
             "bind_policy": "loopback-only",
             "provider": runtime.provider.name,
+            "model": runtime.active_model_id,
             "model_loaded": runtime.provider.is_loaded,
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,
@@ -225,9 +267,52 @@ def create_app(
                     "kind": "local",
                     "enabled": True,
                     "loaded": runtime.provider.is_loaded,
+                    "model": runtime.active_model_id,
                 }
             ]
         }
+
+    @app.get("/v1/models")
+    async def models() -> dict[str, Any]:
+        return {
+            "models": [
+                _model_view(package, active=package.model_id == runtime.active_model_id)
+                for package in runtime.models.values()
+            ],
+            "active_model": runtime.active_model_id,
+        }
+
+    @app.post("/v1/models/active")
+    async def select_model(request: ModelSelectionRequest) -> dict[str, Any]:
+        package = runtime.models.get(request.model)
+        if package is None:
+            raise HTTPException(status_code=404, detail="local model is not installed")
+        if request.model == runtime.active_model_id:
+            return _model_view(package, active=True)
+        if runtime.model_switching or _model_in_use(runtime):
+            raise HTTPException(
+                status_code=409,
+                detail="stop the active recording before changing models",
+            )
+        runtime.model_switching = True
+        try:
+            inspection = await asyncio.to_thread(
+                inspect_model_package, package.path, verify_checksums=True
+            )
+            if inspection.failures:
+                raise HTTPException(status_code=409, detail=inspection.failures[0])
+            if _model_in_use(runtime):
+                raise HTTPException(
+                    status_code=409,
+                    detail="a recording started while the model was being verified",
+                )
+            replacement = runtime.provider_factory(package.path)
+            await runtime.provider.unload()
+            runtime.provider = replacement
+            runtime.active_model_id = package.model_id
+            return _model_view(package, active=True)
+        finally:
+            runtime.model_switching = False
 
     @app.get("/v1/ui/capture/capabilities")
     async def capture_capabilities() -> dict[str, Any]:
@@ -350,14 +435,20 @@ def create_app(
     @app.post("/v1/sessions", response_model=SessionView, status_code=201)
     async def create_session(request: SessionCreateRequest) -> SessionView:
         session_id = request.session_id or _new_session_id()
+        if runtime.model_switching:
+            raise HTTPException(status_code=409, detail="the local model is changing")
+        if request.provider is not None and request.provider != runtime.provider.name:
+            raise HTTPException(status_code=409, detail="requested provider is not active")
+        if request.model is not None and request.model != runtime.active_model_id:
+            raise HTTPException(status_code=409, detail="requested model is not active")
         try:
             session = runtime.sessions.create(
                 SessionConfig(
                     session_id=session_id,
                     sources=tuple(request.sources),
                     applications=tuple(request.applications),
-                    provider=request.provider,
-                    model=request.model,
+                    provider=runtime.provider.name,
+                    model=runtime.active_model_id,
                     languages=tuple(request.languages),
                     audio_saved=request.audio_saved,
                     save_separate_audio=request.save_separate_audio,
@@ -570,6 +661,28 @@ def _authorized(header: str | None, secret: str | None) -> bool:
         return False
     supplied = header[len(prefix) :]
     return bool(supplied) and secrets.compare_digest(supplied, secret)
+
+
+def _model_view(package: LocalModelPackage, *, active: bool) -> dict[str, Any]:
+    return {
+        "id": package.model_id,
+        "display_name": package.display_name,
+        "profile": package.profile,
+        "description": package.description,
+        "provider": package.provider,
+        "size_bytes": package.size_bytes,
+        "active": active,
+    }
+
+
+def _model_in_use(runtime: ServiceRuntime) -> bool:
+    process = runtime.native_process
+    if process is not None and process.poll() is None:
+        return True
+    return any(
+        session.state in {SessionState.CREATED, SessionState.RUNNING, SessionState.PAUSED}
+        for session in runtime.sessions.list()
+    )
 
 
 def _websocket_auth_protocol(header: str | None, secret: str | None) -> str | None:
@@ -1049,6 +1162,8 @@ def _ensure_started_session(
     applications: tuple[str, ...] = (),
     retention: dict[str, bool] | None = None,
 ):
+    if runtime.model_switching:
+        raise HTTPException(status_code=409, detail="the local model is changing")
     if session_id is None:
         session_id = _new_session_id()
     try:
@@ -1059,6 +1174,8 @@ def _ensure_started_session(
                 session_id=session_id,
                 sources=sources or (source,),
                 applications=applications,
+                provider=runtime.provider.name,
+                model=runtime.active_model_id,
                 **(retention or {}),
             )
         )

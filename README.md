@@ -250,6 +250,11 @@ offline. The 1.7B profile remains the default; select the smaller model with:
 ./scripts/voxink-dev --model models/Qwen3-ASR-0.6B --device auto
 ```
 
+When both model packages are installed, the browser control surface also lists
+them under **Model profile**. Selection applies to the current helper run and is
+locked while a recording is active. Every change is verified against the local
+model manifest before the next provider is activated.
+
 Measured on the same Apple Silicon Mac and English fixture, with two timed runs
 per utterance length:
 

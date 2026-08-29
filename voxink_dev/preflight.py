@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import importlib.util
-import json
 import os
 from pathlib import Path
 import shutil
 import sys
 from typing import Callable, Iterable
+
+from voxink_core.local_models import MODEL_MANIFEST, inspect_model_package
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +27,6 @@ DEFAULT_NATIVE_CAPTURE = (
 )
 DEFAULT_OUTPUT_ROOT = Path.home() / "Documents" / "VoxInk"
 DEFAULT_STATE_ROOT = Path.home() / "Library" / "Application Support" / "VoxInk"
-MODEL_MANIFEST = "voxink-model-manifest.json"
 MIN_FREE_BYTES = 512 * 1024 * 1024
 MIN_AUDIO_FREE_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -124,47 +123,11 @@ def run_preflight(
 
 
 def _check_model(model_path: Path, verify_checksums: bool, failures: list[str]) -> int:
-    model_path = model_path.expanduser().resolve()
-    manifest_path = model_path / MODEL_MANIFEST
-    if not model_path.is_dir():
-        failures.append(f"Local model directory is missing: {model_path}")
-        return 0
-    if not manifest_path.is_file():
-        failures.append(
-            f"Model manifest is missing: {manifest_path}. Restore the complete offline model package."
-        )
-        return 0
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        files = manifest["files"]
-        if manifest.get("schema_version") != 1 or not isinstance(files, list) or not files:
-            raise ValueError("expected schema_version 1 and a non-empty files list")
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        failures.append(f"Model manifest is invalid: {exc}")
-        return 0
-
-    checked = 0
-    for entry in files:
-        try:
-            relative = Path(entry["path"])
-            expected_size = int(entry["size"])
-            expected_sha256 = str(entry["sha256"])
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError("path must remain inside the model directory")
-            path = model_path / relative
-            if not path.is_file():
-                failures.append(f"Model file is missing: {relative}")
-                continue
-            if path.stat().st_size != expected_size:
-                failures.append(f"Model file has the wrong size: {relative}")
-                continue
-            if verify_checksums and _sha256(path) != expected_sha256:
-                failures.append(f"Model file checksum does not match: {relative}")
-                continue
-            checked += 1
-        except (KeyError, TypeError, ValueError, OSError) as exc:
-            failures.append(f"Invalid model manifest entry: {exc}")
-    return checked
+    inspection = inspect_model_package(
+        model_path, verify_checksums=verify_checksums
+    )
+    failures.extend(inspection.failures)
+    return inspection.checked_files
 
 
 def _check_writable_directory(label: str, directory: Path, failures: list[str]) -> None:
@@ -175,14 +138,6 @@ def _check_writable_directory(label: str, directory: Path, failures: list[str]) 
         probe.unlink()
     except OSError as exc:
         failures.append(f"The {label} directory is not writable ({directory}): {exc}")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _human_bytes(value: int) -> str:

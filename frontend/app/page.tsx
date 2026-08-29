@@ -9,7 +9,8 @@ export default function Home() {
   const recorder = useVoxInkRecorder();
   const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
   const choosingApplications = recorder.mode === 'applications' || recorder.mode === 'microphone_applications';
-  const selectionLocked = !['ready', 'failed'].includes(state);
+  const selectionLocked = recorder.modelSwitching || !['ready', 'failed'].includes(state);
+  const selectedModel = recorder.models.find((model) => model.id === recorder.activeModel);
   const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -71,7 +72,20 @@ export default function Home() {
                   <option value="microphone_applications" disabled={!recorder.nativeAvailable}>Microphone + applications</option>
                 </select>
               </label>
-              <div className="model-label"><small>Model</small><strong>Qwen3 · Local</strong></div>
+              <label className="model-control" title={selectedModel?.description}>
+                <small>Model profile</small>
+                <strong>{selectedModel ? `${selectedModel.displayName} · ${selectedModel.profile}` : 'Qwen3 · Local'}</strong>
+                <select
+                  aria-label="Transcription model"
+                  value={recorder.activeModel}
+                  disabled={selectionLocked || !isLive || recorder.models.length < 2}
+                  onChange={(event) => void recorder.selectModel(event.target.value)}
+                >
+                  {recorder.models.length ? recorder.models.map((model) => (
+                    <option value={model.id} key={model.id}>{model.displayName} — {model.profile}</option>
+                  )) : <option value={recorder.activeModel}>Qwen3 — Local</option>}
+                </select>
+              </label>
             </div>
 
             {choosingApplications && (
@@ -109,7 +123,7 @@ export default function Home() {
 
             <div className="control-row">
               <button className="secondary-control" onClick={() => void recorder.stop()} disabled={state === 'ready' || state === 'failed'}>Stop</button>
-              <button className={`record-control ${state}`} disabled={state === 'starting' || state === 'stopping'} onClick={() => {
+              <button className={`record-control ${state}`} disabled={recorder.modelSwitching || state === 'starting' || state === 'stopping'} onClick={() => {
                 if (state === 'ready' || state === 'failed') void recorder.start();
                 else if (state === 'recording') recorder.pause();
                 else if (state === 'paused') recorder.resume();
