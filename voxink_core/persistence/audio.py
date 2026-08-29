@@ -70,6 +70,8 @@ class AudioRetentionWriter:
         # a previous run's parts in the directory numbers its own above them, and
         # every source shares the offset so that alignment survives.
         self._part_base = 0
+        self._part_base_resolved = False
+        self._resuming = False
         self._lock = threading.RLock()
 
     def append_pcm(
@@ -220,13 +222,26 @@ class AudioRetentionWriter:
         most these two cases can be told apart from the audio alone.
         """
         parts = self._part_numbers(source)
-        committed = self._committed_end(source, parts[-1]) if parts else None
-        if committed is not None and requested_start + chunk_frames > committed:
-            track = self._open_existing_track(source, parts[-1])
-            self._tracks[source] = track
-            return track
-        if parts:
-            self._part_base = max(self._part_base, self._highest_part())
+        if not self._part_base_resolved:
+            # The first source to write decides, for the whole run, whether this
+            # continues the stored parts or numbers above them. Deciding per
+            # source instead would let whichever source happens to arrive first
+            # sit below the other's offset, and generate_combined would pair this
+            # run's audio with a previous run's.
+            committed = self._committed_end(source, parts[-1]) if parts else None
+            self._resuming = (
+                committed is not None and requested_start + chunk_frames > committed
+            )
+            if not self._resuming:
+                self._part_base = max(self._part_base, self._highest_part())
+            self._part_base_resolved = True
+        if self._resuming and parts:
+            # _committed_end reads _part_base, which is untouched on this path.
+            committed = self._committed_end(source, parts[-1])
+            if committed is not None and requested_start + chunk_frames > committed:
+                track = self._open_existing_track(source, parts[-1])
+                self._tracks[source] = track
+                return track
         track = self._open_track(source, self._part_for(requested_start))
         self._tracks[source] = track
         return track

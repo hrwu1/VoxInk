@@ -120,6 +120,30 @@ class AudioRetentionTests(unittest.TestCase):
         self.assertEqual(samples(self.directory / "combined-part-001.wav"), (3, 3))
         self.assertEqual(samples(self.directory / "combined-part-002.wav"), (7, 7))
 
+    def test_a_rerun_aligns_sources_when_only_one_has_previous_parts(self) -> None:
+        """A microphone-only run must not leave the next run's sources on split bases."""
+        first = self.writer()
+        first.append_pcm(Source.MICROPHONE, pcm(1, 1), start_ms=0)
+        first.close()
+
+        second = self.writer()
+        # The system frame arrives first and has no previous parts of its own,
+        # so it is the source that would keep the old base.
+        second.append_pcm(Source.SYSTEM, pcm(4, 4), start_ms=0)
+        second.append_pcm(Source.MICROPHONE, pcm(3, 3), start_ms=0)
+        second.close()
+
+        self.assertEqual(samples(self.directory / "system-part-002.wav"), (4, 4))
+        self.assertEqual(samples(self.directory / "microphone-part-002.wav"), (3, 3))
+        combined = second.generate_combined()
+        self.assertEqual(
+            [path.name for path in combined],
+            ["combined-part-001.wav", "combined-part-002.wav"],
+        )
+        # Part 001 is the first run's microphone alone; the new run mixes 3+4.
+        self.assertEqual(samples(self.directory / "combined-part-001.wav"), (1, 1))
+        self.assertEqual(samples(self.directory / "combined-part-002.wav"), (7, 7))
+
     def test_a_rerun_rotates_from_its_own_part_base(self) -> None:
         first = self.writer(max_part_seconds=1)
         first.append_pcm(Source.SYSTEM, pcm(*range(25)), start_ms=0)
