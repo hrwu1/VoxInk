@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 import signal
@@ -16,8 +17,10 @@ from clients.python_capture.vad import EnergyVadChunker, VadConfig
 from services.transcription.app import (
     ServiceSettings,
     _finalize_audio,
+    _native_capture_view,
     _read_native_error,
     _shutdown,
+    _start_native_stderr_reader,
     _StreamContext,
     create_app,
 )
@@ -365,6 +368,87 @@ class ApiTests(unittest.TestCase):
             ):
                 _shutdown(runtime)
         self.assertEqual("stopped", runtime.sessions.get("open").state.value)
+
+    def test_native_helper_stderr_is_drained_so_a_flood_cannot_wedge_capture(self) -> None:
+        """The Swift CLI warns per dropped frame; an undrained pipe blocks it."""
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=self.provider
+        )
+        runtime = app.state.runtime
+        script = (
+            "import sys\n"
+            "for index in range(20000):\n"
+            "    sys.stderr.write(f'dropped frame {index}\\n')\n"
+            "sys.stderr.flush()\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _start_native_stderr_reader(runtime, process)
+        try:
+            process.wait(timeout=15)
+        finally:
+            _read_native_error(runtime, process)
+        self.assertEqual(0, process.returncode)
+        self.assertEqual("dropped frame 19999", runtime.native_error)
+
+    def test_the_ui_event_feed_is_bounded_and_keeps_cursors_absolute(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=self.provider
+        )
+        runtime = app.state.runtime
+        runtime.native_session_id = "watched"
+        runtime.ui_events["watched"] = deque(maxlen=3)
+        runtime.ui_events_total["watched"] = 0
+        for index in range(5):
+            runtime.ui_events["watched"].append({"text": str(index)})
+            runtime.ui_events_total["watched"] += 1
+
+        view = _native_capture_view(runtime, after=0)
+        # The two oldest were dropped, but the cursor still counts every event.
+        self.assertEqual(["2", "3", "4"], [event["text"] for event in view["events"]])
+        self.assertEqual(5, view["next_cursor"])
+        caught_up = _native_capture_view(runtime, after=view["next_cursor"])
+        self.assertEqual([], caught_up["events"])
+        self.assertEqual(5, caught_up["next_cursor"])
+
+    def test_a_session_the_ui_is_not_watching_records_no_events(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/live/stream") as websocket:
+            websocket.send_json(
+                {
+                    "type": "stream.start",
+                    "schema_version": 1,
+                    "session_id": "live",
+                    "stream_id": "microphone-1",
+                    "source": "microphone",
+                    "audio": {
+                        "encoding": "pcm_s16le",
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                    },
+                }
+            )
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            pcm = bytes(3200)
+            websocket.send_json(
+                {
+                    "type": "audio.chunk",
+                    "sequence": 0,
+                    "stream_id": "microphone-1",
+                    "start_ms": 0,
+                    "end_ms": 100,
+                    "byte_length": len(pcm),
+                    "finalization_reason": "silence",
+                }
+            )
+            websocket.send_bytes(pcm)
+            self.assertEqual("transcript.final", websocket.receive_json()["type"])
+        # Nothing polls this session, so nothing may be retained for it.
+        self.assertEqual({}, self.client.app.state.runtime.ui_events)
 
     def test_batch_transcription_creates_durable_markdown(self) -> None:
         response = self.client.post(

@@ -9,8 +9,10 @@ import secrets
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import wave
+from collections import deque
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -44,6 +46,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # during model warm-up does not look like sustained lag.
 _LAG_WINDOW_MS = 5_000.0
 PROTOCOL_VERSION = 1
+# Cap on the live caption feed the UI polls; it only renders the recent tail.
+UI_EVENT_BUFFER = 500
 SERVICE_VERSION = "0.2.0"
 
 
@@ -108,11 +112,15 @@ class ServiceRuntime:
         self.dedup = OverlapDeduplicator()
         self.stream_ends: dict[tuple[str, str], int] = {}
         self.ui_bootstrap_secret = settings.ui_bootstrap_secret
-        self.ui_events: dict[str, list[dict[str, Any]]] = {}
+        # Bounded: only the session the UI is watching is recorded.
+        self.ui_events: dict[str, deque[dict[str, Any]]] = {}
+        self.ui_events_total: dict[str, int] = {}
         self.native_process: subprocess.Popen[str] | None = None
         self.native_session_id: str | None = None
         self.native_capture_state = "ready"
         self.native_error: str | None = None
+        self.native_stderr: deque[str] = deque(maxlen=200)
+        self.native_stderr_reader: threading.Thread | None = None
 
 
 @dataclass
@@ -307,7 +315,13 @@ def create_app(
         runtime.native_session_id = session_id
         runtime.native_capture_state = "recording"
         runtime.native_error = None
-        runtime.ui_events[session_id] = []
+        runtime.native_stderr.clear()
+        _start_native_stderr_reader(runtime, process)
+        # Only one native session is watched at a time; drop the last one's feed.
+        runtime.ui_events.clear()
+        runtime.ui_events_total.clear()
+        runtime.ui_events[session_id] = deque(maxlen=UI_EVENT_BUFFER)
+        runtime.ui_events_total[session_id] = 0
         return _native_capture_view(runtime, after=0)
 
     @app.get("/v1/ui/capture/status")
@@ -657,7 +671,11 @@ async def _publish_event(
         )
         return True
     runtime.stream_ends[key] = max(previous_end or 0, event.end_ms)
-    runtime.ui_events.setdefault(event.session_id, []).append(event.to_dict())
+    watched = runtime.ui_events.get(event.session_id)
+    if watched is not None:
+        # Sessions the UI never polls would otherwise accumulate forever.
+        watched.append(event.to_dict())
+        runtime.ui_events_total[event.session_id] += 1
     await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
     return True
 
@@ -713,13 +731,17 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         runtime.native_capture_state = "ready" if exit_code == 0 else "failed"
         _read_native_error(runtime, process)
     session_id = runtime.native_session_id
-    events = runtime.ui_events.get(session_id or "", [])
-    cursor = min(after, len(events))
+    events = list(runtime.ui_events.get(session_id or "", ()))
+    total = runtime.ui_events_total.get(session_id or "", 0)
+    # Cursors are absolute, so a client that falls behind a trimmed buffer skips
+    # the dropped events instead of replaying the feed from the start.
+    dropped = total - len(events)
+    cursor = min(max(0, after - dropped), len(events))
     return {
         "state": runtime.native_capture_state,
         "session_id": session_id,
         "events": events[cursor:],
-        "next_cursor": len(events),
+        "next_cursor": total,
         "exit_code": exit_code,
         "error": runtime.native_error,
     }
@@ -745,18 +767,53 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
     _read_native_error(runtime, process)
 
 
-def _read_native_error(runtime: ServiceRuntime, process: subprocess.Popen[str]) -> None:
+def _start_native_stderr_reader(
+    runtime: ServiceRuntime, process: subprocess.Popen[str]
+) -> None:
+    """Drain the capture helper's stderr for as long as it runs.
+
+    The Swift CLI warns about dropped frames up to once per second per source.
+    Left unread those fill the pipe, and the helper then blocks inside its own
+    status path while the UI still reports "recording".
+    """
     stream = process.stderr
-    if stream is None or stream.closed or process.poll() is None:
+    if stream is None:
         return
-    try:
-        detail = stream.read().strip()
-    except (OSError, ValueError):
-        detail = ""
-    finally:
-        stream.close()
-    if detail and runtime.native_error is None:
-        runtime.native_error = detail.splitlines()[-1]
+
+    def drain() -> None:
+        try:
+            for line in stream:
+                runtime.native_stderr.append(line.rstrip("\n"))
+        except (OSError, ValueError):
+            return
+
+    reader = threading.Thread(target=drain, name="voxink-native-stderr", daemon=True)
+    runtime.native_stderr_reader = reader
+    reader.start()
+
+
+def _read_native_error(runtime: ServiceRuntime, process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        return
+    reader = runtime.native_stderr_reader
+    if reader is not None:
+        reader.join(timeout=1.0)
+        runtime.native_stderr_reader = None
+    stream = process.stderr
+    if stream is not None and not stream.closed:
+        # No reader ran, so the pipe still holds whatever the helper wrote.
+        try:
+            runtime.native_stderr.extend(stream.read().splitlines())
+        except (OSError, ValueError):
+            pass
+        finally:
+            stream.close()
+    if runtime.native_error is None:
+        detail = next(
+            (line.strip() for line in reversed(runtime.native_stderr) if line.strip()), ""
+        )
+        if detail:
+            runtime.native_error = detail
 
 
 def _record_audio(
