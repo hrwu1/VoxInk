@@ -1,12 +1,17 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CaptureMode, useVoxInkRecorder } from './use-voxink-recorder';
+import { useVocabulary } from './use-vocabulary';
+import { VocabularyPanel } from './vocabulary-panel';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
+type Tab = 'record' | 'vocabulary';
 
 export default function Home() {
   const recorder = useVoxInkRecorder();
+  const vocabulary = useVocabulary(recorder.authorizedFetch, recorder.isLive);
+  const [tab, setTab] = useState<Tab>('record');
   const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
   const choosingApplications = recorder.mode === 'applications' || recorder.mode === 'microphone_applications';
   const selectionLocked = recorder.modelSwitching || !['ready', 'failed'].includes(state);
@@ -14,8 +19,10 @@ export default function Home() {
   const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Space belongs to whatever the vocabulary tab is being typed into.
+    if (tab !== 'record') return;
     function handleShortcut(event: KeyboardEvent) {
-      if (event.code !== 'Space' || ['INPUT', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement).tagName)) return;
+      if (event.code !== 'Space' || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement).tagName)) return;
       event.preventDefault();
       if (state === 'ready' || state === 'failed') void recorder.start();
       else if (state === 'recording') recorder.pause();
@@ -23,7 +30,7 @@ export default function Home() {
     }
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [recorder, state]);
+  }, [recorder, state, tab]);
 
   useEffect(() => {
     const list = captionListRef.current;
@@ -53,7 +60,39 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="content-grid">
+        <div className="tab-strip" role="tablist" aria-label="Console sections">
+          <button
+            type="button"
+            role="tab"
+            id="tab-record"
+            aria-selected={tab === 'record'}
+            aria-controls="panel-record"
+            className={tab === 'record' ? 'tab active' : 'tab'}
+            onClick={() => setTab('record')}
+          >
+            Record
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-vocabulary"
+            aria-selected={tab === 'vocabulary'}
+            aria-controls="panel-vocabulary"
+            className={tab === 'vocabulary' ? 'tab active' : 'tab'}
+            onClick={() => setTab('vocabulary')}
+          >
+            Vocabulary
+            {vocabulary.summary.terms.length > 0 && <em>{vocabulary.summary.terms.length}</em>}
+            {vocabulary.dirty && <i className="tab-dot" aria-label="unsaved changes" />}
+          </button>
+        </div>
+
+        {tab === 'vocabulary' ? (
+          <div role="tabpanel" id="panel-vocabulary" aria-labelledby="tab-vocabulary">
+            <VocabularyPanel vocabulary={vocabulary} isLive={isLive} />
+          </div>
+        ) : (
+        <div className="content-grid" role="tabpanel" id="panel-record" aria-labelledby="tab-record">
           <section className="recorder-card" aria-label="Recorder controls">
             <div className="recorder-topline">
               <label className="source-control">
@@ -167,6 +206,7 @@ export default function Home() {
             </footer>
           </aside>
         </div>
+        )}
 
         <footer className="recent-strip">
           <div><p className="eyebrow">Last session</p><strong>Nothing recorded yet</strong></div>

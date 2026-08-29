@@ -381,5 +381,7 @@ export function useVoxInkRecorder() {
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
     models, activeModel, selectModel, modelSwitching,
     start, pause, resume, stop,
+    // Other panels reach the helper through the same one-time launch credential.
+    authorizedFetch,
   };
 }

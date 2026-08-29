@@ -43,7 +43,7 @@ from voxink_core.sessions import (
     SessionState,
 )
 from voxink_core.transcripts import OverlapDeduplicator
-from voxink_core.vocabulary import Vocabulary, VocabularyFile
+from voxink_core.vocabulary import MAX_FILE_BYTES, Vocabulary, VocabularyFile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -107,6 +107,12 @@ class ModelSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
+
+
+class VocabularyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
 
 
 ProviderFactory = Callable[[Path], TranscriptionProvider]
@@ -322,6 +328,22 @@ def create_app(
             return _model_view(package, active=True)
         finally:
             runtime.model_switching = False
+
+    @app.get("/v1/vocabulary")
+    async def read_vocabulary() -> dict[str, Any]:
+        return _vocabulary_view(runtime)
+
+    @app.put("/v1/vocabulary")
+    async def write_vocabulary(request: VocabularyUpdateRequest) -> dict[str, Any]:
+        try:
+            await asyncio.to_thread(runtime.vocabulary.write, request.content)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"cannot write the vocabulary file: {exc}"
+            ) from exc
+        return _vocabulary_view(runtime)
 
     @app.get("/v1/ui/capture/capabilities")
     async def capture_capabilities() -> dict[str, Any]:
@@ -684,6 +706,24 @@ def _model_view(package: LocalModelPackage, *, active: bool) -> dict[str, Any]:
         "provider": package.provider,
         "size_bytes": package.size_bytes,
         "active": active,
+    }
+
+
+def _vocabulary_view(runtime: ServiceRuntime) -> dict[str, Any]:
+    """Report the file's raw text alongside what the service parses from it."""
+    vocabulary = runtime.vocabulary.current()
+    return {
+        "path": str(runtime.vocabulary.path or ""),
+        "content": runtime.vocabulary.text(),
+        "terms": list(vocabulary.terms),
+        "corrections": [
+            {"misheard": misheard, "correct": correct}
+            for misheard, correct in vocabulary.corrections
+        ],
+        # The context is capped, so a long list can bias fewer terms than it
+        # names. The editor says so rather than letting the extras fail silently.
+        "biased_terms": len(vocabulary.biased_terms),
+        "max_bytes": MAX_FILE_BYTES,
     }
 
 

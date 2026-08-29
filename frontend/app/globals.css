@@ -51,6 +51,42 @@ h1 { margin: 0; max-width: 780px; font-family: Georgia, 'Times New Roman', serif
 .connection-state { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(250,249,244,.7); color: #66695f; font-size: 12px; font-weight: 620; }
 .connection-state.recording span { background: var(--orange); box-shadow: 0 0 0 4px rgba(238,93,50,.13); }
 .connection-state.paused span { background: #d39a42; box-shadow: 0 0 0 4px rgba(211,154,66,.13); }
+.tab-strip { display: flex; gap: 6px; margin-bottom: 14px; }
+.tab { display: flex; align-items: center; gap: 7px; padding: 9px 15px; border: 1px solid transparent; border-radius: 11px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; cursor: pointer; transition: background .16s, color .16s, border-color .16s; }
+.tab:hover { color: #4b4e47; background: rgba(250,249,244,.7); }
+.tab.active { border-color: #d2d3ca; background: var(--card); color: var(--ink); box-shadow: 0 4px 14px rgba(36,35,29,.05); }
+.tab em { padding: 1px 6px; border-radius: 99px; background: #e7e6de; color: #64675e; font-size: 10px; font-style: normal; font-weight: 700; }
+.tab.active em { background: rgba(79,118,95,.13); color: var(--green); }
+.tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); }
+.vocabulary-card { min-height: 0; display: flex; flex-direction: column; padding: clamp(26px, 3vw, 42px); border-right: 1px solid var(--line); }
+.vocabulary-topline { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 14px; }
+.vocabulary-topline > span:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.vocabulary-topline small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.vocabulary-topline strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
+.vocabulary-status { flex: none; padding: 6px 10px; border-radius: 8px; background: #e9e8e0; color: #64675e; font-size: 10px; font-weight: 650; }
+.vocabulary-status.dirty { background: rgba(238,93,50,.11); color: var(--orange-dark); }
+.vocabulary-status.failed { background: rgba(216,74,34,.14); color: var(--orange-dark); }
+.vocabulary-editor { min-height: 0; flex: 1; width: 100%; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7; tab-size: 2; resize: none; }
+.vocabulary-editor:focus-visible { border-color: rgba(238,93,50,.5); outline: 2px solid rgba(238,93,50,.2); outline-offset: 1px; }
+.vocabulary-editor:disabled { color: var(--muted); cursor: not-allowed; }
+.vocabulary-editor::placeholder { color: #a9aba1; }
+.vocabulary-message { margin: 13px 0 15px; min-height: 30px; color: #777a71; font-size: 11px; line-height: 1.5; }
+.vocabulary-actions { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; }
+.vocabulary-actions button { height: 50px; border-radius: 14px; cursor: pointer; transition: transform .16s, background .16s; }
+.vocabulary-actions button:active:not(:disabled) { transform: translateY(1px); }
+.vocabulary-actions .record-control:disabled { background: #ccccc3; box-shadow: none; cursor: not-allowed; }
+.vocabulary-summary { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 22px 30px; }
+.vocabulary-summary section + section { margin-top: 24px; padding-top: 22px; border-top: 1px solid #e4e3dc; }
+.term-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.term-chip { padding: 6px 11px; border: 1px solid rgba(79,118,95,.32); border-radius: 99px; background: rgba(79,118,95,.09); color: #3f5f4c; font-size: 12px; font-weight: 620; overflow-wrap: anywhere; }
+.term-chip.inactive { border-color: var(--line); background: #ecebe3; color: #9a9c93; text-decoration: line-through; }
+.vocabulary-warning { margin: 13px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(238,93,50,.09); color: var(--orange-dark); font-size: 11px; line-height: 1.5; }
+.correction-rules { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.correction-rules li { display: grid; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr); align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid rgba(23,24,20,.08); border-radius: 10px; background: var(--card); font-size: 12px; }
+.correction-rules span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); text-decoration: line-through; }
+.correction-rules i { color: var(--orange); font-style: normal; }
+.correction-rules strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.caption-footer button:disabled { color: #a9aba1; cursor: not-allowed; }
 .content-grid { height: clamp(520px, 58vh, 640px); min-height: 520px; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(390px, .92fr); border: 1px solid #d2d3ca; border-radius: 24px; overflow: hidden; background: var(--card); box-shadow: 0 24px 70px rgba(36, 35, 29, .08); }
 .recorder-card { min-height: 0; display: flex; flex-direction: column; padding: clamp(26px, 3vw, 42px); border-right: 1px solid var(--line); }
 .recorder-topline { display: flex; justify-content: space-between; align-items: center; }
@@ -118,7 +154,7 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
   .workspace-heading { align-items: flex-start; gap: 24px; }
   .connection-state { margin-top: 6px; white-space: nowrap; }
   .content-grid { height: auto; min-height: 0; grid-template-columns: 1fr; }
-  .recorder-card { min-height: 500px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .recorder-card, .vocabulary-card { min-height: 500px; border-right: 0; border-bottom: 1px solid var(--line); }
   .session-card { height: min(520px, 70vh); min-height: 420px; }
 }
 @media (max-width: 600px) {
@@ -128,11 +164,11 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
   .workspace-heading { display: block; }
   .connection-state { width: fit-content; margin-top: 20px; }
   h1 { font-size: 43px; }
-  .recorder-card { min-height: 480px; padding: 24px 18px; }
+  .recorder-card, .vocabulary-card { min-height: 480px; padding: 24px 18px; }
   .model-control { max-width: 190px; }
   .model-control strong { font-size: 11px; }
   .control-row { grid-template-columns: 78px 1fr 78px; }
-  .panel-heading, .caption-list, .caption-footer { padding-left: 20px; padding-right: 20px; }
+  .panel-heading, .caption-list, .caption-footer, .vocabulary-summary { padding-left: 20px; padding-right: 20px; }
   .recent-strip { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {

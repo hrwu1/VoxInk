@@ -28,6 +28,9 @@ COMMENT_PREFIX = "#"
 # list would slow all recognition down to pay for words nobody said. This is a
 # guard against a runaway file, not a recommended list length.
 MAX_CONTEXT_CHARS = 2000
+# A vocabulary is a list of words a person typed. This only stops a stray paste
+# or a runaway client from filling the disk through the editing API.
+MAX_FILE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,21 @@ class Vocabulary:
         return not self.terms and not self.corrections
 
     @property
+    def biased_terms(self) -> tuple[str, ...]:
+        """Return the leading terms that fit within the context cap.
+
+        Truncation stops on a term boundary so the hint never ends mid-word, and
+        an editor can report which terms were left out instead of letting them
+        fail silently.
+        """
+        length = 0
+        for index, term in enumerate(self.terms):
+            length += len(term) + (2 if index else 0)
+            if length > MAX_CONTEXT_CHARS:
+                return self.terms[:index]
+        return self.terms
+
+    @property
     def context(self) -> str | None:
         """Return the biasing hint to hand a provider, or None when there is none.
 
@@ -49,20 +67,8 @@ class Vocabulary:
         value becomes a system message for the model, and an instruction would
         invite it to answer rather than to transcribe.
         """
-        if not self.terms:
-            return None
-        context = ", ".join(self.terms)
-        if len(context) <= MAX_CONTEXT_CHARS:
-            return context
-        # Truncate on a term boundary so the hint never ends mid-word.
-        kept: list[str] = []
-        length = 0
-        for term in self.terms:
-            length += len(term) + (2 if kept else 0)
-            if length > MAX_CONTEXT_CHARS:
-                break
-            kept.append(term)
-        return ", ".join(kept) if kept else None
+        terms = self.biased_terms
+        return ", ".join(terms) if terms else None
 
     def apply(self, text: str) -> str:
         """Rewrite `text` with every correction rule, in file order."""
@@ -132,6 +138,34 @@ class VocabularyFile:
         )
         self._loaded = True
         return self._vocabulary
+
+    def text(self) -> str:
+        """Return the file's raw text, or empty when there is no file yet.
+
+        Editors need what the user actually wrote, comments and blank lines
+        included, not the parsed terms.
+        """
+        if self.path is None:
+            return ""
+        try:
+            return self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def write(self, content: str) -> Vocabulary:
+        """Replace the file's text and return what the service will now read."""
+        if self.path is None:
+            raise ValueError("no vocabulary file is configured")
+        if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+            raise ValueError(
+                f"a vocabulary file may not exceed {MAX_FILE_BYTES} bytes"
+            )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(content, encoding="utf-8")
+        # Forget the cached signature rather than trusting the one just written:
+        # a same-nanosecond edit from elsewhere would otherwise go unnoticed.
+        self._loaded = False
+        return self.current()
 
 
 def _remember(terms: list[str], term: str) -> None:

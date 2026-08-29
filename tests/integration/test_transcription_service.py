@@ -1337,6 +1337,74 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(1, len(finals))
         self.assertEqual("Hello Hrwu.", finals[0]["event"]["text"])
 
+    def test_the_api_reports_the_file_text_and_what_it_parses(self) -> None:
+        self.vocabulary.write_text("# names\nVoxInk\nharu => Hrwu\n", encoding="utf-8")
+        client = self._client(RecordingProvider())
+
+        payload = client.get("/v1/vocabulary").json()
+
+        self.assertEqual("# names\nVoxInk\nharu => Hrwu\n", payload["content"])
+        self.assertEqual(["VoxInk", "Hrwu"], payload["terms"])
+        self.assertEqual([{"misheard": "haru", "correct": "Hrwu"}], payload["corrections"])
+        self.assertEqual(2, payload["biased_terms"])
+        self.assertEqual(str(self.vocabulary), payload["path"])
+
+    def test_the_api_opens_a_missing_file_as_an_empty_editor(self) -> None:
+        client = self._client(RecordingProvider())
+
+        payload = client.get("/v1/vocabulary").json()
+
+        self.assertEqual("", payload["content"])
+        self.assertEqual([], payload["terms"])
+
+    def test_saving_through_the_api_changes_the_next_transcription(self) -> None:
+        provider = RecordingProvider()
+        client = self._client(provider)
+        self._transcribe(client, "before")
+
+        response = client.put("/v1/vocabulary", json={"content": "Hrwu\nVoxInk\n"})
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(["Hrwu", "VoxInk"], response.json()["terms"])
+        self._transcribe(client, "after")
+
+        self.assertEqual([None, "Hrwu, VoxInk"], provider.contexts)
+        self.assertEqual("Hrwu\nVoxInk\n", self.vocabulary.read_text(encoding="utf-8"))
+
+    def test_saving_creates_a_file_that_did_not_exist(self) -> None:
+        elsewhere = Path(self.temporary.name) / "new" / "terms.txt"
+        client = self._client(RecordingProvider(), vocabulary_path=elsewhere)
+
+        response = client.put("/v1/vocabulary", json={"content": "Hrwu\n"})
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("Hrwu\n", elsewhere.read_text(encoding="utf-8"))
+
+    def test_saving_an_oversized_file_is_refused_and_changes_nothing(self) -> None:
+        self.vocabulary.write_text("Hrwu\n", encoding="utf-8")
+        client = self._client(RecordingProvider())
+
+        response = client.put("/v1/vocabulary", json={"content": "x" * (64 * 1024 + 1)})
+
+        self.assertEqual(413, response.status_code)
+        self.assertEqual("Hrwu\n", self.vocabulary.read_text(encoding="utf-8"))
+
+    def test_the_vocabulary_api_requires_the_launch_credential(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root, auth_secret="launch-secret"),
+            provider=RecordingProvider(),
+        )
+        with TestClient(app) as client:
+            self.assertEqual(401, client.get("/v1/vocabulary").status_code)
+            self.assertEqual(
+                401, client.put("/v1/vocabulary", json={"content": "Hrwu"}).status_code
+            )
+            self.assertEqual(
+                200,
+                client.get(
+                    "/v1/vocabulary", headers={"Authorization": "Bearer launch-secret"}
+                ).status_code,
+            )
+
     def test_an_edit_takes_effect_without_restarting_the_service(self) -> None:
         provider = RecordingProvider()
         client = self._client(provider)

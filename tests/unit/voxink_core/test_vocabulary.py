@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from voxink_core.vocabulary import MAX_CONTEXT_CHARS, Vocabulary, VocabularyFile
+from voxink_core.vocabulary import (
+    MAX_CONTEXT_CHARS,
+    MAX_FILE_BYTES,
+    Vocabulary,
+    VocabularyFile,
+)
 
 
 class VocabularyParsingTests(unittest.TestCase):
@@ -52,6 +57,14 @@ class VocabularyParsingTests(unittest.TestCase):
         self.assertLessEqual(len(context), MAX_CONTEXT_CHARS)
         self.assertFalse(context.endswith(","))
         self.assertIn("term0", context)
+        # An editor reports the shortfall, so the two must agree.
+        self.assertEqual(", ".join(vocabulary.biased_terms), context)
+        self.assertLess(len(vocabulary.biased_terms), len(vocabulary.terms))
+
+    def test_a_short_list_biases_every_term(self) -> None:
+        vocabulary = Vocabulary.parse("VoxInk\nHrwu\n")
+
+        self.assertEqual(vocabulary.biased_terms, vocabulary.terms)
 
 
 class VocabularyCorrectionTests(unittest.TestCase):
@@ -111,6 +124,37 @@ class VocabularyFileTests(unittest.TestCase):
         os.utime(self.path, ns=(0, 0))
 
         self.assertEqual(reader.current().terms, ("VoxInk", "Hrwu"))
+
+    def test_text_returns_what_was_written_including_comments(self) -> None:
+        self.path.write_text("# a note\n\nVoxInk\n", encoding="utf-8")
+
+        self.assertEqual("# a note\n\nVoxInk\n", VocabularyFile(self.path).text())
+
+    def test_text_of_a_missing_file_is_empty(self) -> None:
+        self.assertEqual("", VocabularyFile(self.path).text())
+
+    def test_writing_creates_the_file_and_updates_what_is_served(self) -> None:
+        nested = Path(self.temp.name) / "new" / "vocabulary.txt"
+        reader = VocabularyFile(nested)
+        self.assertTrue(reader.current().is_empty)
+
+        written = reader.write("Hrwu\n")
+
+        self.assertEqual(("Hrwu",), written.terms)
+        self.assertEqual(("Hrwu",), reader.current().terms)
+        self.assertEqual("Hrwu\n", nested.read_text(encoding="utf-8"))
+
+    def test_writing_more_than_the_cap_is_refused(self) -> None:
+        reader = VocabularyFile(self.path)
+
+        with self.assertRaises(ValueError):
+            reader.write("x" * (MAX_FILE_BYTES + 1))
+
+        self.assertFalse(self.path.exists())
+
+    def test_writing_without_a_configured_path_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            VocabularyFile(None).write("Hrwu\n")
 
     def test_deleting_the_file_returns_to_an_empty_vocabulary(self) -> None:
         self.path.write_text("VoxInk\n", encoding="utf-8")

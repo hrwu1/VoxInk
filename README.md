@@ -23,7 +23,8 @@ and Transformers offline modes and loads the model exclusively from the local
 - Native ScreenCaptureKit filtering for all system audio or multiple apps.
 - Automatic selected-app reconnection by bundle identifier.
 - Minimal always-on-top, click-through-capable macOS caption panel.
-- Custom vocabulary that biases recognition and corrects finalized text.
+- Custom vocabulary that biases recognition and corrects finalized text,
+  editable from a browser tab or as a plain file.
 
 Speaker diarization, forced-alignment timestamps, online providers, and polished
 UI controls remain extension points rather than completed features.
@@ -123,6 +124,13 @@ Use a file somewhere else with:
 ```sh
 ./scripts/voxink-dev --vocabulary ~/Documents/work-terms.txt
 ```
+
+The browser console edits the same file under its **Vocabulary** tab, so a text
+editor is optional. The tab shows the file exactly as it is on disk, comments
+included, and lists beside it the terms and correction rules the helper actually
+parsed — including any terms past the size limit, which are struck through
+because they are not being sent to the model. **Save** writes the file and the
+next spoken phrase uses it, even in the middle of a recording.
 
 ### Native system and application capture
 
