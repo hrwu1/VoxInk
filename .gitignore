@@ -18,6 +18,9 @@ htmlcov/
 .venv/
 venv/
 env/
+
+# JavaScript dependencies and package-manager state
+node_modules/
 .pnpm-store/
 
 # Python packaging
@@ -39,12 +42,16 @@ dist/
 # Editors and IDEs
 .idea/
 .vscode/
+.claude/settings.local.json
 
 # Xcode / Swift
 DerivedData/
+*.xcresult
 *.xcuserstate
 xcuserdata/
 .build/
+.swiftpm/configuration/
+.swiftpm/security/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 
 # Downloaded local model weights (about 4.4 GB)
