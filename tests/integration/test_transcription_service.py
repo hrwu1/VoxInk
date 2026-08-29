@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -15,6 +16,8 @@ from clients.python_capture.vad import EnergyVadChunker, VadConfig
 from services.transcription.app import (
     ServiceSettings,
     _finalize_audio,
+    _read_native_error,
+    _shutdown,
     _StreamContext,
     create_app,
 )
@@ -314,6 +317,54 @@ class ApiTests(unittest.TestCase):
             response = self.client.post(f"/v1/sessions/manual/{action}")
             self.assertEqual(200, response.status_code, response.text)
             self.assertEqual(expected, response.json()["state"])
+
+    def test_reading_the_native_error_twice_does_not_raise_on_empty_stderr(self) -> None:
+        """A helper that exits cleanly with no stderr is read once per status poll."""
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=self.provider
+        )
+        runtime = app.state.runtime
+        process = subprocess.Popen(
+            [sys.executable, "-c", ""], stderr=subprocess.PIPE, text=True
+        )
+        process.wait(timeout=10)
+        _read_native_error(runtime, process)
+        self.assertIsNone(runtime.native_error)
+        # The UI polls /status every 500 ms, so this runs again on a closed stream.
+        _read_native_error(runtime, process)
+        self.assertIsNone(runtime.native_error)
+
+    def test_native_error_keeps_the_first_detail_across_repeated_reads(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=self.provider
+        )
+        runtime = app.state.runtime
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stderr.write('capture failed\\n')"],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        process.wait(timeout=10)
+        _read_native_error(runtime, process)
+        self.assertEqual("capture failed", runtime.native_error)
+        _read_native_error(runtime, process)
+        self.assertEqual("capture failed", runtime.native_error)
+
+    def test_shutdown_finalizes_sessions_even_when_native_capture_stop_raises(self) -> None:
+        app = create_app(
+            ServiceSettings(output_root=self.output_root), provider=self.provider
+        )
+        runtime = app.state.runtime
+        with TestClient(app) as client:
+            client.post("/v1/sessions", json={"session_id": "open", "sources": ["microphone"]})
+            client.post("/v1/sessions/open/start")
+            self.assertEqual("running", runtime.sessions.get("open").state.value)
+            with patch(
+                "services.transcription.app._stop_native_capture",
+                side_effect=ValueError("read of closed file"),
+            ):
+                _shutdown(runtime)
+        self.assertEqual("stopped", runtime.sessions.get("open").state.value)
 
     def test_batch_transcription_creates_durable_markdown(self) -> None:
         response = self.client.post(

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 from voxink_dev.diagnostics import DiagnosticLog
-from voxink_dev.supervisor import HelperConfig, HelperSupervisor
+from voxink_dev.supervisor import HelperConfig, HelperSupervisor, SupervisorError
 
 
 class SupervisorIntegrationTests(unittest.TestCase):
@@ -30,6 +32,58 @@ class SupervisorIntegrationTests(unittest.TestCase):
         environment = factory.call_args.kwargs["env"]
         self.assertEqual(str(executable.resolve()), environment["VOXINK_NATIVE_CAPTURE"])
         self.assertNotIn(str(executable), factory.call_args.args[0])
+
+    def _supervisor_for(self, process: subprocess.Popen[str]) -> HelperSupervisor:
+        return HelperSupervisor(
+            HelperConfig(
+                model_path=Path("/tmp/model"),
+                output_root=Path("/tmp/output"),
+                readiness_timeout=5,
+            ),
+            process_factory=MagicMock(return_value=process),
+        )
+
+    def test_drains_helper_stderr_so_a_flood_cannot_block_the_helper(self) -> None:
+        """uvicorn logs every unhandled traceback to stderr; an undrained pipe wedges it."""
+        script = (
+            "import sys\n"
+            "for index in range(20000):\n"
+            "    sys.stderr.write(f'traceback line {index}\\n')\n"
+            "sys.stderr.flush()\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        supervisor = self._supervisor_for(process)
+        with patch.object(supervisor, "wait_until_ready", return_value={"protocol_version": 1}):
+            supervisor.start()
+        try:
+            # ~400 KB of stderr far exceeds the pipe buffer; undrained, the child
+            # blocks on write and never exits.
+            process.wait(timeout=15)
+        finally:
+            supervisor.stop()
+        self.assertEqual(0, process.returncode)
+        self.assertIn("traceback line 19999", supervisor._stderr_detail())
+
+    def test_startup_failure_still_reports_the_helper_stderr_detail(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stderr.write('model missing\\n'); sys.exit(3)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        process.wait(timeout=10)
+        supervisor = self._supervisor_for(process)
+        with self.assertRaises(SupervisorError) as caught:
+            supervisor.start()
+        self.assertIn("status 3", str(caught.exception))
+        self.assertIn("model missing", str(caught.exception))
 
     def test_starts_on_private_port_negotiates_protocol_and_stops(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

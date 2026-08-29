@@ -680,7 +680,12 @@ async def _report_lag(
 
 def _shutdown(runtime: ServiceRuntime) -> None:
     """Close every open session so no transcript part is left unterminated."""
-    _stop_native_capture(runtime)
+    try:
+        _stop_native_capture(runtime)
+    except Exception:
+        # Finalizing the sessions below is the whole point of this function, so a
+        # failed helper stop must never abort it.
+        runtime.native_capture_state = "failed"
     for session in runtime.sessions.list():
         if session.state not in {SessionState.RUNNING, SessionState.PAUSED}:
             continue
@@ -741,12 +746,17 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
 
 
 def _read_native_error(runtime: ServiceRuntime, process: subprocess.Popen[str]) -> None:
-    if runtime.native_error is not None or process.stderr is None or process.poll() is None:
+    stream = process.stderr
+    if stream is None or stream.closed or process.poll() is None:
         return
-    detail = process.stderr.read().strip()
-    if detail:
+    try:
+        detail = stream.read().strip()
+    except (OSError, ValueError):
+        detail = ""
+    finally:
+        stream.close()
+    if detail and runtime.native_error is None:
         runtime.native_error = detail.splitlines()[-1]
-    process.stderr.close()
 
 
 def _record_audio(

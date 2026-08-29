@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import json
 import os
@@ -11,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Callable
 from urllib.error import URLError
@@ -49,6 +51,8 @@ class HelperSupervisor:
         self.ui_bootstrap_secret = secrets.token_urlsafe(24)
         self.port: int | None = None
         self.process: subprocess.Popen[str] | None = None
+        self._stderr_lines: deque[str] = deque(maxlen=200)
+        self._stderr_reader: threading.Thread | None = None
 
     @property
     def base_url(self) -> str:
@@ -60,6 +64,7 @@ class HelperSupervisor:
         if self.process is not None:
             raise SupervisorError("helper is already running")
         self.port = _unused_loopback_port()
+        self._stderr_lines.clear()
         environment = os.environ.copy()
         environment["VOXINK_AUTH_SECRET"] = self.auth_secret
         environment["VOXINK_UI_BOOTSTRAP_SECRET"] = self.ui_bootstrap_secret
@@ -88,6 +93,7 @@ class HelperSupervisor:
             stderr=subprocess.PIPE,
             text=True,
         )
+        self._start_stderr_reader()
         self._emit("helper.starting", component="helper", pid=self.process.pid, port=self.port)
         try:
             health = self.wait_until_ready()
@@ -112,7 +118,7 @@ class HelperSupervisor:
             if process is None:
                 raise SupervisorError("helper has not been started")
             if process.poll() is not None:
-                detail = (process.stderr.read() if process.stderr else "").strip()
+                detail = self._stderr_detail()
                 raise SupervisorError(
                     f"transcription helper exited with status {process.returncode}"
                     + (f": {detail}" if detail else "")
@@ -166,6 +172,42 @@ class HelperSupervisor:
             )
             if process.stderr is not None:
                 process.stderr.close()
+            reader, self._stderr_reader = self._stderr_reader, None
+            if reader is not None:
+                reader.join(timeout=1.0)
+
+    def _start_stderr_reader(self) -> None:
+        """Drain the helper's stderr continuously.
+
+        uvicorn logs every unhandled-endpoint traceback to stderr. Left unread,
+        the pipe fills and the helper blocks inside its own event loop, so the
+        whole service stops responding.
+        """
+        process = self.process
+        if process is None or process.stderr is None:
+            return
+
+        def drain(stream: object) -> None:
+            try:
+                for line in stream:  # type: ignore[attr-defined]
+                    self._stderr_lines.append(line.rstrip("\n"))
+            except (OSError, ValueError):
+                return
+
+        reader = threading.Thread(
+            target=drain,
+            args=(process.stderr,),
+            name="voxink-helper-stderr",
+            daemon=True,
+        )
+        self._stderr_reader = reader
+        reader.start()
+
+    def _stderr_detail(self) -> str:
+        reader = self._stderr_reader
+        if reader is not None:
+            reader.join(timeout=1.0)
+        return "\n".join(self._stderr_lines).strip()
 
     def _emit(self, event: str, *, level: str = "info", **fields: object) -> None:
         if self.diagnostics is not None:
