@@ -70,6 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-checksums", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
+    parser.add_argument(
+        "--vocabulary",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "custom vocabulary file of names and terms to recognize "
+            "(default: vocabulary.txt in the output directory)"
+        ),
+    )
     parser.add_argument("--session-id")
     interface = parser.add_mutually_exclusive_group()
     interface.add_argument(
@@ -130,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             report.model_path,
             report.output_root,
             device=args.device,
+            vocabulary_path=args.vocabulary,
             native_capture_path=args.native_capture if args.web else None,
         ),
         diagnostics=diagnostics,

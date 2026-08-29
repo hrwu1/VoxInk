@@ -34,6 +34,7 @@ class HelperConfig:
     readiness_timeout: float = 30.0
     service_module: str = "services.transcription"
     native_capture_path: Path | None = None
+    vocabulary_path: Path | None = None
 
 
 class HelperSupervisor:
@@ -85,6 +86,10 @@ class HelperSupervisor:
             "--device",
             self.config.device,
         ]
+        if self.config.vocabulary_path is not None:
+            command.extend(
+                ("--vocabulary", str(self.config.vocabulary_path.expanduser().resolve()))
+            )
         self.process = self.process_factory(
             command,
             env=environment,

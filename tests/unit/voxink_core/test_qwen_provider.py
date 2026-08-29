@@ -77,6 +77,24 @@ class QwenProviderTests(unittest.IsolatedAsyncioTestCase):
         await provider.unload()
         self.assertFalse(provider.is_loaded)
 
+    async def test_vocabulary_context_is_handed_to_the_model(self) -> None:
+        fake = FakeModel()
+        provider = QwenLocalProvider(self.model_dir, model_loader=lambda *args: fake)
+
+        await provider.transcribe_file(
+            self.audio,
+            TranscriptionOptions(
+                "s", "g", "mic-1", Source.MICROPHONE, context="VoxInk, Hrwu"
+            ),
+        )
+        await provider.transcribe_file(
+            self.audio, TranscriptionOptions("s", "g", "mic-1", Source.MICROPHONE)
+        )
+
+        self.assertEqual(fake.calls[0]["context"], "VoxInk, Hrwu")
+        # Qwen rejects None; no vocabulary must mean an empty context.
+        self.assertEqual(fake.calls[1]["context"], "")
+
     async def test_requires_a_complete_local_model_directory(self) -> None:
         provider = QwenLocalProvider(Path(self.temp.name) / "missing")
         with self.assertRaises(FileNotFoundError):

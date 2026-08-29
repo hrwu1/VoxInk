@@ -88,6 +88,9 @@ class QwenLocalProvider:
             result = await asyncio.to_thread(
                 model.transcribe,
                 audio=audio_value,
+                # Qwen conditions decoding on this as the system message, which
+                # is what makes an unfamiliar name recognizable at all.
+                context=options.context or "",
                 language=_qwen_language(options.language),
             )
             if inspect.isawaitable(result):

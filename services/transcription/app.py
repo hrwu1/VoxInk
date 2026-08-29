@@ -15,7 +15,7 @@ import wave
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -43,6 +43,7 @@ from voxink_core.sessions import (
     SessionState,
 )
 from voxink_core.transcripts import OverlapDeduplicator
+from voxink_core.vocabulary import Vocabulary, VocabularyFile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,9 @@ PROTOCOL_VERSION = 1
 # Cap on the live caption feed the UI polls; it only renders the recent tail.
 UI_EVENT_BUFFER = 500
 SERVICE_VERSION = "0.2.0"
+# Custom terms live beside the transcripts by default, where a user editing
+# their own words is already looking.
+VOCABULARY_FILENAME = "vocabulary.txt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,8 @@ class ServiceSettings:
     auth_secret: str | None = None
     ui_bootstrap_secret: str | None = None
     native_capture_path: Path | None = None
+    # None means the default beside the transcripts; the file need not exist.
+    vocabulary_path: Path | None = None
 
 
 class SessionCreateRequest(BaseModel):
@@ -140,6 +146,9 @@ class ServiceRuntime:
                 active_inspection.package.model_id, active_inspection.package
             )
         self.model_switching = False
+        self.vocabulary = VocabularyFile(
+            settings.vocabulary_path or settings.output_root / VOCABULARY_FILENAME
+        )
         self.sessions = sessions or SessionManager(settings.output_root)
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         self.active_streams: dict[str, set[str]] = {}
@@ -495,6 +504,7 @@ def create_app(
         payload = await file.read()
         if not payload:
             raise HTTPException(status_code=400, detail="audio file is empty")
+        vocabulary = runtime.vocabulary.current()
         with tempfile.NamedTemporaryFile(suffix=suffix) as temporary:
             temporary.write(payload)
             temporary.flush()
@@ -508,8 +518,10 @@ def create_app(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     language=language,
+                    context=vocabulary.context,
                 ),
             )
+        event = _correct(vocabulary, event)
         runtime.sessions.append(event)
         if session_id is None:
             # A caller that named no session wanted one file transcribed, not an
@@ -760,10 +772,24 @@ def _is_paused(runtime: ServiceRuntime, session_id: str) -> bool:
         return False
 
 
+def _correct(vocabulary: Vocabulary, event: TranscriptEvent) -> TranscriptEvent:
+    """Apply the user's correction rules to one event's text."""
+    if not vocabulary.corrections or not event.text:
+        return event
+    corrected = vocabulary.apply(event.text)
+    return event if corrected == event.text else replace(event, text=corrected)
+
+
 async def _publish_event(
     websocket: WebSocket, runtime: ServiceRuntime, event: TranscriptEvent
 ) -> bool:
-    """Deduplicate, persist, and publish one finalized transcript event."""
+    """Correct, deduplicate, persist, and publish one finalized transcript event.
+
+    Corrections run before deduplication so the tail the deduplicator remembers
+    is the same text the transcript, the UI, and the next chunk's comparison all
+    see; correcting afterwards would leave those four out of step.
+    """
+    event = _correct(runtime.vocabulary.current(), event)
     key = (event.session_id, event.stream_id)
     previous_end = runtime.stream_ends.get(key)
     if previous_end is None or event.start_ms >= previous_end:
@@ -1087,6 +1113,7 @@ async def _transcribe_pcm_chunk(
                 start_ms=start_ms,
                 end_ms=end_ms,
                 language=_stream_language(start),
+                context=runtime.vocabulary.current().context,
             ),
         )
 

@@ -21,6 +21,12 @@ def main() -> None:
         default=PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B",
     )
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
+    parser.add_argument(
+        "--vocabulary",
+        type=Path,
+        default=None,
+        help="custom vocabulary file (default: vocabulary.txt beside the transcripts)",
+    )
     args = parser.parse_args()
     auth_secret = os.environ.get("VOXINK_AUTH_SECRET")
     if not auth_secret:
@@ -30,6 +36,9 @@ def main() -> None:
             model_path=args.model.expanduser().resolve(),
             output_root=args.output.expanduser().resolve(),
             device=args.device,
+            vocabulary_path=(
+                args.vocabulary.expanduser().resolve() if args.vocabulary else None
+            ),
             auth_secret=auth_secret,
             ui_bootstrap_secret=os.environ.get("VOXINK_UI_BOOTSTRAP_SECRET"),
             native_capture_path=(

@@ -23,6 +23,7 @@ and Transformers offline modes and loads the model exclusively from the local
 - Native ScreenCaptureKit filtering for all system audio or multiple apps.
 - Automatic selected-app reconnection by bundle identifier.
 - Minimal always-on-top, click-through-capable macOS caption panel.
+- Custom vocabulary that biases recognition and corrects finalized text.
 
 Speaker diarization, forced-alignment timestamps, online providers, and polished
 UI controls remain extension points rather than completed features.
@@ -88,6 +89,40 @@ the captured audio as rotating WAV parts beside the transcript:
 Microphone and system audio are saved as separate tracks so their sources stay
 distinguishable. The flag reaches whichever interface you selected, and preflight
 requires 2 GiB free instead of 512 MiB before it will start.
+
+### Teaching it your own words
+
+A speech model cannot guess a personal name, a product name, or in-house jargon
+it never saw in training. Create `vocabulary.txt` in the output directory
+(`~/Documents/VoxInk/vocabulary.txt` by default) and list the words that matter:
+
+```
+# Blank lines and comments are ignored.
+VoxInk
+ScreenCaptureKit
+Hrwu
+
+# When biasing alone is not enough, correct what the model actually produces.
+hallow => Hrwu
+```
+
+A bare line becomes recognition context: it is handed to the model before it
+transcribes, which makes an unfamiliar word possible to recognize in the first
+place. A `misheard => Correct` line additionally rewrites finalized text, for
+the words biasing alone still gets wrong; its right-hand side is biased too, so
+one rule covers both. Matching is case-insensitive and never cuts an ASCII word
+in half, so `hallow => Hrwu` leaves "Halloween" alone.
+
+The file is re-read whenever it changes, so an edit takes effect on the next
+spoken phrase without restarting VoxInk. It is optional — with no file, nothing
+about transcription changes. Keep the list to the words you actually need: it
+is sent with every chunk of audio, so a very long list costs recognition speed.
+
+Use a file somewhere else with:
+
+```sh
+./scripts/voxink-dev --vocabulary ~/Documents/work-terms.txt
+```
 
 ### Native system and application capture
 

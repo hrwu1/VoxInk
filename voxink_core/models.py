@@ -133,6 +133,9 @@ class TranscriptionOptions:
     start_ms: int = 0
     end_ms: int = 0
     language: str | None = None
+    # User-defined terms that bias recognition toward names and jargon the model
+    # cannot guess. Providers that have no biasing mechanism ignore it.
+    context: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, Source):

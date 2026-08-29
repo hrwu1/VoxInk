@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from collections import deque
@@ -1230,3 +1231,120 @@ class BatchSessionLifetimeTests(unittest.TestCase):
         self.assertEqual("running", self.client.get("/v1/sessions/named").json()["state"])
         part = next((self.output_root / "named").glob("transcript-part-*.md"))
         self.assertEqual(2, part.read_text().count("[MIC]"))
+
+
+class RecordingProvider(FakeProvider):
+    """Report the biasing context each transcription was given."""
+
+    def __init__(self, text: str = "Local transcription works.") -> None:
+        super().__init__()
+        self.text = text
+        self.contexts: list[str | None] = []
+
+    async def transcribe_file(self, audio, options):
+        self.contexts.append(options.context)
+        event = await super().transcribe_file(audio, options)
+        return replace(event, text=self.text)
+
+
+class VocabularyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        self.output_root.mkdir(parents=True)
+        self.vocabulary = self.output_root / "vocabulary.txt"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _client(
+        self, provider: RecordingProvider, *, vocabulary_path: Path | None = None
+    ) -> TestClient:
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root, vocabulary_path=vocabulary_path
+            ),
+            provider=provider,
+        )
+        client = TestClient(app)
+        self.addCleanup(client.close)
+        return client
+
+    def _transcribe(self, client: TestClient, session_id: str) -> dict:
+        response = client.post(
+            "/v1/transcriptions",
+            data={"session_id": session_id, "source": "microphone"},
+            files={"file": ("sample.wav", b"fake-wave-data", "audio/wav")},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()["event"]
+
+    def test_no_vocabulary_file_leaves_transcription_unbiased(self) -> None:
+        provider = RecordingProvider()
+        client = self._client(provider)
+
+        self._transcribe(client, "plain")
+
+        self.assertEqual([None], provider.contexts)
+
+    def test_terms_reach_the_provider_as_recognition_context(self) -> None:
+        self.vocabulary.write_text("VoxInk\nHrwu\n", encoding="utf-8")
+        provider = RecordingProvider()
+        client = self._client(provider)
+
+        self._transcribe(client, "biased")
+
+        self.assertEqual(["VoxInk, Hrwu"], provider.contexts)
+
+    def test_a_named_file_overrides_the_default_location(self) -> None:
+        elsewhere = Path(self.temporary.name) / "terms.txt"
+        elsewhere.write_text("Hrwu\n", encoding="utf-8")
+        self.vocabulary.write_text("Ignored\n", encoding="utf-8")
+        provider = RecordingProvider()
+        client = self._client(provider, vocabulary_path=elsewhere)
+
+        self._transcribe(client, "override")
+
+        self.assertEqual(["Hrwu"], provider.contexts)
+
+    def test_a_rule_corrects_the_batch_response_and_the_markdown(self) -> None:
+        self.vocabulary.write_text("hallow => Hrwu\n", encoding="utf-8")
+        provider = RecordingProvider(text="I met Hallow today.")
+        client = self._client(provider)
+
+        event = self._transcribe(client, "corrected")
+
+        self.assertEqual("I met Hrwu today.", event["text"])
+        markdown = next((self.output_root / "corrected").glob("transcript-part-*.md"))
+        self.assertIn("I met Hrwu today.", markdown.read_text())
+
+    def test_a_rule_corrects_streamed_captions_before_they_are_published(self) -> None:
+        self.vocabulary.write_text("hallow => Hrwu\n", encoding="utf-8")
+        provider = RecordingProvider(text="Hello Hallow.")
+        client = self._client(provider)
+
+        with client.websocket_connect("/v1/sessions/live/stream") as websocket:
+            websocket.send_json(_start_message("live", "microphone"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            finals = [
+                item
+                for item in _utterance(websocket, "microphone", 0)
+                if item["type"] == "transcript.final"
+            ]
+
+        # The right-hand side of a rule is biased too, so one line covers both.
+        self.assertEqual(["Hrwu"], provider.contexts)
+        self.assertEqual(1, len(finals))
+        self.assertEqual("Hello Hrwu.", finals[0]["event"]["text"])
+
+    def test_an_edit_takes_effect_without_restarting_the_service(self) -> None:
+        provider = RecordingProvider()
+        client = self._client(provider)
+        self._transcribe(client, "before")
+
+        self.vocabulary.write_text("Hrwu\n", encoding="utf-8")
+        # A same-second edit must still be noticed.
+        os.utime(self.vocabulary, ns=(0, 0))
+        self._transcribe(client, "after")
+
+        self.assertEqual([None, "Hrwu"], provider.contexts)

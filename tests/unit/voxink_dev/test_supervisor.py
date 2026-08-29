@@ -33,6 +33,39 @@ class SupervisorIntegrationTests(unittest.TestCase):
         self.assertEqual(str(executable.resolve()), environment["VOXINK_NATIVE_CAPTURE"])
         self.assertNotIn(str(executable), factory.call_args.args[0])
 
+    def test_passes_a_configured_vocabulary_file_to_the_helper_command(self) -> None:
+        process = MagicMock()
+        process.pid = 123
+        process.poll.return_value = 0
+        factory = MagicMock(return_value=process)
+        vocabulary = Path("/tmp/terms.txt")
+        supervisor = HelperSupervisor(
+            HelperConfig(
+                model_path=Path("/tmp/model"),
+                output_root=Path("/tmp/output"),
+                vocabulary_path=vocabulary,
+            ),
+            process_factory=factory,
+        )
+        with patch.object(supervisor, "wait_until_ready", return_value={"protocol_version": 1}):
+            supervisor.start()
+        command = factory.call_args.args[0]
+        self.assertIn("--vocabulary", command)
+        self.assertEqual(str(vocabulary.resolve()), command[command.index("--vocabulary") + 1])
+
+    def test_omits_the_vocabulary_flag_when_none_is_configured(self) -> None:
+        process = MagicMock()
+        process.pid = 123
+        process.poll.return_value = 0
+        factory = MagicMock(return_value=process)
+        supervisor = HelperSupervisor(
+            HelperConfig(model_path=Path("/tmp/model"), output_root=Path("/tmp/output")),
+            process_factory=factory,
+        )
+        with patch.object(supervisor, "wait_until_ready", return_value={"protocol_version": 1}):
+            supervisor.start()
+        self.assertNotIn("--vocabulary", factory.call_args.args[0])
+
     def _supervisor_for(self, process: subprocess.Popen[str]) -> HelperSupervisor:
         return HelperSupervisor(
             HelperConfig(
