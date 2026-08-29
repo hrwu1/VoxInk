@@ -241,6 +241,34 @@ runtime. Accelerated Apple Silicon inference is an optimization, not a
 prerequisite for live captions. Re-run the benchmark and compare against this
 file before changing the model or runtime.
 
+### Efficient model profile
+
+The optional local `Qwen3-ASR-0.6B` profile uses the same provider and remains
+offline. The 1.7B profile remains the default; select the smaller model with:
+
+```sh
+./scripts/voxink-dev --model models/Qwen3-ASR-0.6B --device auto
+```
+
+Measured on the same Apple Silicon Mac and English fixture, with two timed runs
+per utterance length:
+
+| Model and runtime | Load | Peak memory | 2 s RTF | 5 s RTF | 10 s RTF | 15 s RTF |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.7B CPU | 12.23 s | 8996 MiB | 0.590x | 0.382x | 0.302x | 0.277x |
+| 0.6B CPU | 4.37 s | 5477 MiB | 0.270x | 0.192x | 0.141x | 0.137x |
+| 1.7B MPS | 9.51 s | 3781 MiB | 0.159x | 0.116x | 0.091x | 0.082x |
+| 0.6B MPS | 4.87 s | 2794 MiB | 0.095x | 0.072x | 0.061x | 0.057x |
+
+On MPS, 0.6B used 26% less peak memory than 1.7B, loaded 49% faster,
+and reduced steady-state inference latency by roughly 30–40%. Its downloaded
+weights are 1.75 GiB instead of 4.38 GiB. These measurements establish the
+hardware benefit only; choosing a new default still requires representative
+English, Mandarin, and code-switch accuracy evaluation.
+
+Raw results are in `benchmarks/cpu-0.6b.json`,
+`benchmarks/mps-baseline.json`, and `benchmarks/mps-0.6b.json`.
+
 ## Tests
 
 Run all fast Python tests:

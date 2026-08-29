@@ -1,0 +1,43 @@
+{
+  "device": "mps",
+  "model": "models/Qwen3-ASR-0.6B",
+  "model_load_seconds": 4.87,
+  "peak_memory_mib": 2794.2,
+  "chunks": [
+    {
+      "chunk_seconds": 2.0,
+      "runs": 2,
+      "median_ms": 190.5,
+      "p95_ms": 191.0,
+      "slowest_ms": 191.0,
+      "real_time_factor": 0.095
+    },
+    {
+      "chunk_seconds": 5.0,
+      "runs": 2,
+      "median_ms": 360.8,
+      "p95_ms": 361.1,
+      "slowest_ms": 361.1,
+      "real_time_factor": 0.072
+    },
+    {
+      "chunk_seconds": 10.0,
+      "runs": 2,
+      "median_ms": 605.3,
+      "p95_ms": 605.4,
+      "slowest_ms": 605.4,
+      "real_time_factor": 0.061
+    },
+    {
+      "chunk_seconds": 15.0,
+      "runs": 2,
+      "median_ms": 861.1,
+      "p95_ms": 864.6,
+      "slowest_ms": 864.6,
+      "real_time_factor": 0.057
+    }
+  ],
+  "recorded": "2026-08-28",
+  "host": "Apple Silicon, macOS 26.5.1, torch MPS",
+  "audio": "samples/asr_en.wav"
+}

@@ -54,8 +54,12 @@ xcuserdata/
 .swiftpm/security/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 
-# Downloaded local model weights (about 4.4 GB)
+# Downloaded local model weights
 models/Qwen3-ASR-1.7B/
 !models/Qwen3-ASR-1.7B/
 models/Qwen3-ASR-1.7B/*
 !models/Qwen3-ASR-1.7B/voxink-model-manifest.json
+models/Qwen3-ASR-0.6B/
+!models/Qwen3-ASR-0.6B/
+models/Qwen3-ASR-0.6B/*
+!models/Qwen3-ASR-0.6B/voxink-model-manifest.json
