@@ -35,6 +35,7 @@ export function useVoxInkRecorder() {
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [droppedFrames, setDroppedFrames] = useState(0);
   const [launch, setLaunch] = useState<LaunchConfig | null>(null);
+  const [retainAudio, setRetainAudioState] = useState(true);
   const [message, setMessage] = useState('Open through voxink-dev to connect');
   const [mode, setModeState] = useState<CaptureMode>('microphone');
   const [nativeAvailable, setNativeAvailable] = useState(false);
@@ -82,6 +83,7 @@ export function useVoxInkRecorder() {
       const payload = (await response.json()) as { token?: unknown };
       if (typeof payload.token !== 'string' || !payload.token) throw new Error('The local helper returned no launch credential.');
       setLaunch({ origin: window.location.origin, token: payload.token, retainAudio });
+      setRetainAudioState(retainAudio);
       setMessage(retainAudio ? 'Local helper ready — saving audio' : 'Authenticated local helper ready');
     }).catch((error) => {
       setState('failed');
@@ -272,7 +274,7 @@ export function useVoxInkRecorder() {
           body: JSON.stringify({
             sources: mode.startsWith('microphone_') ? ['microphone', 'system'] : ['system'],
             applications: mode.endsWith('applications') ? selectedApplications : [],
-            retain_audio: launch.retainAudio,
+            retain_audio: retainAudio,
           }),
         });
         const status = await response.json() as NativeStatus;
@@ -294,7 +296,7 @@ export function useVoxInkRecorder() {
         type: 'stream.start', schema_version: 1, session_id: sessionId, session_sources: ['microphone'], stream_id: 'microphone-1', source: 'microphone',
         audio: { encoding: 'pcm_s16le', sample_rate_hz: TARGET_SAMPLE_RATE, channels: 1, frame_duration_ms: 20 },
         client: { name: 'voxink-web', version: '0.2.0' }, stream_mode: 'frames',
-        retention: { audio: launch.retainAudio, separate: true, combined: false },
+        retention: { audio: retainAudio, separate: true, combined: false },
       }));
       const media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
       const context = new AudioContext();
@@ -305,7 +307,7 @@ export function useVoxInkRecorder() {
       streamRef.current = media; contextRef.current = context; sourceRef.current = source; processorRef.current = processor;
       acceptingAudio.current = true; setCaptureKind('browser'); setState('recording'); setMessage('Listening locally');
     } catch (error) { await fail(error); }
-  }, [authorizedFetch, captureAudio, fail, handleMessage, launch, mode, modelSwitching, selectedApplications]);
+  }, [authorizedFetch, captureAudio, fail, handleMessage, launch, mode, modelSwitching, retainAudio, selectedApplications]);
 
   const pause = useCallback(async () => {
     if (captureKind === 'native') {
@@ -350,6 +352,11 @@ export function useVoxInkRecorder() {
   const toggleApplication = useCallback((bundleId: string) => {
     setSelectedApplications((current) => current.includes(bundleId) ? current.filter((item) => item !== bundleId) : [...current, bundleId]);
   }, []);
+  const setRetainAudio = useCallback((enabled: boolean) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    setRetainAudioState(enabled);
+    setMessage(enabled ? 'Audio will be saved locally with the transcript' : 'Audio saving is off for the next session');
+  }, [state]);
 
   const selectModel = useCallback(async (modelId: string) => {
     if (!launch || modelId === activeModel || modelSwitching) return;
@@ -378,6 +385,7 @@ export function useVoxInkRecorder() {
 
   return {
     state, elapsed, captions, droppedFrames, message, isLive: Boolean(launch), mode, setMode,
+    retainAudio, setRetainAudio,
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
     models, activeModel, selectModel, modelSwitching,
     start, pause, resume, stop,

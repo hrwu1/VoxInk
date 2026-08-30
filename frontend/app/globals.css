@@ -101,6 +101,13 @@ h1 { margin: 0; max-width: 780px; font-family: Georgia, 'Times New Roman', serif
 .model-control:has(select:focus-visible) { border-radius: 6px; outline: 2px solid rgba(238, 93, 50, .34); outline-offset: 4px; }
 .model-control:has(select:disabled) { cursor: default; }
 .model-control select:disabled { cursor: default; }
+.audio-retention-control { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(242,241,235,.58); cursor: pointer; }
+.audio-retention-control > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.audio-retention-control strong { font-size: 12px; font-weight: 650; }
+.audio-retention-control small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.audio-retention-control input { width: 17px; height: 17px; flex: none; accent-color: var(--green); cursor: pointer; }
+.audio-retention-control:has(input:checked) { border-color: rgba(79,118,95,.42); background: rgba(79,118,95,.07); }
+.audio-retention-control:has(input:disabled), .audio-retention-control input:disabled { cursor: default; }
 .waveform { height: 156px; display: flex; align-items: center; justify-content: center; gap: clamp(4px, .6vw, 8px); margin: auto 0 0; }
 .waveform span { width: clamp(3px, .38vw, 5px); height: var(--bar-height); min-height: 8px; border-radius: 99px; background: #c7c8be; transition: height .35s, background .25s; }
 .waveform.recording span { background: var(--orange); animation: breathe .85s ease-in-out infinite alternate; animation-delay: var(--delay); }

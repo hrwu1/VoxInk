@@ -21,6 +21,12 @@ class CliParserTests(unittest.TestCase):
         args = build_parser().parse_args(["--terminal"])
         self.assertFalse(args.web)
 
+    def test_audio_retention_is_enabled_by_default_with_an_opt_out(self) -> None:
+        self.assertTrue(build_parser().parse_args([]).retain_audio)
+        self.assertFalse(
+            build_parser().parse_args(["--no-retain-audio"]).retain_audio
+        )
+
     def test_sources_can_be_repeated_for_combined_capture(self) -> None:
         args = build_parser().parse_args(
             ["--source", "microphone", "--source", "system"]
@@ -67,6 +73,7 @@ class CliParserTests(unittest.TestCase):
                 "ws://127.0.0.1:4321/v1/sessions/demo/stream",
                 "--session-id",
                 "demo",
+                "--retain-audio",
                 "--mic",
                 "--app",
                 "com.apple.Safari",
@@ -79,14 +86,14 @@ class CliParserTests(unittest.TestCase):
     def test_native_command_forwards_audio_retention(self) -> None:
         plan = _build_capture_plan(["system"], [])
         endpoint = "ws://127.0.0.1:4321/v1/sessions/demo/stream"
-        self.assertNotIn(
+        self.assertIn(
             "--retain-audio",
             _native_capture_command(Path("/tmp/voxink-capture"), endpoint, "demo", plan),
         )
-        self.assertIn(
+        self.assertNotIn(
             "--retain-audio",
             _native_capture_command(
-                Path("/tmp/voxink-capture"), endpoint, "demo", plan, True
+                Path("/tmp/voxink-capture"), endpoint, "demo", plan, False
             ),
         )
 
@@ -129,7 +136,7 @@ class WebUiLauncherTests(unittest.TestCase):
         self.assertEqual(0, result)
         url = opened.call_args.args[0]
         self.assertIn("bootstrap=temporary-bootstrap", url)
-        self.assertIn("retain_audio=0", url)
+        self.assertIn("retain_audio=1", url)
         self.assertNotIn("persistent-service-secret", url)
         diagnostics.emit.assert_called_once_with("ui.opened", component="ui", port=43210)
 
@@ -152,10 +159,10 @@ class WebUiLauncherTests(unittest.TestCase):
                 {"ui_available": True},
                 MagicMock(),
                 Path("/tmp/voxink-test-output"),
-                True,
+                False,
             )
 
-        self.assertIn("retain_audio=1", opened.call_args.args[0])
+        self.assertIn("retain_audio=0", opened.call_args.args[0])
 
 
 if __name__ == "__main__":

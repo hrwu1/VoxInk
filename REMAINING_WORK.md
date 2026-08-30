@@ -50,6 +50,29 @@ permission and stream setup.
 
 ## Current priorities
 
+### Completed slice: Default audio retention controls
+
+Goal: make local audio retention visible and enabled by default in both the
+browser and Terminal developer workflows without changing the existing WAV
+persistence format.
+
+Steps:
+
+- [x] Default the launcher to retain audio and provide an explicit opt-out.
+- [x] Add a pre-session Save audio control to the browser recorder.
+- [x] Pass the selected setting through microphone and native capture starts.
+- [x] Update focused launcher and frontend tests and user documentation.
+
+Completion criteria:
+
+- Browser and Terminal launches retain separate rotating WAV tracks by default.
+- `--no-retain-audio` disables retention for either interface.
+- The browser control is enabled before capture and locked during a session.
+- Focused Python and frontend validation passes.
+
+Result: completed and verified with the full Python suite, frontend lint,
+TypeScript checking, a production static build, and browser interaction testing.
+
 ### P0: Target-Mac capture acceptance
 
 - Repeat the native system-audio test with known audible applications.

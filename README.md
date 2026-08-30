@@ -78,18 +78,21 @@ exits. The former explicit `--web` spelling remains supported for compatibility.
 
 ### Keeping the audio
 
-Audio retention is off by default. Add `--retain-audio` to any workflow to save
-the captured audio as rotating WAV parts beside the transcript:
+Audio retention is on by default. The browser exposes a **Save audio** control
+before each session, and Terminal workflows save captured audio as rotating WAV
+parts beside the transcript. Use `--no-retain-audio` to start either interface
+with retention disabled:
 
 ```sh
-./scripts/voxink-dev --retain-audio
-./scripts/voxink-dev --terminal --retain-audio
-./scripts/voxink-dev --source microphone --source system --retain-audio
+./scripts/voxink-dev
+./scripts/voxink-dev --terminal
+./scripts/voxink-dev --no-retain-audio
 ```
 
 Microphone and system audio are saved as separate tracks so their sources stay
-distinguishable. The flag reaches whichever interface you selected, and preflight
-requires 2 GiB free instead of 512 MiB before it will start.
+distinguishable. The setting reaches whichever interface you selected. When
+retention is enabled at launch, preflight requires 2 GiB free instead of 512 MiB
+before it will start.
 
 ### Teaching it your own words
 

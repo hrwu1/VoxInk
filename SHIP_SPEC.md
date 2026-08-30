@@ -244,7 +244,8 @@ Long-running capture must use bounded memory and bounded temporary storage.
 - Logs must not contain raw audio, transcript text, authentication material, or
   sensitive filesystem paths by default.
 - Transcript and retained-audio files must use user-only permissions.
-- Audio retention must be off by default and clearly indicated while enabled.
+- Audio retention must be clearly indicated, default to enabled, and provide a
+  pre-session opt-out.
 - The application must disclose where models, transcripts, audio, and logs are
   stored and provide controls to remove application-managed data.
 - Dependencies and model artifacts must have documented provenance, licenses,

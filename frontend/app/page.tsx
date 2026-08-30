@@ -127,6 +127,19 @@ export default function Home() {
               </label>
             </div>
 
+            <label className="audio-retention-control">
+              <span>
+                <strong>Save audio</strong>
+                <small>Keep separate local WAV tracks beside the transcript</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={recorder.retainAudio}
+                disabled={selectionLocked}
+                onChange={(event) => recorder.setRetainAudio(event.target.checked)}
+              />
+            </label>
+
             {choosingApplications && (
               <div className="application-picker">
                 <div className="application-picker-heading">

@@ -66,7 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="list applications available to native capture and exit",
     )
-    parser.add_argument("--retain-audio", action="store_true")
+    parser.add_argument(
+        "--retain-audio",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="save captured audio beside the transcript (default: enabled)",
+    )
     parser.add_argument("--skip-checksums", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--device", choices=("auto", "mps", "cpu"), default="auto")
@@ -219,7 +224,7 @@ def _native_capture_command(
     endpoint: str,
     session_id: str,
     plan: CapturePlan,
-    retain_audio: bool = False,
+    retain_audio: bool = True,
 ) -> list[str]:
     command = [
         str(executable.expanduser().resolve()),
@@ -299,7 +304,7 @@ def _run_web_ui(
     health: dict[str, object],
     diagnostics: DiagnosticLog,
     output_root: Path,
-    retain_audio: bool = False,
+    retain_audio: bool = True,
 ) -> int:
     if not health.get("ui_available"):
         raise SupervisorError(

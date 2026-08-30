@@ -359,7 +359,8 @@ time.
 
 ## 10. Optional Audio Retention
 
-- Audio recording is off by default.
+- Audio recording is on by default in the developer workflows, with a visible
+  pre-session control and a launcher opt-out.
 - Users may save separate microphone and system tracks.
 - Separate tracks are the default when saving is enabled.
 - Users may alternatively or additionally save a combined track.
