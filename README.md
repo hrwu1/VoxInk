@@ -49,12 +49,13 @@ workflow with:
 ```
 
 The command verifies the Python environment and local model checksums, checks
-disk space, chooses a private loopback port, creates a per-launch credential,
-starts the helper, negotiates the protocol version, and opens a private recording
-console in the default browser. The page asks for microphone permission, streams
-audio only to the supervised loopback helper, displays finalized captions, and
-removes its one-time launch token from the browser address immediately. Ctrl-C
-in the launching Terminal closes the helper and finalizes open transcript files.
+disk space, prefers private loopback port `8765` (and chooses an available port
+automatically if it is busy), creates a per-launch credential, starts the helper,
+negotiates the protocol version, and opens a private recording console in the
+default browser. The page asks for microphone permission, streams audio only to
+the supervised loopback helper, displays finalized captions, and removes its
+one-time launch token from the browser address immediately. Ctrl-C in the
+launching Terminal closes the helper and finalizes open transcript files.
 Finalized transcripts default to `~/Documents/VoxInk/`.
 
 The browser's **Capture mode** menu supports microphone, all system audio,

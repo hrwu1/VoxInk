@@ -22,6 +22,9 @@ from services.transcription.app import PROTOCOL_VERSION
 from .diagnostics import DiagnosticLog
 
 
+PREFERRED_HELPER_PORT = 8765
+
+
 class SupervisorError(RuntimeError):
     """A child process failed or did not satisfy the local protocol contract."""
 
@@ -64,7 +67,7 @@ class HelperSupervisor:
     def start(self) -> dict[str, object]:
         if self.process is not None:
             raise SupervisorError("helper is already running")
-        self.port = _unused_loopback_port()
+        self.port = _preferred_loopback_port()
         self._stderr_lines.clear()
         environment = os.environ.copy()
         environment["VOXINK_AUTH_SECRET"] = self.auth_secret
@@ -226,7 +229,13 @@ class HelperSupervisor:
         self.stop()
 
 
-def _unused_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+def _preferred_loopback_port(preferred_port: int = PREFERRED_HELPER_PORT) -> int:
+    for port in (preferred_port, 0):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("127.0.0.1", port))
+                return int(listener.getsockname()[1])
+        except OSError:
+            if port == 0:
+                raise
+    raise AssertionError("loopback port selection exhausted unexpectedly")

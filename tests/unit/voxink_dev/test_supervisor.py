@@ -9,7 +9,39 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from voxink_dev.diagnostics import DiagnosticLog
-from voxink_dev.supervisor import HelperConfig, HelperSupervisor, SupervisorError
+from voxink_dev.supervisor import (
+    HelperConfig,
+    HelperSupervisor,
+    SupervisorError,
+    _preferred_loopback_port,
+)
+
+
+class PortSelectionTests(unittest.TestCase):
+    @staticmethod
+    def _listener(port: int, *, bind_error: OSError | None = None) -> MagicMock:
+        listener = MagicMock()
+        listener.__enter__.return_value = listener
+        listener.bind.side_effect = bind_error
+        listener.getsockname.return_value = ("127.0.0.1", port)
+        return listener
+
+    def test_prefers_port_8765_when_available(self) -> None:
+        listener = self._listener(8765)
+        with patch("voxink_dev.supervisor.socket.socket", return_value=listener):
+            self.assertEqual(8765, _preferred_loopback_port())
+        listener.bind.assert_called_once_with(("127.0.0.1", 8765))
+
+    def test_uses_an_os_assigned_port_when_8765_is_unavailable(self) -> None:
+        preferred = self._listener(8765, bind_error=OSError("address in use"))
+        fallback = self._listener(54321)
+        with patch(
+            "voxink_dev.supervisor.socket.socket",
+            side_effect=(preferred, fallback),
+        ):
+            self.assertEqual(54321, _preferred_loopback_port())
+        preferred.bind.assert_called_once_with(("127.0.0.1", 8765))
+        fallback.bind.assert_called_once_with(("127.0.0.1", 0))
 
 
 class SupervisorIntegrationTests(unittest.TestCase):

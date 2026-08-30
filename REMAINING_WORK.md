@@ -50,6 +50,27 @@ permission and stream setup.
 
 ## Current priorities
 
+### Completed slice: Stable preferred developer port
+
+Goal: make the supervised developer workflow use the familiar loopback port
+`8765` when available without reintroducing manual port conflict handling.
+
+Steps:
+
+- [x] Prefer `127.0.0.1:8765` when starting the supervised helper.
+- [x] Fall back to an operating-system-assigned loopback port when `8765` is
+  unavailable.
+- [x] Document the behavior and add focused port-selection tests.
+
+Completion criteria:
+
+- A normal launch uses port `8765`.
+- A launch still succeeds without user intervention when port `8765` is busy.
+- Focused supervisor tests and the full Python test suite pass.
+
+Result: completed and verified with 8 focused supervisor tests and all 187
+Python tests.
+
 ### Completed slice: Default audio retention controls
 
 Goal: make local audio retention visible and enabled by default in both the
