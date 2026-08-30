@@ -27,6 +27,7 @@ from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
+from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
 from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
 from voxink_core.local_models import (
     LocalModelPackage,
@@ -490,6 +491,54 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _session_view(session)
 
+    @app.get("/v1/devices")
+    async def devices() -> dict[str, Any]:
+        """List microphone devices the local capture clients can open."""
+        return {"devices": await asyncio.to_thread(_input_devices)}
+
+    @app.get("/v1/transcripts")
+    async def transcripts() -> dict[str, Any]:
+        """List transcript artifacts under the configured output root."""
+        found = await asyncio.to_thread(discover_transcripts, runtime.settings.output_root)
+        return {
+            "output_root": str(runtime.settings.output_root),
+            "transcripts": [artifacts.to_dict() for artifacts in found],
+        }
+
+    @app.get("/v1/transcripts/{session_id}")
+    async def transcript(session_id: str, part: int | None = None) -> dict[str, Any]:
+        artifacts = await asyncio.to_thread(
+            read_transcript, runtime.settings.output_root, session_id
+        )
+        if artifacts is None:
+            raise HTTPException(status_code=404, detail="no transcript for that session")
+        try:
+            text = await asyncio.to_thread(
+                read_transcript_text, runtime.settings.output_root, session_id, part=part
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"cannot read the transcript: {exc}"
+            ) from exc
+        return {**artifacts.to_dict(), "part": part, "text": text}
+
+    @app.get("/v1/sessions")
+    async def list_sessions() -> dict[str, Any]:
+        """List sessions this helper is holding open.
+
+        Completed and interrupted sessions from earlier runs appear here only
+        once the durable session registry replaces this in-memory view; until
+        then they are discoverable through their transcript artifacts.
+        """
+        return {
+            "sessions": [
+                _session_view(session).model_dump() for session in runtime.sessions.list()
+            ],
+            "durable_registry": False,
+        }
+
     @app.get("/v1/sessions/{session_id}", response_model=SessionView)
     async def get_session(session_id: str) -> SessionView:
         return _session_view(_get_session(runtime, session_id))
@@ -695,6 +744,34 @@ def _authorized(header: str | None, secret: str | None) -> bool:
         return False
     supplied = header[len(prefix) :]
     return bool(supplied) and secrets.compare_digest(supplied, secret)
+
+
+def _input_devices() -> list[dict[str, Any]]:
+    """Report input devices, or an empty list where the audio backend is absent.
+
+    `sounddevice` is only needed by the Python capture client, so a helper
+    running native capture alone must still answer this instead of failing.
+    """
+    try:
+        import sounddevice
+    except (ImportError, OSError):
+        return []
+    try:
+        devices = sounddevice.query_devices()
+        default_input = sounddevice.default.device[0]
+    except (OSError, ValueError, TypeError):
+        return []
+    return [
+        {
+            "index": index,
+            "name": device.get("name", ""),
+            "channels": device.get("max_input_channels", 0),
+            "sample_rate": device.get("default_samplerate"),
+            "default": index == default_input,
+        }
+        for index, device in enumerate(devices)
+        if device.get("max_input_channels", 0) > 0
+    ]
 
 
 def _model_view(package: LocalModelPackage, *, active: bool) -> dict[str, Any]:

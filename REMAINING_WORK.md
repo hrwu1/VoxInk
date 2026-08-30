@@ -34,6 +34,8 @@ Completion criteria:
 The repository currently provides:
 
 - A one-command browser workflow through `./scripts/voxink-dev`.
+- A public `./scripts/voxink` command for scripts and agents, speaking a
+  versioned JSON envelope over the helper's local control API.
 - Local-only Qwen transcription over authenticated loopback HTTP/WebSocket APIs.
 - Microphone, all-system, selected-application, and combined capture modes.
 - Browser controls for start, pause, resume, and stop.
@@ -94,6 +96,41 @@ Completion criteria:
 Result: completed and verified with the full Python suite, frontend lint,
 TypeScript checking, a production static build, and browser interaction testing.
 
+### Completed slice: Public `voxink` command
+
+Goal: implement the first command slice of `PROJECT_SPEC.md` section 14 as a
+thin client of the local control plane, with a versioned envelope, stable error
+codes, and stable exit codes.
+
+Steps:
+
+- [x] Publish a private control-endpoint handshake from the helper's owner and
+  discover it from the CLI.
+- [x] Add the service routes the CLI needs so it never scans the output root:
+  session listing, input devices, and transcript discovery and reading.
+- [x] Add `voxink_cli` with the envelope, error and exit taxonomy, typed
+  control client, and the first command slice.
+- [x] Add `scripts/voxink` and document the public contract.
+
+Completion criteria:
+
+- Every command emits the section 14.4 envelope in `json`, and a stable error
+  code and exit code on failure.
+- Every command reports `not_ready` rather than a traceback with no helper.
+- The CLI reaches every capability through the control API only.
+- The Python test suite passes.
+
+Result: completed and verified with 77 new Python tests, the full 264-test
+Python suite, and a live check against the real Qwen helper covering
+readiness, discovery, model listing, device listing, file transcription,
+transcript retrieval, and vocabulary replacement.
+
+Deferred with the durable session registry: expected revisions and `--dry-run`.
+Deferred from section 14.3: the `audio`, `config`, `diagnostics`, and
+`permissions` groups, transcript search and export, and derived artifacts.
+Scoped grants are not enforced until the signed application can issue them; see
+`.claude/plans/public-cli.md` for the reviewed deviations.
+
 ### P0: Target-Mac capture acceptance
 
 - Repeat the native system-audio test with known audible applications.
@@ -108,6 +145,8 @@ Mac, or a documented platform limitation has a tested fallback.
 ### P0: Durable session discovery and recovery
 
 - Add a versioned session manifest or small local registry.
+- Back `voxink sessions list` with it so completed and interrupted sessions are
+  listable, and add the revision and `--dry-run` behavior that depends on it.
 - Persist lifecycle state, enabled sources, model/protocol versions, and part
   inventory without secrets or transcript text.
 - Discover interrupted sessions without scanning Markdown contents.

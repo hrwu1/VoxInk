@@ -22,6 +22,7 @@ from .preflight import (
     PreflightOptions,
     run_preflight,
 )
+from voxink_cli.discovery import endpoint_path
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
 
@@ -147,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             vocabulary_path=args.vocabulary,
             native_capture_path=args.native_capture if args.web else None,
+            # Publishing the endpoint is what lets `voxink` attach to this
+            # helper; the launcher owns it because it owns the helper's life.
+            control_endpoint_path=endpoint_path(args.state_root),
         ),
         diagnostics=diagnostics,
     )

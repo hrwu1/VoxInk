@@ -380,6 +380,7 @@ VoxInk
 │   └── python_capture/         # Experimental Python microphone client
 ├── services/
 │   └── transcription/          # Local HTTP/WebSocket transcription service
+├── voxink_cli/                 # Public `voxink` command and shared control client
 ├── voxink_core/
 │   ├── providers/              # Qwen and future provider adapters
 │   └── persistence/            # Markdown/audio writers and rotation
@@ -420,3 +421,208 @@ Current implementation status and priorities are maintained in
 - Platform-specific capture stays behind a normalized audio interface.
 - Optional features must not weaken the default privacy guarantees.
 - Build and measure the smallest pipeline before optimizing the model or UI.
+
+## 14. Public CLI and Agent Interface
+
+### 14.1 Goal and scope
+
+VoxInk should provide a public `voxink` command that lets people, scripts, and
+AI agents use the same supported capabilities as the native application without
+screen scraping or parsing human-oriented terminal output. The CLI is a client
+of VoxInk's local control plane, not a second implementation of capture,
+transcription, persistence, model management, or recovery.
+
+The public interface must preserve the existing product boundaries:
+
+- Local operation remains offline-enforced and source-aware.
+- Finalized transcripts and retained audio remain user-owned artifacts.
+- Capture, model, and persistence behavior remains provider-neutral at the
+  public boundary.
+- The signed application or its bundled background service owns helper
+  lifecycle, credentials, permissions, and recovery.
+- Agents cannot obtain sensitive permissions merely by invoking the CLI.
+
+The existing `scripts/voxink-dev`, Python capture client, and Swift capture CLI
+remain development and diagnostic tools. They are not the public contract.
+
+### 14.2 Shared control architecture
+
+The native application, public CLI, and future agent adapters must call one
+shared domain service:
+
+```text
+macOS application ---+
+public voxink CLI ----+--> local control API --> capture adapters
+agent adapter/MCP ----+          |              transcription providers
+                                 |              session registry
+                                 +------------> transcript/audio artifacts
+```
+
+The domain service owns validated operations for capability discovery, capture
+control, session lookup, event streaming, file transcription, transcript and
+audio discovery, model selection, vocabulary management, configuration, and
+sanitized diagnostics. UI-specific routes may adapt these operations but must
+not contain the only implementation of a product capability.
+
+Production IPC should use a Unix-domain socket, XPC, or an equivalently private
+local mechanism. Credentials must not appear in command-line arguments,
+transcripts, persistent logs, or agent-visible configuration. Development HTTP
+and WebSocket adapters may remain available behind the same domain interfaces.
+
+### 14.3 Public command groups
+
+The public command hierarchy is organized by product resource rather than by
+the current process layout:
+
+| Command group | Required operations |
+| --- | --- |
+| `voxink capabilities` | Report supported, available, and permitted features. |
+| `voxink status` and `voxink doctor` | Report readiness and actionable local failures. |
+| `voxink devices` | List usable microphone devices. |
+| `voxink applications` | List applications available for selected-app capture. |
+| `voxink capture` | Start, inspect, watch, pause, resume, and stop live capture. |
+| `voxink sessions` | List and inspect active, completed, and interrupted sessions and their artifacts. |
+| `voxink transcribe` | Transcribe an existing local audio file. |
+| `voxink transcripts` | Read, follow, search, export, and locate transcript artifacts. |
+| `voxink audio` | List, locate, and export retained source or combined audio. |
+| `voxink models` | List, inspect, verify, select, and explicitly import local models. |
+| `voxink vocabulary` | Read, validate, add, remove, replace, import, and export terms and corrections. |
+| `voxink config` | Read schemas and validated settings and update permitted settings. |
+| `voxink diagnostics` | Read sanitized state and produce a privacy-reviewed diagnostic bundle. |
+| `voxink permissions` | Inspect pending requests and existing agent grants and revoke grants. |
+
+The first implementation slice includes capability/readiness discovery,
+capture input discovery, the complete capture lifecycle, session and artifact
+lookup, file transcription, transcript retrieval, model listing/selection, and
+vocabulary reading/replacement. Search, export conveniences, diagnostic bundles,
+and derived agent artifacts follow only after the first slice works end to end.
+
+### 14.4 Machine-readable contract
+
+Every public command must support explicit `text`, `json`, and where streaming
+is appropriate `jsonl` formats. Machine-readable output uses a versioned,
+provider-neutral envelope:
+
+```json
+{
+  "schema_version": "1",
+  "ok": true,
+  "command": "capture.start",
+  "data": {},
+  "warnings": []
+}
+```
+
+Failures use stable error codes rather than requiring consumers to parse prose:
+
+```json
+{
+  "schema_version": "1",
+  "ok": false,
+  "command": "capture.start",
+  "error": {
+    "code": "approval_required",
+    "message": "System-audio capture requires authorization.",
+    "retryable": true,
+    "request_id": "req_123",
+    "details": {}
+  }
+}
+```
+
+The initial error taxonomy includes `invalid_request`, `not_ready`,
+`not_found`, `permission_denied`, `approval_required`, `invalid_transition`,
+`conflict`, `capture_unavailable`, `model_busy`, `disk_low`, `timeout`, and
+`internal_error`. The CLI writes structured results to stdout, diagnostics to
+stderr, and returns documented stable exit codes.
+
+Commands support `--format`, `--schema-version`, `--timeout`, `--request-id`,
+and `--no-input`. Mutating operations support an idempotency key. Operations
+that expose a proposed state change support `--dry-run` where meaningful, and
+long-running transitions support `--wait`. Event streams use monotonically
+increasing sequence numbers and resumable cursors so an agent can reconnect
+without duplicating or silently missing events.
+
+Every successful mutation returns its effective configuration, resource ID,
+state, and revision. State-changing requests may carry an expected revision to
+prevent one controller from unknowingly overwriting another controller's
+decision.
+
+### 14.5 Authorization and auditability
+
+Read-only capability and readiness discovery may be available automatically.
+Sensitive operations require grants issued by the native application, never by
+the CLI itself. Initial scopes are:
+
+- `capture.microphone`
+- `capture.system`
+- `capture.applications`
+- `sessions.read`
+- `transcripts.read`
+- `audio.read`
+- `audio.retain`
+- `vocabulary.write`
+- `models.switch`
+- `models.import`
+- `artifacts.delete`
+
+Grants may be limited by application bundle identifier, capture source,
+recording duration, output location, retention behavior, expiration time, or
+single use. Starting unattended capture is allowed only when the user has
+created a matching scoped grant in the application. Missing authorization
+returns `approval_required` with a request identifier that the application can
+present to the user. A command-line confirmation flag cannot bypass this gate.
+
+Control mutations record an audit entry containing the time, operation,
+request ID, client identity, affected session, result, and permission scope.
+Audit entries must not contain transcript text, raw audio, credentials, or
+unnecessary command arguments.
+
+### 14.6 Durable resources
+
+The agent interface depends on a versioned session registry rather than
+process-local session objects or Markdown scanning. Each session record includes
+its lifecycle state, revision, enabled sources, selected applications,
+languages, provider/model versions, retention policy, timestamps, completion or
+recovery status, and artifact inventory. It contains paths and metadata but no
+credential or transcript text.
+
+Transcript events retain stable event IDs, sequence numbers, capture-derived
+timestamps, source labels, final/partial state, and optional speaker fields.
+Partial events remain disposable; finalized events remain durable. Session
+artifacts identify every Markdown part and microphone, system, or combined audio
+part without requiring filename conventions to be reverse engineered.
+
+Agents may later attach summaries, action items, translations, chapters,
+speaker labels, or proposed corrections as derived artifacts. Derived artifacts
+must not silently rewrite the canonical transcript and must record their
+producer, source session, source transcript revision, creation time, and human
+approval state when applicable.
+
+### 14.7 Compatibility and evolution
+
+CLI flags and JSON fields are a versioned public API. Additive fields are
+permitted within a schema version; removals, semantic changes, and renamed
+error codes require a new schema version. Capability discovery reports both
+protocol and output-schema versions so clients can reject incompatible
+combinations before starting capture.
+
+The CLI and future MCP or SDK adapters share the typed domain client and schema
+definitions. An agent adapter must not shell out to the CLI and parse terminal
+text when it can call the shared client directly.
+
+### 14.8 Design completion criteria
+
+This interface design is ready for implementation planning when:
+
+1. The public CLI is confirmed as a thin client of the application-owned local
+   control service.
+2. The first command slice and deferred command groups are accepted.
+3. JSON envelopes, errors, event cursors, idempotency, and revision behavior are
+   accepted as public compatibility commitments.
+4. Unattended capture is confirmed to require an application-issued scoped
+   grant.
+5. Durable session and artifact manifests are accepted as prerequisites rather
+   than CLI-only filesystem scanning.
+6. Canonical transcripts remain immutable to agents; agent output is stored as
+   provenance-labelled derived artifacts.

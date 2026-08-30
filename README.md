@@ -189,6 +189,111 @@ Private operational diagnostics are stored under
 `~/Library/Application Support/VoxInk/logs/`. They contain process state and
 protocol metadata, never transcript text, raw audio, or the launch credential.
 
+## Scripting and agents: the `voxink` command
+
+`scripts/voxink-dev` is the interactive launcher. `scripts/voxink` is the
+public command for scripts and AI agents: it is a thin client of the running
+helper's local control API, so it never re-implements capture, transcription,
+persistence, or model management, and it never scans the transcript folder
+itself. `PROJECT_SPEC.md` section 14 is the full contract.
+
+Start a helper in one Terminal, then use `voxink` from another:
+
+```sh
+./scripts/voxink-dev                 # publishes a private control endpoint
+./scripts/voxink status
+```
+
+The launcher writes the loopback address and its credential to
+`~/Library/Application Support/VoxInk/control-endpoint.json`, readable only by
+you, and removes it when the helper stops. The credential never appears in a
+command line, so it stays out of process listings and shell history. Point the
+CLI at a different helper with `VOXINK_CONTROL_ENDPOINT`.
+
+### Machine-readable output
+
+Every command supports `--format text|json|jsonl`. Machine-readable results use
+one versioned envelope:
+
+```sh
+./scripts/voxink --format json capabilities
+```
+
+```json
+{"schema_version": "1", "ok": true, "command": "capabilities", "data": {}, "warnings": []}
+```
+
+Failures carry a stable code instead of prose, so a consumer never parses an
+error message:
+
+```json
+{"schema_version": "1", "ok": false, "command": "capture.start",
+ "error": {"code": "approval_required", "message": "...", "retryable": true,
+           "request_id": "req_123", "details": {}}}
+```
+
+Structured results go to stdout and human diagnostics to stderr. Exit codes are
+part of the contract:
+
+| Exit | Error codes |
+| --- | --- |
+| 0 | success |
+| 1 | `internal_error` |
+| 2 | `invalid_request` |
+| 3 | `not_ready` |
+| 4 | `not_found` |
+| 5 | `permission_denied`, `approval_required` |
+| 6 | `invalid_transition`, `conflict` |
+| 7 | `capture_unavailable`, `model_busy`, `disk_low` |
+| 8 | `timeout` |
+
+Every command also accepts `--schema-version`, `--timeout`, `--request-id`,
+`--idempotency-key`, and `--no-input`, before or after the command name.
+
+### Available commands
+
+```sh
+./scripts/voxink capabilities                 # supported, available, permitted features
+./scripts/voxink status                       # readiness and capture state
+./scripts/voxink doctor                       # actionable local failures
+./scripts/voxink devices list                 # microphone devices
+./scripts/voxink applications list            # capturable applications
+
+./scripts/voxink capture start --source microphone --source system
+./scripts/voxink capture watch                # stream events until the session ends
+./scripts/voxink capture pause
+./scripts/voxink capture resume
+./scripts/voxink capture stop --wait
+
+./scripts/voxink sessions list
+./scripts/voxink sessions show SESSION_ID
+./scripts/voxink transcribe recording.wav --language en
+./scripts/voxink transcripts list
+./scripts/voxink transcripts show SESSION_ID [--part 2]
+
+./scripts/voxink models list
+./scripts/voxink models select Qwen3-ASR-0.6B
+./scripts/voxink vocabulary show
+./scripts/voxink vocabulary replace --file vocabulary.txt
+```
+
+`capture watch` reports an absolute `next_cursor` with every event, so an agent
+that reconnects with `--after` resumes without replaying or skipping events.
+
+### Known limits of this slice
+
+- Microphone-only capture is not startable from the CLI yet; the control plane
+  starts native capture, which always carries a system stream. Combine it with
+  `--source system`, or use `./scripts/voxink-dev --terminal`.
+- `sessions list` reports only sessions the running helper holds open. Completed
+  and interrupted sessions are discoverable through `transcripts list` until the
+  durable session registry lands.
+- Scoped grants are not enforced. Possession of the loopback credential
+  authorizes every scope in this edition, and `capabilities` says so. The
+  signed application will issue real grants; no CLI flag will bypass that gate.
+- The `audio`, `config`, `diagnostics`, and `permissions` command groups,
+  transcript search and export, and derived agent artifacts are deferred.
+
 ## Direct service debugging
 
 Normal use should go through `scripts/voxink-dev`. For protocol debugging, set
@@ -344,3 +449,5 @@ documented in `clients/macos_capture/README.md`.
   file-format reference.
 - [REMAINING_WORK.md](REMAINING_WORK.md) is the maintained developer roadmap.
 - [SHIP_SPEC.md](SHIP_SPEC.md) defines the signed production release.
+- [.claude/plans/public-cli.md](.claude/plans/public-cli.md) records the
+  public CLI review, its accepted deviations, and what it defers.

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from voxink_cli.discovery import load
 from voxink_dev.diagnostics import DiagnosticLog
 from voxink_dev.supervisor import (
     HelperConfig,
@@ -181,6 +182,90 @@ class SupervisorIntegrationTests(unittest.TestCase):
                 events,
             )
             self.assertNotIn(supervisor.auth_secret, content)
+
+
+class ControlEndpointHandshakeTests(unittest.TestCase):
+    """The launcher owns the helper, so it publishes how the CLI reaches it."""
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+        self.endpoint_path = self.root / "control-endpoint.json"
+        self.process = MagicMock()
+        self.process.pid = 4321
+        self.process.stderr = None
+        self.process.poll.return_value = None
+
+    def _supervisor(self, endpoint_path: Path | None) -> HelperSupervisor:
+        return HelperSupervisor(
+            HelperConfig(
+                model_path=self.root / "model",
+                output_root=self.root / "output",
+                control_endpoint_path=endpoint_path,
+            ),
+            process_factory=MagicMock(return_value=self.process),
+        )
+
+    def _ready(self) -> dict[str, object]:
+        return {"status": "ok", "protocol_version": 1, "provider": "fake-local"}
+
+    def test_a_ready_helper_is_published_for_the_public_cli(self) -> None:
+        supervisor = self._supervisor(self.endpoint_path)
+
+        with patch.object(HelperSupervisor, "wait_until_ready", return_value=self._ready()):
+            supervisor.start()
+
+        endpoint = load(self.endpoint_path)
+        self.assertEqual(supervisor.base_url, endpoint.base_url)
+        self.assertEqual(supervisor.auth_secret, endpoint.auth_secret)
+        self.assertEqual("1", endpoint.protocol_version)
+        self.assertEqual(4321, endpoint.pid)
+
+    def test_stopping_the_helper_revokes_the_published_endpoint(self) -> None:
+        supervisor = self._supervisor(self.endpoint_path)
+        with patch.object(HelperSupervisor, "wait_until_ready", return_value=self._ready()):
+            supervisor.start()
+
+        supervisor.stop()
+
+        self.assertFalse(self.endpoint_path.exists())
+
+    def test_a_helper_that_never_became_ready_publishes_nothing(self) -> None:
+        supervisor = self._supervisor(self.endpoint_path)
+
+        with patch.object(
+            HelperSupervisor, "wait_until_ready", side_effect=SupervisorError("no")
+        ):
+            with self.assertRaises(SupervisorError):
+                supervisor.start()
+
+        self.assertFalse(self.endpoint_path.exists())
+
+    def test_an_unpublishable_endpoint_leaves_capture_working(self) -> None:
+        """A CLI that cannot attach must not take the browser workflow down."""
+        supervisor = self._supervisor(self.endpoint_path)
+        diagnostics = MagicMock()
+        supervisor.diagnostics = diagnostics
+
+        with patch.object(HelperSupervisor, "wait_until_ready", return_value=self._ready()):
+            with patch("voxink_cli.discovery.publish", side_effect=OSError("read-only")):
+                health = supervisor.start()
+
+        self.assertEqual(1, health["protocol_version"])
+        self.assertIn(
+            "control_endpoint.publish_failed",
+            [call.args[0] for call in diagnostics.emit.call_args_list],
+        )
+
+    def test_no_endpoint_is_published_when_none_is_configured(self) -> None:
+        supervisor = self._supervisor(None)
+
+        with patch.object(HelperSupervisor, "wait_until_ready", return_value=self._ready()):
+            supervisor.start()
+        supervisor.stop()
+
+        self.assertEqual([], list(self.root.glob("*.json")))
 
 
 if __name__ == "__main__":

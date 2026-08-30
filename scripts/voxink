@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
+    echo "VoxInk requires a Python 3.12 environment at $PROJECT_DIR/.venv." >&2
+    echo "Create it with: python3.12 -m venv .venv" >&2
+    exit 2
+fi
+exec "$PROJECT_DIR/.venv/bin/python" -m voxink_cli "$@"

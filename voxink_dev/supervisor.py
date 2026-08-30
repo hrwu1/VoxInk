@@ -18,7 +18,8 @@ from typing import Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from services.transcription.app import PROTOCOL_VERSION
+from services.transcription.app import PROTOCOL_VERSION, SERVICE_VERSION
+from voxink_cli import discovery
 from .diagnostics import DiagnosticLog
 
 
@@ -38,6 +39,8 @@ class HelperConfig:
     service_module: str = "services.transcription"
     native_capture_path: Path | None = None
     vocabulary_path: Path | None = None
+    # Where the public CLI looks for this helper; None keeps it undiscoverable.
+    control_endpoint_path: Path | None = None
 
 
 class HelperSupervisor:
@@ -105,6 +108,7 @@ class HelperSupervisor:
         self._emit("helper.starting", component="helper", pid=self.process.pid, port=self.port)
         try:
             health = self.wait_until_ready()
+            self._publish_control_endpoint()
             self._emit(
                 "helper.ready",
                 component="helper",
@@ -159,6 +163,7 @@ class HelperSupervisor:
         return environment
 
     def stop(self, timeout: float = 10.0) -> None:
+        self._revoke_control_endpoint()
         process, self.process = self.process, None
         if process is None:
             return
@@ -183,6 +188,49 @@ class HelperSupervisor:
             reader, self._stderr_reader = self._stderr_reader, None
             if reader is not None:
                 reader.join(timeout=1.0)
+
+    def _publish_control_endpoint(self) -> None:
+        """Let the public CLI find this helper (`PROJECT_SPEC.md` §14.2).
+
+        The launcher owns the helper's lifetime, so it owns the handshake too.
+        A failure here leaves capture working and only the CLI unable to attach,
+        so it is reported rather than raised.
+        """
+        path = self.config.control_endpoint_path
+        if path is None:
+            return
+        try:
+            discovery.publish(
+                path,
+                base_url=self.base_url,
+                auth_secret=self.auth_secret,
+                protocol_version=str(PROTOCOL_VERSION),
+                service_version=SERVICE_VERSION,
+                pid=self.process.pid if self.process else None,
+            )
+        except OSError as exc:
+            self._emit(
+                "control_endpoint.publish_failed",
+                level="error",
+                component="supervisor",
+                reason=str(exc),
+            )
+            return
+        self._emit("control_endpoint.published", component="supervisor", port=self.port)
+
+    def _revoke_control_endpoint(self) -> None:
+        path = self.config.control_endpoint_path
+        if path is None:
+            return
+        try:
+            discovery.revoke(path)
+        except OSError as exc:
+            self._emit(
+                "control_endpoint.revoke_failed",
+                level="error",
+                component="supervisor",
+                reason=str(exc),
+            )
 
     def _start_stderr_reader(self) -> None:
         """Drain the helper's stderr continuously.
