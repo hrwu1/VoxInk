@@ -52,10 +52,12 @@ Checks, with their results on 2026-08-31:
 
 - `.venv/bin/python -m unittest discover -s tests` — 267 tests, all passing.
 - `swift test` in `clients/macos_capture` — 13 tests, all passing.
-- The frontend has **no automated test runner**. `frontend/package.json`
-  defines `lint`, `build`, and `build:local` only. Frontend confidence today
-  rests on ESLint, TypeScript checking, a production build, and manual browser
-  interaction.
+- `npm run test:timer` in `frontend` — 2 tests, passing. The frontend runs
+  Node's built-in test runner under `--experimental-strip-types`, added with
+  the session-timer fix. It covers the extracted `elapsed-timer.ts` helper
+  only, and its script names that one file rather than discovering tests.
+  Everything else in the frontend still rests on ESLint, TypeScript checking,
+  a production build, and manual browser interaction.
 
 Real system-audio delivery still requires acceptance on the target Mac: the
 last manual check received zero-filled ScreenCaptureKit buffers despite
@@ -163,19 +165,25 @@ problem.
 
 ## P1: Cover the code that changes most
 
-The recorder hook now owns the entire capture lifecycle for every surface, and
-it has no automated coverage at all. That is the highest-churn, least-tested
-code in the repository. The heavier reliability infrastructure is deferred; see
-the end of this file.
+The recorder hook owns the entire capture lifecycle for every surface. That is
+the highest-churn, least-tested code in the repository. The session-timer fix
+established the runner and showed the shape that works: extract the logic into
+a pure module and test it directly. The remaining lifecycle logic still lives
+inside the hook, untested. The heavier reliability infrastructure is deferred;
+see the end of this file.
 
-- [ ] Add a frontend test runner and cover the recorder hook: mode selection,
-      the start/pause/resume/stop lifecycle, and error and readiness states.
+- [ ] Give the runner a discovery script. `test:timer` names a single file, so
+      a second test file runs only if someone remembers to add another script.
+- [ ] Cover the recorder hook: mode selection, the start/pause/resume/stop
+      lifecycle, and error and readiness states. Extract what has to be
+      extracted to make it testable, as the timer fix did.
 - [ ] Add focused failure tests for the cases that actually occur: the helper
       dying mid-session, and the disk filling mid-session.
 - [ ] Exercise malformed traffic and model corruption at the service boundary.
 
-Complete when the capture lifecycle has automated coverage on every surface,
-and a helper crash or a full disk is a tested path rather than an assumption.
+Complete when the capture lifecycle has automated coverage that runs without
+being named file by file, and a helper crash or a full disk is a tested path
+rather than an assumption.
 
 ## P1: Complete developer controls
 
@@ -310,5 +318,6 @@ not a work order — the sections above decide sequencing.
    the supported development environment.
 
 Met: 1, 4, and 5 — gate 5 for transcript parts, on the strength of its tests
-rather than a fresh manual interruption. Open: 2, 3, 6, 7, 8, and 9, and gate 9
-additionally requires a frontend test runner that does not yet exist.
+rather than a fresh manual interruption. Open: 2, 3, 6, 7, 8, and 9. Gate 9 now
+has a frontend runner, but it covers one helper and must be pointed at each
+file by hand.
