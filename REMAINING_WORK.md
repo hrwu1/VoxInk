@@ -200,6 +200,33 @@ and opened without overwriting prior transcript or audio parts.
 Complete when finalized text survives tested failures and long runs stay
 bounded with no unexpected outbound traffic.
 
+### P1: Level-adaptive voice activity detection
+
+The energy VAD gates on a fixed absolute threshold (`threshold_rms = 500.0` in
+`clients/python_capture/vad.py`). That cannot be right across microphones and
+input gains, and it now drops words.
+
+Measured on a real microphone-only session: the retained WAV peaks at
+-19.8 dBFS and only 6.2% of its 20 ms frames clear the threshold. The live
+transcript read "This is just a test for." / "To see whether you have
+captured."; the same WAV transcribed as one file read "This is just a test for
+to see whether you have captured all the words I've said about." The words are
+in the recording and the model reads them — the VAD discards them as silence.
+
+The flaw was latent while the browser captured microphone audio itself, because
+`getUserMedia` applied automatic gain control that lifted the signal to meet the
+threshold. The native helper applies none: `PCMNormalizer` converts format, not
+level. Unifying microphone capture removed the gain that was masking this.
+
+- Derive the threshold from a running noise floor instead of hardcoding it.
+- Consider a gain stage in the native helper as well; automatic gain helps the
+  model, not only the VAD.
+- Verify against a retained WAV with known ground truth before changing the
+  live path.
+
+Complete when quiet speech at roughly -20 dBFS survives capture, and the
+threshold no longer depends on one client's preprocessing.
+
 ### P1: Complete developer controls
 
 - Add microphone-device selection.
