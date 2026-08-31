@@ -1008,6 +1008,24 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         "next_cursor": total,
         "exit_code": exit_code,
         "error": runtime.native_error,
+        "retention": _retention_view(runtime, session_id),
+    }
+
+
+def _retention_view(runtime: ServiceRuntime, session_id: str | None) -> dict[str, Any]:
+    """Report what retention has written, and whether it has had to stop.
+
+    This rides on the capture view rather than the transcript event feed
+    because that feed is captions: every entry in it is rendered as spoken
+    text, and a storage notice is not something anyone said.
+    """
+    writer = runtime.audio_writers.get(session_id or "")
+    if writer is None:
+        return {"retaining": False, "retained_bytes": 0, "stopped_reason": None}
+    return {
+        "retaining": not writer.retention_stopped,
+        "retained_bytes": writer.retained_bytes,
+        "stopped_reason": writer.stopped_reason,
     }
 
 

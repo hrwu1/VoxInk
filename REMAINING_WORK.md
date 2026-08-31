@@ -50,11 +50,16 @@ from memory of earlier work:
 - Source-labelled live captions, rotating Markdown transcripts, and rotating
   WAV retention enabled by default with an explicit opt-out.
 - Bounded native audio queues, UI event history, and helper diagnostics.
+- Bounded audio retention: a free-space reserve and an optional per-session
+  ceiling, enforced in the writer. Reaching either stops the recording, not the
+  session, and is reported in the browser, on `voxink capture status`, and as
+  retained bytes per session on `voxink transcripts list`. Nothing is pruned
+  automatically; see `.claude/plans/bounded-local-storage.md`.
 - Recovery of interrupted transcript parts without overwriting earlier output.
 
 Checks, with their results on 2026-08-31:
 
-- `.venv/bin/python -m unittest discover -s tests` — 288 tests, all passing.
+- `.venv/bin/python -m unittest discover -s tests` — 304 tests, all passing.
 - `swift test` in `clients/macos_capture` — 15 tests, all passing.
 - `npm run test:timer` in `frontend` — 2 tests, passing. The frontend runs
   Node's built-in test runner under `--experimental-strip-types`, added with
@@ -88,30 +93,6 @@ dropped words can no longer be mistaken for a delivery failure.
 Complete when every capture mode delivers real audio end to end on a supported
 Mac, or a documented platform limitation has a tested fallback.
 
-## P1: Bounded local storage
-
-Split out of the session-registry work because it is the only part of it with
-an observed problem behind it, and it is unrelated to the rest.
-
-Six days of development testing produced 39 session directories and 1.2 GB in
-`~/Documents/VoxInk`, the largest single session about 440 MB. Audio retention
-is now enabled by default. `voxink_dev/preflight.py:101` reads free space once
-at launch and never again: nothing checks during a session, nothing stops a
-write when the disk fills, and nothing prunes. A long session on a nearly full
-disk is a present-tense failure that the new default feeds.
-
-- [ ] Check free space during a session, not only at launch.
-- [ ] Define and test what happens when the disk fills mid-session. Finalized
-      transcript text is the artifact that must survive; audio retention is the
-      part that may be dropped.
-- [ ] Report retained size per session and in total.
-- [ ] Offer retention limits or pruning, so that leaving the default on is not
-      a slow leak.
-
-Complete when a session that runs out of disk ends with intact transcript text
-and a clear message, and retained audio size is visible before it becomes a
-problem.
-
 ## P1: Cover the code that changes most
 
 The recorder hook owns the entire capture lifecycle for every surface. That is
@@ -126,8 +107,8 @@ see the end of this file.
 - [ ] Cover the recorder hook: mode selection, the start/pause/resume/stop
       lifecycle, and error and readiness states. Extract what has to be
       extracted to make it testable, as the timer fix did.
-- [ ] Add focused failure tests for the cases that actually occur: the helper
-      dying mid-session, and the disk filling mid-session.
+- [ ] Add a focused failure test for the helper dying mid-session. The disk
+      filling mid-session is covered by the retention bounds.
 - [ ] Exercise malformed traffic and model corruption at the service boundary.
 
 Complete when the capture lifecycle has automated coverage that runs without
@@ -265,7 +246,8 @@ not a work order — the sections above decide sequencing.
 4. Local IPC remains authenticated, versioned, and loopback-only.
 5. Finalized transcripts survive interruption and recovery without overwrite.
 6. Slow inference, long sessions, and a full disk keep memory and storage
-   bounded and never cost finalized text.
+   bounded and never cost finalized text. The full-disk half is met and
+   covered; slow inference and long sessions are not yet exercised.
 7. Offline tests detect no unexpected network access.
 8. Model, permission, device, helper, and disk failures have useful recovery
    actions.

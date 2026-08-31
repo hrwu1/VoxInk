@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import sys
 import threading
@@ -10,13 +11,27 @@ import wave
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import BinaryIO, Callable, Iterable
 
 from ..models import Source
 
 
 _WAV_HEADER_SIZE = 44
 _RIFF_DATA_LIMIT = 0xFFFFFFFF - 36
+
+#: Space retention will not consume. A session that reaches this keeps
+#: transcribing without its audio; the transcript is the artifact, and the
+#: recording is a convenience that another session can produce again.
+DEFAULT_MIN_FREE_BYTES = 512 * 1024 * 1024
+
+#: How much audio may be appended between free-space probes. Probing is a
+#: syscall, and at 16 kHz mono this is roughly two minutes of audio, so the
+#: reserve above absorbs anything written between two checks many times over.
+DEFAULT_FREE_SPACE_CHECK_BYTES = 4 * 1024 * 1024
+
+
+def _free_bytes(path: Path) -> int:
+    return shutil.disk_usage(path).free
 
 
 @dataclass
@@ -46,11 +61,21 @@ class AudioRetentionWriter:
         max_part_seconds: float = 60 * 60,
         max_part_bytes: int = 2 * 1024 * 1024 * 1024,
         durable_flush: bool = True,
+        min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+        max_session_bytes: int | None = None,
+        free_space_check_bytes: int = DEFAULT_FREE_SPACE_CHECK_BYTES,
+        free_space_probe: Callable[[Path], int] = _free_bytes,
     ) -> None:
         if sample_rate <= 0 or channels <= 0:
             raise ValueError("sample_rate and channels must be positive")
         if max_part_seconds <= 0 or max_part_bytes <= 0:
             raise ValueError("rotation limits must be positive")
+        if min_free_bytes < 0:
+            raise ValueError("min_free_bytes cannot be negative")
+        if max_session_bytes is not None and max_session_bytes <= 0:
+            raise ValueError("max_session_bytes must be positive when set")
+        if free_space_check_bytes <= 0:
+            raise ValueError("free_space_check_bytes must be positive")
         self.session_dir = Path(session_dir)
         self.sample_rate = sample_rate
         self.channels = channels
@@ -73,6 +98,29 @@ class AudioRetentionWriter:
         self._part_base_resolved = False
         self._resuming = False
         self._lock = threading.RLock()
+        self.min_free_bytes = min_free_bytes
+        self.max_session_bytes = max_session_bytes
+        self.free_space_check_bytes = free_space_check_bytes
+        self._free_space_probe = free_space_probe
+        self._retained_bytes = 0
+        # Primed so the first append probes: a session started on a disk that
+        # is already full must not write a whole interval before noticing.
+        self._bytes_since_probe = free_space_check_bytes
+        self._stopped_reason: str | None = None
+
+    @property
+    def retained_bytes(self) -> int:
+        """Audio bytes this writer has appended, excluding WAV headers."""
+        return self._retained_bytes
+
+    @property
+    def retention_stopped(self) -> bool:
+        return self._stopped_reason is not None
+
+    @property
+    def stopped_reason(self) -> str | None:
+        """Why retention stopped: `low_disk`, `session_limit`, or None."""
+        return self._stopped_reason
 
     def append_pcm(
         self,
@@ -98,7 +146,11 @@ class AudioRetentionWriter:
             return ()
 
         with self._lock:
+            if self._stopped_reason is not None:
+                return ()
             self.session_dir.mkdir(parents=True, exist_ok=True)
+            if self._enforce_bounds(len(pcm_s16le)):
+                return ()
             start_frame = start_ms * self.sample_rate // 1000
             chunk_frames = len(pcm_s16le) // self.frame_bytes
             track = self._tracks.get(source)
@@ -305,11 +357,45 @@ class AudioRetentionWriter:
             self._part_start(part) + data_bytes // self.frame_bytes,
         )
 
+    def _enforce_bounds(self, incoming_bytes: int) -> bool:
+        """Stop retention if this append would cross a bound. True if stopped.
+
+        Both bounds are checked before the write rather than after, so that the
+        reserve is a reserve: crossing it is what stops retention, not what it
+        has already consumed.
+        """
+        if self.max_session_bytes is not None:
+            if self._retained_bytes + incoming_bytes > self.max_session_bytes:
+                self._stop_retention("session_limit")
+                return True
+        if self.min_free_bytes and self._bytes_since_probe >= self.free_space_check_bytes:
+            self._bytes_since_probe = 0
+            try:
+                free = self._free_space_probe(self.session_dir)
+            except OSError:
+                # An unreadable destination is the filesystem's problem to
+                # report on the next write; it is not evidence of a full disk,
+                # and stopping retention here would hide the real error.
+                return False
+            if free - incoming_bytes < self.min_free_bytes:
+                self._stop_retention("low_disk")
+                return True
+        return False
+
+    def _stop_retention(self, reason: str) -> None:
+        """Close cleanly and record why, leaving what was written playable."""
+        for track in tuple(self._tracks.values()):
+            self._close_track(track)
+        self._tracks.clear()
+        self._stopped_reason = reason
+
     def _write_bytes(self, track: _Track, data: bytes) -> None:
         if track.data_bytes + len(data) > self.max_data_bytes:
             raise RuntimeError("internal error: audio write exceeded part capacity")
         track.handle.write(data)
         track.data_bytes += len(data)
+        self._retained_bytes += len(data)
+        self._bytes_since_probe += len(data)
 
     def _flush_track(self, track: _Track) -> None:
         _update_wav_sizes(track.handle, track.data_bytes)

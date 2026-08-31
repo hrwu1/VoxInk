@@ -292,12 +292,22 @@ def _capture_view(view: dict[str, Any]) -> Result:
         "next_cursor": view.get("next_cursor", 0),
         "exit_code": view.get("exit_code"),
         "error": view.get("error"),
+        "retention": view.get("retention", {}),
     }
     lines = [f"capture {data['state']}" + (f" (session {data['session_id']})" if data["session_id"] else "")]
     lines.extend(_event_line(event) for event in data["events"])
+    warnings: tuple[str, ...] = ()
+    stopped = data["retention"].get("stopped_reason")
+    if stopped:
+        # A warning, not an error: capture continues, the recording does not.
+        warnings = (
+            "Audio is no longer being saved "
+            + ("because the disk is nearly full." if stopped == "low_disk" else "at the session limit.")
+            + " The transcript is still being written.",
+        )
     if data["error"]:
         lines.append(f"error: {data['error']}")
-    return Result(data, text="\n".join(lines))
+    return Result(data, warnings, text="\n".join(lines))
 
 
 def _wait_for_settled(client: ControlClient, args: argparse.Namespace) -> dict[str, Any]:
@@ -387,13 +397,31 @@ def _transcripts_list(args: argparse.Namespace, client: ControlClient) -> Result
     response = client.transcripts()
     transcripts = response.get("transcripts", [])
     text = "\n".join(
-        f"{item['session_id']}\t{item['part_count']} part(s)\t{item['size_bytes']} bytes"
+        f"{item['session_id']}\t{item['part_count']} part(s)"
+        f"\t{_human_bytes(item.get('total_bytes', item['size_bytes']))}"
+        + (f" ({_human_bytes(item['audio_bytes'])} audio)" if item.get("audio_bytes") else "")
         + ("\tinterrupted" if item.get("interrupted") else "")
         for item in transcripts
     )
+    retained = sum(item.get("total_bytes", item.get("size_bytes", 0)) for item in transcripts)
     return Result(
-        {"output_root": response.get("output_root"), "transcripts": transcripts}, text=text
+        {
+            "output_root": response.get("output_root"),
+            "transcripts": transcripts,
+            "retained_bytes": retained,
+        },
+        text=text + (f"\n\n{_human_bytes(retained)} retained in total" if transcripts else ""),
     )
+
+
+def _human_bytes(count: int) -> str:
+    """Render a byte count at the scale a person reads it at."""
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def _transcripts_show(args: argparse.Namespace, client: ControlClient) -> Result:

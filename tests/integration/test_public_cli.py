@@ -270,6 +270,21 @@ class PublicCommandLineTests(unittest.TestCase):
         self.assertNotIn("schema_version", shown["text"])
         self.assertEqual(artifact["session_id"], shown["metadata"]["session_id"])
 
+    def test_listing_transcripts_reports_what_they_cost_on_disk(self) -> None:
+        """Retention is on by default, so its size has to be answerable."""
+        self._ok("transcribe", str(_write_wav(self.root / "clip.wav")))
+
+        listed = self._ok("transcripts", "list")["data"]
+        artifact = listed["transcripts"][0]
+        self.assertIn("audio_bytes", artifact)
+        self.assertEqual(
+            artifact["total_bytes"], artifact["size_bytes"] + artifact["audio_bytes"]
+        )
+        self.assertEqual(
+            listed["retained_bytes"],
+            sum(item["total_bytes"] for item in listed["transcripts"]),
+        )
+
     def test_transcribing_a_missing_file_never_reaches_the_helper(self) -> None:
         code, error = self._error("transcribe", str(self.root / "absent.wav"))
 

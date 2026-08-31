@@ -48,10 +48,21 @@ class TranscriptArtifacts:
     directory: Path
     parts: tuple[TranscriptPart, ...]
     metadata: dict[str, str] = field(default_factory=dict)
+    audio_bytes: int = 0
 
     @property
     def size_bytes(self) -> int:
         return sum(part.size_bytes for part in self.parts)
+
+    @property
+    def total_bytes(self) -> int:
+        """Everything the session left on disk, transcript and audio together.
+
+        Audio dominates this by orders of magnitude, which is the whole reason
+        it is worth reporting: a session's transcript is kilobytes and its
+        recording is hundreds of megabytes.
+        """
+        return self.size_bytes + self.audio_bytes
 
     @property
     def is_interrupted(self) -> bool:
@@ -64,6 +75,8 @@ class TranscriptArtifacts:
             "parts": [part.to_dict() for part in self.parts],
             "part_count": len(self.parts),
             "size_bytes": self.size_bytes,
+            "audio_bytes": self.audio_bytes,
+            "total_bytes": self.total_bytes,
             "interrupted": self.is_interrupted,
             "metadata": dict(self.metadata),
         }
@@ -99,7 +112,24 @@ def read_transcript(output_root: str | Path, session_id: str) -> TranscriptArtif
         directory=directory,
         parts=parts,
         metadata=_front_matter(parts[0].path),
+        audio_bytes=_audio_bytes(directory),
     )
+
+
+def _audio_bytes(directory: Path) -> int:
+    """Total size of retained WAV parts, from directory entries alone.
+
+    Sizes come from `stat`, so reporting what a session costs never opens an
+    audio file.
+    """
+    total = 0
+    for path in directory.glob("*.wav"):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            # A part removed between listing and stat is simply not counted.
+            continue
+    return total
 
 
 def read_transcript_text(

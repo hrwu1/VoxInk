@@ -24,6 +24,7 @@ type NativeStatus = {
   next_cursor: number;
   exit_code: number | null;
   error: string | null;
+  retention?: { retaining: boolean; retained_bytes: number; stopped_reason: string | null };
 };
 
 const MAX_VISIBLE_CAPTIONS = 250;
@@ -51,6 +52,7 @@ export function useVoxInkRecorder() {
   const [modelSwitching, setModelSwitching] = useState(false);
   const [active, setActive] = useState(false);
   const nativeCursor = useRef(0);
+  const retentionNotice = useRef<string | null>(null);
   const completedElapsedMs = useRef(0);
   const runningSinceMs = useRef<number | null>(null);
 
@@ -210,6 +212,18 @@ export function useVoxInkRecorder() {
       startMs: item.start_ms, endMs: item.end_ms, isFinal: item.is_final,
     }));
     nativeCursor.current = status.next_cursor;
+    // Retention stopping does not stop the session: the transcript is still
+    // being written, so this is a notice rather than a failure. Reported once,
+    // because the status poll keeps returning the same reason afterwards.
+    const stopped = status.retention?.stopped_reason ?? null;
+    if (stopped && stopped !== retentionNotice.current) {
+      retentionNotice.current = stopped;
+      setMessage(
+        stopped === 'low_disk'
+          ? 'Low disk space: audio is no longer being saved. The transcript is still recording.'
+          : 'Audio retention limit reached. The transcript is still recording.',
+      );
+    }
     if (status.state === 'failed') {
       pauseElapsed();
       setActive(false); setState('failed');

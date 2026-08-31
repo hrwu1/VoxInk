@@ -28,6 +28,7 @@ from services.transcription.app import (
     create_app,
 )
 from voxink_core.models import SessionConfig, Source, TranscriptEvent
+from voxink_core.persistence.audio import AudioRetentionWriter
 from voxink_core.local_models import MODEL_MANIFEST
 from voxink_core.persistence.audio import AudioRetentionWriter
 
@@ -1517,3 +1518,65 @@ class VocabularyTests(unittest.TestCase):
         self._transcribe(client, "after")
 
         self.assertEqual([None, "Hrwu"], provider.contexts)
+
+
+class RetentionReportingTests(unittest.TestCase):
+    """Retention stopping must reach the user, not just the writer.
+
+    It rides on the capture view rather than the transcript event feed because
+    that feed is captions: everything in it is rendered as spoken text, and a
+    storage notice is not something anyone said.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        app = create_app(
+            ServiceSettings(output_root=self.root / "out"), provider=FakeProvider()
+        )
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
+        self.runtime = app.state.runtime
+
+    def _writer(self, **kwargs) -> AudioRetentionWriter:
+        options = {
+            "sample_rate": 16_000,
+            "durable_flush": False,
+            "free_space_check_bytes": 1,
+            "free_space_probe": lambda _path: 10 * 1024**3,
+        }
+        options.update(kwargs)
+        return AudioRetentionWriter(self.root / "session", **options)
+
+    def test_a_session_without_retention_reports_nothing_retained(self) -> None:
+        view = _native_capture_view(self.runtime, after=0)
+        self.assertEqual(
+            {"retaining": False, "retained_bytes": 0, "stopped_reason": None},
+            view["retention"],
+        )
+
+    def test_a_retaining_session_reports_what_it_has_written(self) -> None:
+        writer = self._writer()
+        writer.append_pcm(Source.MICROPHONE, b"\x01\x00" * 16_000, start_ms=0)
+        self.runtime.native_session_id = "live"
+        self.runtime.audio_writers["live"] = writer
+
+        view = _native_capture_view(self.runtime, after=0)
+        self.assertTrue(view["retention"]["retaining"])
+        self.assertEqual(32_000, view["retention"]["retained_bytes"])
+        self.assertIsNone(view["retention"]["stopped_reason"])
+
+    def test_a_full_disk_is_reported_without_failing_the_capture(self) -> None:
+        writer = self._writer(min_free_bytes=1024**3, free_space_probe=lambda _path: 0)
+        writer.append_pcm(Source.MICROPHONE, b"\x01\x00" * 16_000, start_ms=0)
+        self.runtime.native_session_id = "live"
+        self.runtime.audio_writers["live"] = writer
+        self.runtime.native_capture_state = "recording"
+
+        view = _native_capture_view(self.runtime, after=0)
+        self.assertEqual("low_disk", view["retention"]["stopped_reason"])
+        self.assertFalse(view["retention"]["retaining"])
+        # The session is still capturing; only the recording stopped.
+        self.assertEqual("recording", view["state"])
+        self.assertIsNone(view["error"])
