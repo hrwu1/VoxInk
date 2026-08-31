@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { elapsedSeconds, freezeElapsed } from './elapsed-timer';
+
 export type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping' | 'failed';
 export type CaptureMode = 'microphone' | 'system' | 'applications' | 'microphone_system' | 'microphone_applications';
 export type Caption = { id: string; source: string; text: string; startMs: number; endMs: number; isFinal: boolean };
@@ -49,6 +51,32 @@ export function useVoxInkRecorder() {
   const [modelSwitching, setModelSwitching] = useState(false);
   const [active, setActive] = useState(false);
   const nativeCursor = useRef(0);
+  const completedElapsedMs = useRef(0);
+  const runningSinceMs = useRef<number | null>(null);
+
+  const refreshElapsed = useCallback(() => {
+    setSeconds(elapsedSeconds(completedElapsedMs.current, runningSinceMs.current, performance.now()));
+  }, []);
+
+  const resetElapsed = useCallback(() => {
+    completedElapsedMs.current = 0;
+    runningSinceMs.current = null;
+    setSeconds(0);
+  }, []);
+
+  const beginElapsed = useCallback(() => {
+    if (runningSinceMs.current === null) runningSinceMs.current = performance.now();
+    refreshElapsed();
+  }, [refreshElapsed]);
+
+  const pauseElapsed = useCallback(() => {
+    const nowMs = performance.now();
+    completedElapsedMs.current = freezeElapsed(
+      completedElapsedMs.current, runningSinceMs.current, nowMs,
+    );
+    runningSinceMs.current = null;
+    setSeconds(elapsedSeconds(completedElapsedMs.current, null, nowMs));
+  }, []);
 
   const authorizedFetch = useCallback(async (path: string, init: RequestInit = {}) => {
     if (!launch) throw new Error('The local helper is not connected');
@@ -145,9 +173,14 @@ export function useVoxInkRecorder() {
 
   useEffect(() => {
     if (state !== 'recording') return;
-    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [state]);
+    const timer = window.setInterval(refreshElapsed, 1000);
+    document.addEventListener('visibilitychange', refreshElapsed);
+    refreshElapsed();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshElapsed);
+    };
+  }, [refreshElapsed, state]);
 
   const elapsed = useMemo(() => {
     const minutes = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -166,9 +199,10 @@ export function useVoxInkRecorder() {
   }, []);
 
   const fail = useCallback((error: unknown) => {
+    pauseElapsed();
     setActive(false); setState('failed');
     setMessage(error instanceof Error ? error.message : 'The local session stopped unexpectedly');
-  }, []);
+  }, [pauseElapsed]);
 
   const applyNativeStatus = useCallback((status: NativeStatus) => {
     status.events.forEach((item) => addCaption({
@@ -177,12 +211,14 @@ export function useVoxInkRecorder() {
     }));
     nativeCursor.current = status.next_cursor;
     if (status.state === 'failed') {
+      pauseElapsed();
       setActive(false); setState('failed');
       setMessage(status.error || `Capture stopped unexpectedly${status.exit_code === null ? '' : ` (exit ${status.exit_code})`}`);
     } else if (status.state === 'ready') {
+      pauseElapsed();
       setActive(false); setState('ready'); setMessage('Transcript finalized and saved locally');
     }
-  }, [addCaption]);
+  }, [addCaption, pauseElapsed]);
 
   useEffect(() => {
     if (!active || !launch) return;
@@ -201,8 +237,8 @@ export function useVoxInkRecorder() {
 
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
-    if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); setSeconds(0); setCaptions([]); setState('recording'); return; }
-    setState('starting'); setSeconds(0); setCaptions([]); nativeCursor.current = 0;
+    if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
+    setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
     try {
       if ((mode === 'applications' || mode === 'microphone_applications') && selectedApplications.length === 0) throw new Error('Choose at least one running application first');
       setMessage('Starting macOS audio capture…');
@@ -216,13 +252,16 @@ export function useVoxInkRecorder() {
       });
       const status = await response.json() as NativeStatus;
       nativeCursor.current = status.next_cursor;
+      beginElapsed();
       setActive(true); setState('recording'); setMessage('Listening locally with macOS capture');
     } catch (error) { fail(error); }
-  }, [authorizedFetch, fail, launch, mode, modelSwitching, retainAudio, selectedApplications]);
+  }, [authorizedFetch, beginElapsed, fail, launch, mode, modelSwitching, resetElapsed, retainAudio, selectedApplications]);
 
   const control = useCallback(async (
     action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
   ) => {
+    if (action !== 'resume') pauseElapsed();
+    else beginElapsed();
     if (!launch) { setState(action === 'stop' ? 'ready' : next); setMessage('Preview ready'); return; }
     setState(action === 'stop' ? 'stopping' : next);
     setMessage(action === 'stop' ? 'Finalizing the last utterance…' : note);
@@ -231,7 +270,7 @@ export function useVoxInkRecorder() {
       applyNativeStatus(await response.json() as NativeStatus);
       if (action !== 'stop') setMessage(note);
     } catch (error) { fail(error); }
-  }, [applyNativeStatus, authorizedFetch, fail, launch]);
+  }, [applyNativeStatus, authorizedFetch, beginElapsed, fail, launch, pauseElapsed]);
 
   const pause = useCallback(() => control('pause', 'paused', 'Session paused'), [control]);
   const resume = useCallback(

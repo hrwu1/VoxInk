@@ -10,7 +10,8 @@
     "build": "vinext build",
     "build:local": "vite build --config vite.static.config.ts",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test:timer": "node --experimental-strip-types --test tests/elapsed-timer.test.ts"
   },
   "dependencies": {
     "next": "16.2.6",
