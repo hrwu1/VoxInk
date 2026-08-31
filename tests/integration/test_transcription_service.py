@@ -143,7 +143,14 @@ def _start_message(
 
 
 VOICED = int(1000).to_bytes(2, "little", signed=True) * 320
-SILENCE = bytes(640)
+# Between words a microphone delivers room tone, not digital zeros. The gate
+# measures the background to decide what counts as speech, so a fixture whose
+# only quiet frames are absolute silence describes an input no capture device
+# produces, and leaves the estimator nothing to learn the room from.
+SILENCE = b"".join(
+    int(24 if index % 2 else -24).to_bytes(2, "little", signed=True) for index in range(320)
+)
+DIGITAL_SILENCE = bytes(640)
 
 
 def _send_frame(websocket, source: str, pcm: bytes, start_ms: int) -> dict:

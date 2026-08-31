@@ -38,7 +38,11 @@ from memory of earlier work:
 - One capture path: every browser and CLI mode records through the native
   helper. No `getUserMedia`, `AudioContext`, or client-side resampling remains
   in `frontend/app`. `clients/python_capture` is kept as an independent
-  diagnostic client, but its VAD module is not diagnostic-only; see P0 below.
+  diagnostic client, though the service applies its VAD module to every session.
+- A speech gate derived from a running noise floor rather than a fixed level,
+  owned by the service. No client sends an absolute threshold. Measured on the
+  recording that exposed the defect: speech-frame recall rose from 83.2% to
+  100%, and silence and room tone from -70 to -35 dBFS still produce nothing.
 - Local-only Qwen transcription over authenticated loopback HTTP/WebSocket
   APIs, with model listing and selection in the browser.
 - Microphone, all-system, selected-application, and combined capture modes,
@@ -50,8 +54,8 @@ from memory of earlier work:
 
 Checks, with their results on 2026-08-31:
 
-- `.venv/bin/python -m unittest discover -s tests` — 267 tests, all passing.
-- `swift test` in `clients/macos_capture` — 13 tests, all passing.
+- `.venv/bin/python -m unittest discover -s tests` — 288 tests, all passing.
+- `swift test` in `clients/macos_capture` — 15 tests, all passing.
 - `npm run test:timer` in `frontend` — 2 tests, passing. The frontend runs
   Node's built-in test runner under `--experimental-strip-types`, added with
   the session-timer fix. It covers the extracted `elapsed-timer.ts` helper
@@ -62,61 +66,6 @@ Checks, with their results on 2026-08-31:
 Real system-audio delivery still requires acceptance on the target Mac: the
 last manual check received zero-filled ScreenCaptureKit buffers despite
 successful permission and stream setup.
-
-## P0: Level-adaptive voice activity detection
-
-First because it degrades every session that runs today, and it depends on
-nothing else.
-
-The energy VAD gates on a fixed absolute threshold that is hardcoded in two
-places, both on the live capture path:
-
-- `clients/python_capture/vad.py:21` — `threshold_rms: float = 500.0`, the
-  default used by the chunker.
-- `clients/macos_capture/Sources/VoxInkCapture/LocalServiceClient.swift:365` —
-  `let thresholdRMS = 500.0`, sent to the service in the session start message.
-
-The module lives under `clients/python_capture`, but it is **not** confined to
-that diagnostic client: `services/transcription/app.py` imports
-`EnergyVadChunker` and applies it to every session, using the threshold the
-native helper supplies. Changing only one of the two constants changes nothing
-for real sessions.
-
-A fixed absolute threshold cannot be right across microphones and input gains,
-and it now drops words. Measured on a real microphone-only session: the
-retained WAV peaks at -19.8 dBFS and only 6.2% of its 20 ms frames clear the
-threshold. The live transcript read "This is just a test for." / "To see
-whether you have captured."; the same WAV transcribed as one file read "This is
-just a test for to see whether you have captured all the words I've said
-about." The words are in the recording and the model reads them — the VAD
-discards them as silence.
-
-The flaw was latent while the browser captured microphone audio itself, because
-`getUserMedia` applied automatic gain control that lifted the signal to meet
-the threshold. The native helper applies none: `PCMNormalizer` converts format,
-not level, and no gain stage exists anywhere in the Swift sources. Unifying
-microphone capture removed the gain that was masking this.
-
-- [ ] Build the small fixture set first. The bug was found by hand-comparing a
-      live transcript against the same WAV transcribed whole; that comparison
-      is the test. A handful of retained WAVs with known ground truth, one
-      script, and a word-recall assertion is enough. The full evaluation set
-      stays with the performance work.
-- [ ] Include a silence-only and a room-tone-only fixture that must produce
-      empty output. Lowering the gate sends more near-silence to the model, and
-      ASR models generally emit spurious text on near-silent input, so recall
-      alone cannot tell a fix from a regression.
-- [ ] Derive the threshold from a running noise floor instead of a constant.
-- [ ] Decide where the threshold is owned. Two hardcoded constants that must
-      agree is the defect underneath the defect; the service should derive its
-      own gate rather than trust a client-supplied absolute level.
-- [ ] Consider a gain stage in the native helper as well; automatic gain helps
-      the model, not only the VAD.
-
-Complete when quiet speech at roughly -20 dBFS survives capture, silence still
-produces no text, the threshold no longer depends on one client's
-preprocessing, and a test fails if the gate regresses to a fixed absolute
-level.
 
 ## P0: Target-Mac capture acceptance
 
@@ -133,8 +82,8 @@ should stop offering it.
 
 Microphone capture is confirmed working end to end through the native helper,
 so it is the control case: a failure that affects both sources is not
-ScreenCaptureKit-specific. Run this after the VAD work, so that dropped words
-are not mistaken for a delivery failure.
+ScreenCaptureKit-specific. The VAD work this was sequenced behind is done, so
+dropped words can no longer be mistaken for a delivery failure.
 
 Complete when every capture mode delivers real audio end to end on a supported
 Mac, or a documented platform limitation has a tested fallback.
@@ -241,8 +190,12 @@ Not started. `services/transcription/app.py:262` advertises
 improvement, not a necessity: finalized-only text works. Keep it behind the
 capture work.
 
-- [ ] Extend the P0 VAD fixtures into a reproducible English, Mandarin, and
-      code-switching evaluation set.
+- [ ] Extend the level fixtures in `tests/fixtures/audio.py` into a
+      reproducible English, Mandarin, and code-switching evaluation set.
+- [ ] Consider a gain stage in the native helper. Deferred from the VAD work
+      deliberately: it changes the audio the model receives and the audio
+      retained on disk, which belongs with measuring transcript quality rather
+      than with fixing a gate. `PCMNormalizer` converts format, not level.
 - [ ] Measure first-visible-text, silence-to-final latency, real-time factor,
       memory, and transcript quality.
 - [ ] Evaluate rolling inference and Apple Silicon acceleration behind the
@@ -306,7 +259,9 @@ not a work order — the sections above decide sequencing.
 1. One command reaches a ready state without manual port or helper management.
 2. All advertised capture modes pass target-Mac acceptance.
 3. Capture preserves quiet speech across microphones and input gains, and
-   silence produces no text.
+   silence produces no text. Met for the gate, which is now derived from the
+   input and covered by level fixtures; unverified on real hardware until the
+   acceptance run above.
 4. Local IPC remains authenticated, versioned, and loopback-only.
 5. Finalized transcripts survive interruption and recovery without overwrite.
 6. Slow inference, long sessions, and a full disk keep memory and storage
@@ -318,6 +273,7 @@ not a work order — the sections above decide sequencing.
    the supported development environment.
 
 Met: 1, 4, and 5 — gate 5 for transcript parts, on the strength of its tests
-rather than a fresh manual interruption. Open: 2, 3, 6, 7, 8, and 9. Gate 9 now
-has a frontend runner, but it covers one helper and must be pointed at each
-file by hand.
+rather than a fresh manual interruption. Gate 3 is met in the code and in
+fixtures but not yet on hardware. Open: 2, 6, 7, 8, and 9. Gate 9 now has a
+frontend runner, but it covers one helper and must be pointed at each file by
+hand.

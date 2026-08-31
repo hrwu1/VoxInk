@@ -1157,8 +1157,13 @@ def _release_stream(
 def _stream_chunker(start: dict[str, Any]) -> EnergyVadChunker:
     audio = start.get("audio", {})
     requested = start.get("vad", {})
+    # Chunking shape is the client's to choose: how long an utterance may run
+    # and how much context to carry are policy. What counts as sound is not.
+    # A client cannot know the level its microphone will deliver, and one that
+    # guesses wrong makes the service discard speech as silence, so the gate is
+    # derived here from the audio itself. `threshold_rms` is ignored rather
+    # than rejected: older helpers still send one.
     names = {
-        "threshold_rms",
         "silence_duration_ms",
         "min_speech_duration_ms",
         "max_chunk_duration_ms",

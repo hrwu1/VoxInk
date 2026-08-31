@@ -361,15 +361,17 @@ struct AudioDescription: Encodable {
 }
 
 struct ClientDescription: Encodable { let name: String; let version: String }
+/// Chunking shape only. The level at which audio counts as speech is derived
+/// by the service from the audio itself: this helper applies no gain, so it
+/// cannot know what level its microphone will deliver, and the fixed value it
+/// used to send here discarded quiet speech as silence.
 struct VADDescription: Encodable {
-    let thresholdRMS = 500.0
     let silenceDurationMilliseconds = 700
     let minSpeechDurationMilliseconds = 200
     let maxChunkDurationMilliseconds = 15_000
     let preRollMilliseconds = 200
     let overlapMilliseconds = 200
     enum CodingKeys: String, CodingKey {
-        case thresholdRMS = "threshold_rms"
         case silenceDurationMilliseconds = "silence_duration_ms"
         case minSpeechDurationMilliseconds = "min_speech_duration_ms"
         case maxChunkDurationMilliseconds = "max_chunk_duration_ms"

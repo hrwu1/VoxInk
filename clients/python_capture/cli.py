@@ -38,7 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also save the captured microphone audio as rotating WAV parts",
     )
-    parser.add_argument("--vad-threshold", type=float, default=500.0)
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=None,
+        help="pin the speech gate to an absolute RMS level; adapts to the input when unset",
+    )
     parser.add_argument("--silence-ms", type=int, default=700)
     parser.add_argument("--min-speech-ms", type=int, default=200)
     parser.add_argument("--max-chunk-ms", type=int, default=15_000)

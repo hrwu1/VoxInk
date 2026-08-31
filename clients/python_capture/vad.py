@@ -2,6 +2,12 @@
 
 This deliberately simple implementation is intended for bringing up the live
 pipeline.  It is not an accuracy-oriented replacement for a trained VAD.
+
+The gate adapts to the input rather than sitting at an absolute level.  A fixed
+threshold cannot be right across microphones and input gains: the same constant
+that ignores a noisy room will discard ordinary speech from a quiet one.  The
+threshold is derived from a running noise floor, so what the gate answers is
+"is this louder than this room?" rather than "is this louder than 500?".
 """
 
 from __future__ import annotations
@@ -18,20 +24,48 @@ from typing import Deque
 class VadConfig:
     sample_rate_hz: int = 16_000
     frame_duration_ms: int = 20
-    threshold_rms: float = 500.0
     silence_duration_ms: int = 700
     min_speech_duration_ms: int = 200
     max_chunk_duration_ms: int = 15_000
     pre_roll_ms: int = 200
     overlap_ms: int = 200
 
+    # Gate.  `threshold_rms` pins the gate to an absolute level and disables
+    # adaptation; it exists for tests that exercise chunking mechanics against a
+    # known gate, and for the diagnostic client's flag.  Leave it None in the
+    # live path, where the input level is not known in advance.
+    threshold_rms: float | None = None
+    noise_floor_ratio: float = 3.0
+    absolute_floor_rms: float = 10.0
+    release_ratio: float = 0.5
+    noise_floor_window_ms: int = 5_000
+    noise_floor_percentile: float = 10.0
+    # Deliberately shorter than `min_speech_duration_ms`. Until the estimate is
+    # established the gate can only be the absolute floor, which the background
+    # of a normal room clears; establishing it within a few frames means any
+    # such false onset is discarded as too short to be speech long before it
+    # could be emitted as a chunk.
+    noise_floor_min_observations: int = 5
+
     def __post_init__(self) -> None:
         if self.sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be positive")
         if self.frame_duration_ms <= 0:
             raise ValueError("frame_duration_ms must be positive")
-        if self.threshold_rms < 0:
+        if self.threshold_rms is not None and self.threshold_rms < 0:
             raise ValueError("threshold_rms cannot be negative")
+        if self.noise_floor_ratio < 1.0:
+            raise ValueError("noise_floor_ratio must be at least one")
+        if self.absolute_floor_rms < 0:
+            raise ValueError("absolute_floor_rms cannot be negative")
+        if not 0.0 < self.release_ratio <= 1.0:
+            raise ValueError("release_ratio must fall in (0, 1]")
+        if self.noise_floor_window_ms < self.frame_duration_ms:
+            raise ValueError("noise_floor_window_ms must be at least one frame")
+        if not 0.0 < self.noise_floor_percentile < 100.0:
+            raise ValueError("noise_floor_percentile must fall in (0, 100)")
+        if self.noise_floor_min_observations < 1:
+            raise ValueError("noise_floor_min_observations must be positive")
         if self.silence_duration_ms < self.frame_duration_ms:
             raise ValueError("silence_duration_ms must be at least one frame")
         if self.min_speech_duration_ms < 0:
@@ -111,10 +145,32 @@ class EnergyVadChunker:
         self._speech_frames = 0
         self._trailing_silence_frames = 0
         self._next_sample = 0
+        self._background: Deque[float] = deque(
+            maxlen=max(1, _ceil_frames(config.noise_floor_window_ms, config.frame_duration_ms))
+        )
 
     @property
     def active(self) -> bool:
         return bool(self._active)
+
+    @property
+    def noise_floor_rms(self) -> float | None:
+        """Current background estimate, or None while it is not yet trustworthy.
+
+        Below `noise_floor_min_observations` there is no estimate rather than a
+        bad one: a handful of frames cannot say what a room sounds like, and a
+        gate derived from two of them is worse than the absolute floor.
+        """
+        if len(self._background) < self.config.noise_floor_min_observations:
+            return None
+        ordered = sorted(self._background)
+        index = int(len(ordered) * self.config.noise_floor_percentile / 100.0)
+        return ordered[min(index, len(ordered) - 1)]
+
+    @property
+    def threshold_rms(self) -> float:
+        """Level a frame must reach to be voiced, given the current state."""
+        return self._gate(active=bool(self._active))
 
     @property
     def next_sample(self) -> int:
@@ -158,6 +214,11 @@ class EnergyVadChunker:
         wall time is not audio: callers re-anchor the next chunk to the capture
         timeline instead of letting pre-pause samples inflate every later
         timestamp.
+
+        The background estimate is kept. It describes the room and the
+        microphone, not the buffer, and neither changes because capture paused;
+        discarding it would make the first seconds after every resume gate on
+        the absolute floor alone.
         """
         self._pending.clear()
         self._active.clear()
@@ -169,7 +230,11 @@ class EnergyVadChunker:
     def _feed_frame(self, frame: bytes) -> list[AudioChunk]:
         start_sample = self._next_sample
         self._next_sample += self.config.samples_per_frame
-        voiced = pcm_s16le_rms(frame) >= self.config.threshold_rms
+        rms = pcm_s16le_rms(frame)
+        # The gate is read before the floor is updated, so that a frame cannot
+        # raise the floor and then be judged against it.
+        voiced = rms >= self._gate(active=bool(self._active))
+        self._observe_background(rms)
 
         if not self._active:
             if voiced:
@@ -194,6 +259,62 @@ class EnergyVadChunker:
                 return [self._emit("silence")]
             self._reset_active(keep_overlap=True)
         return []
+
+    def _gate(self, *, active: bool) -> float:
+        """Return the level a frame must reach to count as speech.
+
+        A pinned `threshold_rms` disables adaptation entirely, including the
+        release below, so that a test asking for a fixed gate gets exactly that.
+
+        Otherwise the gate sits a fixed ratio above the measured background, and
+        once an utterance is active it drops by `release_ratio`.  Speech does not
+        end at the volume it started: trailing syllables and quiet word endings
+        fall well below the level that opened the gate, and holding the entry
+        threshold through them is what splits one sentence into several chunks
+        and drops the words in between.
+        """
+        if self.config.threshold_rms is not None:
+            return self.config.threshold_rms
+        floor = self.noise_floor_rms
+        # With no estimate yet, treat the absolute floor as the background and
+        # apply the same ratio to it. Gating on the bare absolute floor would
+        # admit the background of any ordinary room as speech for as long as it
+        # took to measure one, and the release below would admit even more.
+        threshold = max(
+            self.config.absolute_floor_rms,
+            (floor if floor is not None else self.config.absolute_floor_rms)
+            * self.config.noise_floor_ratio,
+        )
+        if active and floor is not None:
+            # Hysteresis refines a measured gate. There is nothing to refine
+            # while the background is still unknown, so it is not loosened.
+            return threshold * self.config.release_ratio
+        return threshold
+
+    def _observe_background(self, rms: float) -> None:
+        """Record a frame as evidence of the background level.
+
+        A low percentile over a window, rather than a running average, is what
+        makes this survive both of the things that break a simpler estimator.
+        Speech occupies the top of the distribution, so it cannot drag the floor
+        up and gate itself out over a long utterance.  Digital silence is
+        excluded outright: a muted input or a dropped buffer is the absence of a
+        signal, not evidence that the room became quieter, and an estimator that
+        believes it collapses the gate for as long as it takes to recover.
+
+        Once the estimate is established, frames loud enough to be speech stop
+        contributing to it. Without that, a stretch of speech with no background
+        under it walks the floor up behind itself until the gate closes over the
+        speech that raised it.  While the estimate is still being established
+        every audible frame counts, because a gate that only ever learns from
+        frames it already considers quiet can never discover a louder room.
+        """
+        if rms < self.config.absolute_floor_rms:
+            return
+        established = len(self._background) >= self.config.noise_floor_min_observations
+        if established and rms >= self._gate(active=False):
+            return
+        self._background.append(rms)
 
     def _append_pre_roll(self, start_sample: int, frame: bytes) -> None:
         if self._pre_roll_frames:
