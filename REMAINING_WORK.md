@@ -12,6 +12,20 @@ Git history keeps their detail.
 `PROJECT_SPEC.md` remains the architecture and data-format reference.
 `SHIP_SPEC.md` remains the specification for a signed production release.
 
+## How this list is ordered
+
+The project is six days old and has one user. Order follows evidence, not the
+shape of the specification:
+
+1. Defects that degrade every session run today.
+2. Capabilities the interface advertises but cannot deliver.
+3. Verification of the code most likely to break next, which is the code that
+   changes most and is tested least.
+4. Convenience and completeness.
+
+Work with no observed problem behind it belongs in `Deferred` at the end, not
+in a priority tier. Two P0 items is a priority; five is a wish list.
+
 ## Verified state
 
 The following was confirmed by reading the tree and running the checks, not
@@ -24,7 +38,7 @@ from memory of earlier work:
 - One capture path: every browser and CLI mode records through the native
   helper. No `getUserMedia`, `AudioContext`, or client-side resampling remains
   in `frontend/app`. `clients/python_capture` is kept as an independent
-  diagnostic client, but its VAD module is not diagnostic-only; see below.
+  diagnostic client, but its VAD module is not diagnostic-only; see P0 below.
 - Local-only Qwen transcription over authenticated loopback HTTP/WebSocket
   APIs, with model listing and selection in the browser.
 - Microphone, all-system, selected-application, and combined capture modes,
@@ -41,18 +55,16 @@ Checks, with their results on 2026-08-31:
 - The frontend has **no automated test runner**. `frontend/package.json`
   defines `lint`, `build`, and `build:local` only. Frontend confidence today
   rests on ESLint, TypeScript checking, a production build, and manual browser
-  interaction. This gap is tracked under reliability validation below.
+  interaction.
 
 Real system-audio delivery still requires acceptance on the target Mac: the
 last manual check received zero-filled ScreenCaptureKit buffers despite
 successful permission and stream setup.
 
-## Current priorities
+## P0: Level-adaptive voice activity detection
 
-### P0: Level-adaptive voice activity detection
-
-This is first because it degrades every session that runs today, and the fix
-does not depend on any other item.
+First because it degrades every session that runs today, and it depends on
+nothing else.
 
 The energy VAD gates on a fixed absolute threshold that is hardcoded in two
 places, both on the live capture path:
@@ -83,20 +95,31 @@ the threshold. The native helper applies none: `PCMNormalizer` converts format,
 not level, and no gain stage exists anywhere in the Swift sources. Unifying
 microphone capture removed the gain that was masking this.
 
+- [ ] Build the small fixture set first. The bug was found by hand-comparing a
+      live transcript against the same WAV transcribed whole; that comparison
+      is the test. A handful of retained WAVs with known ground truth, one
+      script, and a word-recall assertion is enough. The full evaluation set
+      stays with the performance work.
+- [ ] Include a silence-only and a room-tone-only fixture that must produce
+      empty output. Lowering the gate sends more near-silence to the model, and
+      ASR models generally emit spurious text on near-silent input, so recall
+      alone cannot tell a fix from a regression.
 - [ ] Derive the threshold from a running noise floor instead of a constant.
 - [ ] Decide where the threshold is owned. Two hardcoded constants that must
       agree is the defect underneath the defect; the service should derive its
       own gate rather than trust a client-supplied absolute level.
 - [ ] Consider a gain stage in the native helper as well; automatic gain helps
       the model, not only the VAD.
-- [ ] Verify against a retained WAV with known ground truth before changing the
-      live path, and keep that WAV as a regression fixture.
 
-Complete when quiet speech at roughly -20 dBFS survives capture, the threshold
-no longer depends on one client's preprocessing, and a test fails if the gate
-regresses to a fixed absolute level.
+Complete when quiet speech at roughly -20 dBFS survives capture, silence still
+produces no text, the threshold no longer depends on one client's
+preprocessing, and a test fails if the gate regresses to a fixed absolute
+level.
 
-### P0: Target-Mac capture acceptance
+## P0: Target-Mac capture acceptance
+
+An advertised capture mode returns silence. Either it works, or the interface
+should stop offering it.
 
 - [ ] Repeat the native system-audio test with known audible applications.
 - [ ] Confirm microphone, all-system, selected-application, and combined
@@ -114,46 +137,47 @@ are not mistaken for a delivery failure.
 Complete when every capture mode delivers real audio end to end on a supported
 Mac, or a documented platform limitation has a tested fallback.
 
-### P0: Durable session discovery and recovery
+## P1: Bounded local storage
 
-Nothing here is started. `_sessions_list` in `voxink_cli/cli.py:373` returns a
-hardcoded `"durable_registry": False` and warns that only sessions the running
-helper holds open are listable.
+Split out of the session-registry work because it is the only part of it with
+an observed problem behind it, and it is unrelated to the rest.
 
-- [ ] Add a versioned session manifest or small local registry.
-- [ ] Back `voxink sessions list` with it so completed and interrupted sessions
-      are listable, and add the revision and `--dry-run` behavior that depends
-      on it.
-- [ ] Persist lifecycle state, enabled sources, model and protocol versions,
-      and part inventory without secrets or transcript text.
-- [ ] Discover interrupted sessions without scanning Markdown contents.
-- [ ] Add transcript and transcript-folder actions.
-- [ ] Add explicit low-disk behavior and retention reporting.
-- [ ] Extract a domain capture route. `capture start` still reaches the control
-      plane through `/v1/ui/capture/*`, a UI-namespaced route, deferred here on
-      purpose.
+Six days of development testing produced 39 session directories and 1.2 GB in
+`~/Documents/VoxInk`, the largest single session about 440 MB. Audio retention
+is now enabled by default. `voxink_dev/preflight.py:101` reads free space once
+at launch and never again: nothing checks during a session, nothing stops a
+write when the disk fills, and nothing prunes. A long session on a nearly full
+disk is a present-tense failure that the new default feeds.
 
-Complete when interrupted and completed sessions can be found, resumed safely,
-and opened without overwriting prior transcript or audio parts.
+- [ ] Check free space during a session, not only at launch.
+- [ ] Define and test what happens when the disk fills mid-session. Finalized
+      transcript text is the artifact that must survive; audio retention is the
+      part that may be dropped.
+- [ ] Report retained size per session and in total.
+- [ ] Offer retention limits or pruning, so that leaving the default on is not
+      a slow leak.
 
-### P0: Reliability validation
+Complete when a session that runs out of disk ends with intact transcript text
+and a clear message, and retained audio size is visible before it becomes a
+problem.
 
-Nothing here is started. There is no replay or soak coverage in `tests/` or
-`voxink_dev/`, and `benchmarks/` holds four static result files only.
+## P1: Cover the code that changes most
 
-- [ ] Add deterministic replay capture for end-to-end failure tests.
-- [ ] Exercise helper failure, slow inference, malformed traffic, model
-      corruption, low disk, output removal, and network-disabled operation.
-- [ ] Add accelerated one-hour replay and synthetic 24-hour soak coverage.
-- [ ] Verify bounded memory, queues, diagnostics, and temporary storage.
-- [ ] Add a frontend test runner. The recorder hook now owns the whole capture
-      lifecycle for every surface, and it has no automated coverage at all.
+The recorder hook now owns the entire capture lifecycle for every surface, and
+it has no automated coverage at all. That is the highest-churn, least-tested
+code in the repository. The heavier reliability infrastructure is deferred; see
+the end of this file.
 
-Complete when finalized text survives tested failures, long runs stay bounded
-with no unexpected outbound traffic, and every layer that can break a session
-has a test that runs without a human.
+- [ ] Add a frontend test runner and cover the recorder hook: mode selection,
+      the start/pause/resume/stop lifecycle, and error and readiness states.
+- [ ] Add focused failure tests for the cases that actually occur: the helper
+      dying mid-session, and the disk filling mid-session.
+- [ ] Exercise malformed traffic and model corruption at the service boundary.
 
-### P1: Complete developer controls
+Complete when the capture lifecycle has automated coverage on every surface,
+and a helper crash or a full disk is a tested path rather than an assumption.
+
+## P1: Complete developer controls
 
 Partly done. The browser shows model identity and offers model selection
 (`frontend/app/page.tsx:114`). What remains:
@@ -161,7 +185,9 @@ Partly done. The browser shows model identity and offers model selection
 - [ ] Add microphone-device selection. `/v1/devices` lists input devices
       (`services/transcription/app.py:501`), but `/v1/ui/capture/start` accepts
       only sources, applications, and retention — there is no device parameter
-      to pass one through, in either the browser or the CLI.
+      to pass one through, in either the browser or the CLI. This also
+      interacts with the VAD work: different microphones are exactly the
+      varying input levels a fixed threshold cannot serve.
 - [ ] Add open-transcript, open-folder, and quit actions.
 - [ ] Wire or remove the two inert browser controls: the settings button
       (`page.tsx:48`) has no handler, and `Mark` (`page.tsx:186`) is
@@ -173,13 +199,42 @@ Complete when the full session lifecycle and its common recovery actions are
 available without direct API or Terminal coordination, and no control in the
 interface does nothing.
 
-### P1: Responsive partial captions and performance
+## P1: Durable session discovery and recovery
+
+Demoted from P0. The artifacts that matter — transcript parts and audio —
+already land on disk and survive interruption, with tests. What is missing is
+listing and metadata, and with one user and a flat output directory, `ls` still
+answers the question. `_sessions_list` in `voxink_cli/cli.py:373` returns a
+hardcoded `"durable_registry": False` and warns that only sessions the running
+helper holds open are listable.
+
+Raise this again when session count, multiple machines, or agent use makes
+directory listing genuinely insufficient.
+
+- [ ] Add a versioned session manifest or small local registry.
+- [ ] Back `voxink sessions list` with it so completed and interrupted sessions
+      are listable, and add the revision and `--dry-run` behavior that depends
+      on it.
+- [ ] Persist lifecycle state, enabled sources, model and protocol versions,
+      and part inventory without secrets or transcript text.
+- [ ] Discover interrupted sessions without scanning Markdown contents.
+- [ ] Add transcript and transcript-folder actions.
+- [ ] Extract a domain capture route. `capture start` still reaches the control
+      plane through `/v1/ui/capture/*`, a UI-namespaced route, deferred here on
+      purpose.
+
+Complete when interrupted and completed sessions can be found, resumed safely,
+and opened without overwriting prior transcript or audio parts.
+
+## P1: Responsive partial captions and performance
 
 Not started. `services/transcription/app.py:262` advertises
-`"partial_results": False`, and no revision plumbing exists.
+`"partial_results": False`, and no revision plumbing exists. A genuine
+improvement, not a necessity: finalized-only text works. Keep it behind the
+capture work.
 
-- [ ] Build a reproducible English, Mandarin, and code-switching evaluation
-      set.
+- [ ] Extend the P0 VAD fixtures into a reproducible English, Mandarin, and
+      code-switching evaluation set.
 - [ ] Measure first-visible-text, silence-to-final latency, real-time factor,
       memory, and transcript quality.
 - [ ] Evaluate rolling inference and Apple Silicon acceleration behind the
@@ -190,28 +245,13 @@ Not started. `services/transcription/app.py:262` advertises
 Complete when revisions replace one another without reordering or duplication,
 and the selected local runtime meets a documented target on supported hardware.
 
-### P1: Remaining public CLI surface
-
-Deferred when the first command slice shipped; recorded here so the deferral
-stays visible. `README.md` documents the accepted deviations, and
-`.claude/plans/public-cli.md` records the review behind them.
-
-- [ ] Add the `audio`, `config`, `diagnostics`, and `permissions` command
-      groups from `PROJECT_SPEC.md` section 14.3.
-- [ ] Add transcript search and export, and derived agent artifacts.
-
-Scoped grants stay unenforced in this edition by design: possession of the
-loopback credential authorizes every scope, and `capabilities` says so. Real
-grants are signed-application work governed by `SHIP_SPEC.md`, and no CLI flag
-may bypass that gate.
-
-Complete when section 14.3 is either implemented or explicitly narrowed in
-`PROJECT_SPEC.md`.
-
-### P2: Local macOS application
+## P2: Local macOS application
 
 Not started. The Swift sources build a capture CLI only; there is no
-`NSStatusItem` or `MenuBarExtra` anywhere in the tree.
+`NSStatusItem` or `MenuBarExtra` anywhere in the tree. Plausibly the highest
+day-to-day value item here once capture is trustworthy, and deliberately
+behind it: a menu-bar app over a VAD that drops words just makes the defect
+easier to reach.
 
 - [ ] Add a Finder-launchable menu-bar application that reuses the existing
       capture, service, caption, and session interfaces.
@@ -223,22 +263,52 @@ Complete when the local app can finish all supported capture modes without a
 Terminal. Developer ID signing, notarization, installation, and updates remain
 production work governed by `SHIP_SPEC.md`.
 
+## Deferred
+
+Not scheduled. Each of these is real work with no observed problem behind it
+yet; the trigger that should promote it is named.
+
+**Long-run and replay infrastructure.** Accelerated one-hour replay, synthetic
+24-hour soak, and deterministic replay capture. Queues, event history, and
+temporary storage are already bounded by construction and covered by tests, so
+this would verify a design rather than chase a symptom. Promote on the first
+evidence of a leak, or when sessions routinely run for hours.
+
+**Remaining public CLI surface.** The `audio`, `config`, `diagnostics`, and
+`permissions` command groups from `PROJECT_SPEC.md` section 14.3, plus
+transcript search and export and derived agent artifacts. The first command
+slice has one user. Promote when something concrete needs a command that is
+missing, rather than to complete the section. `README.md` documents the
+accepted deviations, and `.claude/plans/public-cli.md` records the review.
+
+**Scoped grants.** Unenforced by design in this edition: possession of the
+loopback credential authorizes every scope, and `capabilities` says so. Real
+grants are signed-application work governed by `SHIP_SPEC.md`. No CLI flag may
+bypass that gate.
+
+**Offline network assertion.** Verifying no unexpected outbound traffic is a
+release gate, cheap to run once the failure tests above exist, and pointless to
+build separately before then.
+
 ## Developer-edition gates
 
-The developer edition is ready when:
+These describe the finished developer edition. They are a definition of done,
+not a work order — the sections above decide sequencing.
 
 1. One command reaches a ready state without manual port or helper management.
 2. All advertised capture modes pass target-Mac acceptance.
-3. Capture preserves quiet speech across microphones and input gains.
+3. Capture preserves quiet speech across microphones and input gains, and
+   silence produces no text.
 4. Local IPC remains authenticated, versioned, and loopback-only.
 5. Finalized transcripts survive interruption and recovery without overwrite.
-6. Slow inference and long sessions keep memory and storage bounded.
+6. Slow inference, long sessions, and a full disk keep memory and storage
+   bounded and never cost finalized text.
 7. Offline tests detect no unexpected network access.
 8. Model, permission, device, helper, and disk failures have useful recovery
    actions.
 9. Python, Swift, frontend, real-model smoke, replay, and soak checks pass in
    the supported development environment.
 
-Gate 1 is met. Gate 4 is met. Gate 5 is met for transcript parts and covered by
-tests. Gates 2, 3, 6, 7, 8, and 9 are open, and gate 9 additionally requires a
-frontend test runner that does not yet exist.
+Met: 1, 4, and 5 — gate 5 for transcript parts, on the strength of its tests
+rather than a fresh manual interruption. Open: 2, 3, 6, 7, 8, and 9, and gate 9
+additionally requires a frontend test runner that does not yet exist.
