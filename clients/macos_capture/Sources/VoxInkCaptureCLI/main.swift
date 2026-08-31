@@ -11,7 +11,7 @@ private struct Options {
     var clickThroughCaptions = false
     var retainAudio = false
     var endpoint: URL?
-    var sessionID = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+    var sessionID = SessionIdentifier.make()
 
     static func parse(_ arguments: [String]) throws -> Options {
         var options = Options()

@@ -37,6 +37,7 @@ from voxink_core.local_models import (
 from voxink_core.persistence.audio import AudioRetentionWriter
 from voxink_core.providers.base import TranscriptionProvider
 from voxink_core.providers.qwen import QwenLocalProvider
+from voxink_core.session_ids import new_session_id
 from voxink_core.sessions import (
     InvalidSessionTransition,
     Session,
@@ -403,7 +404,7 @@ def create_app(
             )
         if options.applications and not applications:
             raise HTTPException(status_code=422, detail="selected-application capture needs an application")
-        session_id = _new_session_id()
+        session_id = new_session_id()
         server = request.scope.get("server")
         port = request.url.port or (int(server[1]) if server else None)
         if port is None:
@@ -473,7 +474,7 @@ def create_app(
 
     @app.post("/v1/sessions", response_model=SessionView, status_code=201)
     async def create_session(request: SessionCreateRequest) -> SessionView:
-        session_id = request.session_id or _new_session_id()
+        session_id = request.session_id or new_session_id()
         if runtime.model_switching:
             raise HTTPException(status_code=409, detail="the local model is changing")
         if request.provider is not None and request.provider != runtime.provider.name:
@@ -1316,7 +1317,7 @@ def _ensure_started_session(
     if runtime.model_switching:
         raise HTTPException(status_code=409, detail="the local model is changing")
     if session_id is None:
-        session_id = _new_session_id()
+        session_id = new_session_id()
     try:
         session = runtime.sessions.get(session_id)
     except KeyError:
@@ -1365,12 +1366,6 @@ def _session_view(session) -> SessionView:
         sources=[source.value for source in session.config.sources],
         applications=list(session.config.applications),
     )
-
-
-def _new_session_id() -> str:
-    from datetime import datetime
-
-    return datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S-%f")
 
 
 def _segment_id() -> str:

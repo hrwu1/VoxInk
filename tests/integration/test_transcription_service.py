@@ -446,6 +446,15 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(200, response.status_code, response.text)
             self.assertEqual(expected, response.json()["state"])
 
+    def test_generated_session_id_uses_the_canonical_directory_format(self) -> None:
+        created = self.client.post("/v1/sessions", json={"sources": ["microphone"]})
+
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertRegex(
+            created.json()["session_id"],
+            r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}$",
+        )
+
     def test_reading_the_native_error_twice_does_not_raise_on_empty_stderr(self) -> None:
         """A helper that exits cleanly with no stderr is read once per status poll."""
         app = create_app(

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
 import os
 import sys
+
+from voxink_core.session_ids import new_session_id
 
 from .client import CaptureConfig, MicrophoneCaptureClient, MissingDependency
 from .vad import VadConfig
@@ -47,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(args: argparse.Namespace) -> int:
-    session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    session_id = args.session_id or new_session_id()
     url = args.url or f"ws://127.0.0.1:8765/v1/sessions/{session_id}/stream"
     device: str | int | None = args.device
     if isinstance(device, str) and device.isdecimal():

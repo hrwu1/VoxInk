@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 import signal
 import subprocess
@@ -23,6 +22,7 @@ from .preflight import (
     run_preflight,
 )
 from voxink_cli.discovery import endpoint_path
+from voxink_core.session_ids import new_session_id
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
 
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.preflight_only:
         return 0
-    session_id = args.session_id or datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    session_id = args.session_id or new_session_id()
     diagnostics = DiagnosticLog(report.log_root)
     supervisor = HelperSupervisor(
         HelperConfig(

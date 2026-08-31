@@ -286,10 +286,12 @@ Optional or extensible properties:
 
 ### 9.1 Directory structure
 
-One logical session gets one directory:
+One logical session gets one directory. Automatically generated session IDs use
+local wall-clock time in the stable, filesystem-safe format
+`YYYY-MM-DD_HH-MM-SS-ffffff`:
 
 ```text
-2026-08-25_14-30-00/
+2026-08-25_14-30-00-123456/
 ├── transcript-part-001.md
 ├── transcript-part-002.md
 ├── microphone-part-001.wav    # only when enabled
@@ -297,7 +299,30 @@ One logical session gets one directory:
 └── combined-part-001.wav      # only when enabled
 ```
 
-File names and audio formats are provisional.
+The timestamp uses six fractional-second digits. Every capture entry point must
+generate the same form when the caller does not supply a session ID. Explicit,
+path-safe session IDs remain valid. Existing session directories are never
+renamed. ISO 8601 remains appropriate for timestamps stored inside metadata and
+diagnostics; this rule applies to the session ID and directory name only.
+
+Transcript and recording part names are stable. Part numbers are zero-padded to
+three digits, start at `001`, increase monotonically, and never overwrite an
+existing part. Matching microphone, system, and combined audio part numbers are
+time-aligned. Transcript parts rotate independently and must not be assumed to
+cover the same interval as an audio part with the same number. Audio formats
+remain provisional.
+
+Standardization goal and scope:
+
+- Keep new session directories predictable across the service, developer
+  launcher, standalone Python capture, and native Swift capture.
+- Keep one shared Python generator in `voxink_core`; the Swift client mirrors
+  the same cross-language contract.
+- Preserve caller-provided session IDs and all existing artifact directories.
+
+Completion requires deterministic formatter tests in Python and Swift, a scan
+showing no capture entry point retains a legacy timestamp formatter, and the
+applicable Python and Swift test suites passing.
 
 ### 9.2 Rotation
 

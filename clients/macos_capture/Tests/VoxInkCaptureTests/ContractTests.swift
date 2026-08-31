@@ -2,6 +2,54 @@ import AVFoundation
 import XCTest
 @testable import VoxInkCapture
 
+final class SessionIdentifierTests: XCTestCase {
+    func testCanonicalLocalFormatUsesSixFractionalDigits() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -4 * 60 * 60))
+        let date = try XCTUnwrap(
+            calendar.date(
+                from: DateComponents(
+                    year: 2026,
+                    month: 8,
+                    day: 31,
+                    hour: 6,
+                    minute: 31,
+                    second: 3,
+                    nanosecond: 931_042_000
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            SessionIdentifier.make(at: date, timeZone: calendar.timeZone),
+            "2026-08-31_06-31-03-931042"
+        )
+    }
+
+    func testFractionalRoundingCarriesIntoTheNextSecond() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let date = try XCTUnwrap(
+            calendar.date(
+                from: DateComponents(
+                    year: 2026,
+                    month: 12,
+                    day: 31,
+                    hour: 23,
+                    minute: 59,
+                    second: 59,
+                    nanosecond: 999_999_900
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            SessionIdentifier.make(at: date, timeZone: calendar.timeZone),
+            "2027-01-01_00-00-00-000000"
+        )
+    }
+}
+
 final class ContractTests: XCTestCase {
     func testTranscriptWireEventMapsToCaption() throws {
         let json = Data(#"{"segment_id":"seg-1","source":"system","text":"hello","start_ms":10,"end_ms":30,"is_final":true}"#.utf8)
