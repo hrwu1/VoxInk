@@ -30,7 +30,6 @@ from voxink_cli.envelope import (
     EXIT_NOT_FOUND,
     EXIT_NOT_READY,
     EXIT_OK,
-    EXIT_UNAVAILABLE,
     SCHEMA_VERSION,
     ErrorCode,
 )
@@ -347,12 +346,26 @@ class PublicCommandLineTests(unittest.TestCase):
         self.assertNotIn("--system-all", command)
         self.assertNotIn("--retain-audio", command)
 
-    def test_microphone_only_capture_reports_the_capability_gap(self) -> None:
-        code, error = self._error("capture", "start", "--source", "microphone")
+    def test_microphone_only_capture_starts_without_a_system_stream(self) -> None:
+        process = self._fake_capture_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned:
+            started = self._ok("capture", "start", "--source", "microphone")["data"]
+            command = spawned.call_args.args[0]
 
-        self.assertEqual(EXIT_UNAVAILABLE, code)
-        self.assertEqual(ErrorCode.CAPTURE_UNAVAILABLE, error["code"])
-        self.assertIn("voxink-dev", error["message"])
+        self.assertEqual("recording", started["state"])
+        self.assertEqual(["microphone"], started["sources"])
+        self.assertIn("--mic", command)
+        self.assertNotIn("--system-all", command)
+        self.assertNotIn("--app", command)
+
+    def test_system_only_capture_asks_for_no_microphone(self) -> None:
+        process = self._fake_capture_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned:
+            self._ok("capture", "start", "--source", "system")
+            command = spawned.call_args.args[0]
+
+        self.assertIn("--system-all", command)
+        self.assertNotIn("--mic", command)
 
     def test_selected_applications_without_a_bundle_identifier_is_invalid(self) -> None:
         code, error = self._error("capture", "start", "--source", "applications")

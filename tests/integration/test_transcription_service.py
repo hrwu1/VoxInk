@@ -318,6 +318,91 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual("ready", stopped.json()["state"])
                 process.send_signal.assert_called_with(signal.SIGINT)
 
+    def test_capture_start_treats_every_source_combination_alike(self) -> None:
+        """One rule: each requested source adds its flag, and nothing else."""
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        headers = {"Authorization": "Bearer ui-secret"}
+        cases = (
+            (["microphone"], [], {"--mic"}, {"--system-all", "--app"}),
+            (["system"], [], {"--system-all"}, {"--mic", "--app"}),
+            (["microphone", "system"], [], {"--mic", "--system-all"}, {"--app"}),
+            (
+                ["microphone", "system"],
+                ["com.apple.Safari"],
+                {"--mic", "--app", "com.apple.Safari"},
+                {"--system-all"},
+            ),
+        )
+        for sources, applications, expected, forbidden in cases:
+            with self.subTest(sources=sources, applications=applications):
+                # A fresh application per case: one runtime tracks one native
+                # process, and these never exit.
+                app = create_app(
+                    ServiceSettings(
+                        output_root=self.output_root,
+                        auth_secret="ui-secret",
+                        native_capture_path=executable,
+                    ),
+                    provider=self.provider,
+                )
+                process = MagicMock()
+                process.pid = 1234
+                process.returncode = 0
+                process.stderr = None
+                process.poll.return_value = None
+                with patch(
+                    "services.transcription.app.subprocess.Popen", return_value=process
+                ) as spawned:
+                    with TestClient(app) as client:
+                        started = client.post(
+                            "/v1/ui/capture/start",
+                            headers=headers,
+                            json={
+                                "sources": sources,
+                                "applications": applications,
+                                "retain_audio": False,
+                            },
+                        )
+                        self.assertEqual(200, started.status_code, started.text)
+                        command = spawned.call_args.args[0]
+                self.assertTrue(expected <= set(command), f"{expected} not in {command}")
+                self.assertFalse(forbidden & set(command), f"{forbidden} in {command}")
+
+    def test_capture_start_rejects_no_source_and_applications_without_system(self) -> None:
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="ui-secret",
+                native_capture_path=executable,
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with TestClient(app) as client:
+            empty = client.post(
+                "/v1/ui/capture/start",
+                headers=headers,
+                json={"sources": [], "applications": [], "retain_audio": False},
+            )
+            orphaned = client.post(
+                "/v1/ui/capture/start",
+                headers=headers,
+                json={
+                    "sources": ["microphone"],
+                    "applications": ["com.apple.Safari"],
+                    "retain_audio": False,
+                },
+            )
+
+        self.assertEqual(422, empty.status_code)
+        self.assertEqual(422, orphaned.status_code)
+        self.assertIn("system source", orphaned.json()["detail"])
+
     def test_native_application_catalog_is_parsed_for_the_ui(self) -> None:
         executable = Path(self.temporary.name) / "voxink-capture"
         executable.touch()

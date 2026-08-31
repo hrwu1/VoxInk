@@ -82,7 +82,7 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
         "model": health.get("model"),
         "capture_modes": capture.get("modes", []),
         "features": {
-            "capture.microphone": {"supported": True, "available": True, "permitted": True},
+            "capture.microphone": {"supported": True, "available": native, "permitted": native},
             "capture.system": {"supported": True, "available": native, "permitted": native},
             "capture.applications": {"supported": True, "available": native, "permitted": native},
             "sessions.read": {"supported": True, "available": True, "permitted": True},
@@ -112,8 +112,8 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
     ]
     if not native:
         warnings.append(
-            "Native capture is unavailable, so system and application capture "
-            "cannot start. Build it with: ./scripts/build-macos-capture"
+            "Native capture is unavailable, so no capture mode can start. "
+            "Build it with: ./scripts/build-macos-capture"
         )
     return Result(data, tuple(warnings), "\n".join(lines))
 
@@ -250,15 +250,6 @@ def _capture_start(args: argparse.Namespace, client: ControlClient) -> Result:
         raise Failure(
             ErrorCode.INVALID_REQUEST,
             "choose all system audio or selected applications, not both",
-        )
-    if sources == ["microphone"]:
-        # The control plane starts native capture only, and native capture
-        # always carries a system stream. A microphone-only session is a real
-        # capability gap, not a rejected request, so it names its own code.
-        raise Failure(
-            ErrorCode.CAPTURE_UNAVAILABLE,
-            "Microphone-only capture is not available from the CLI yet; "
-            "combine it with --source system, or use ./scripts/voxink-dev.",
         )
     started = client.start_capture(
         sources=["system" if source == "applications" else source for source in sources],

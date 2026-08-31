@@ -12,7 +12,7 @@ export default function Home() {
   const recorder = useVoxInkRecorder();
   const vocabulary = useVocabulary(recorder.authorizedFetch, recorder.isLive);
   const [tab, setTab] = useState<Tab>('record');
-  const { state, elapsed, captions, droppedFrames, message, isLive } = recorder;
+  const { state, elapsed, captions, message, isLive } = recorder;
   const choosingApplications = recorder.mode === 'applications' || recorder.mode === 'microphone_applications';
   const selectionLocked = recorder.modelSwitching || !['ready', 'failed'].includes(state);
   const selectedModel = recorder.models.find((model) => model.id === recorder.activeModel);
@@ -214,7 +214,6 @@ export default function Home() {
               )}
             </div>
             <footer className="caption-footer">
-              <span><i /> {droppedFrames} dropped {droppedFrames === 1 ? 'frame' : 'frames'}</span>
               <span>{message}</span>
             </footer>
           </aside>

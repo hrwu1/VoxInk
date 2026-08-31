@@ -59,8 +59,10 @@ launching Terminal closes the helper and finalizes open transcript files.
 Finalized transcripts default to `~/Documents/VoxInk/`.
 
 The browser's **Capture mode** menu supports microphone, all system audio,
-selected running applications, and both microphone/system combinations. Build
-the native helper once with `./scripts/build-macos-capture` to enable every mode.
+selected running applications, and both microphone/system combinations. Every
+mode records through the native helper, so build it once with
+`./scripts/build-macos-capture` before recording.
+
 For selected-application capture, open the target app, choose it from the list,
 and press **Refresh** if it was opened after VoxInk. Start, pause, resume, and
 stop work from the same browser controls for every mode.
@@ -282,9 +284,6 @@ that reconnects with `--after` resumes without replaying or skipping events.
 
 ### Known limits of this slice
 
-- Microphone-only capture is not startable from the CLI yet; the control plane
-  starts native capture, which always carries a system stream. Combine it with
-  `--source system`, or use `./scripts/voxink-dev --terminal`.
 - `sessions list` reports only sessions the running helper holds open. Completed
   and interrupted sessions are discoverable through `transcripts list` until the
   durable session registry lands.
@@ -293,6 +292,9 @@ that reconnects with `--after` resumes without replaying or skipping events.
   signed application will issue real grants; no CLI flag will bypass that gate.
 - The `audio`, `config`, `diagnostics`, and `permissions` command groups,
   transcript search and export, and derived agent artifacts are deferred.
+- `capture start` reaches the control plane through `/v1/ui/capture/*`, a
+  UI-namespaced route. Extracting a domain capture route is deferred with the
+  durable session registry (`PROJECT_SPEC.md` section 14.2).
 
 ## Direct service debugging
 

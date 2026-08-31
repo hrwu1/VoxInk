@@ -36,6 +36,8 @@ The repository currently provides:
 - A one-command browser workflow through `./scripts/voxink-dev`.
 - A public `./scripts/voxink` command for scripts and agents, speaking a
   versioned JSON envelope over the helper's local control API.
+- One capture path: every browser and CLI mode records through the native
+  helper, with `clients/python_capture` kept as an independent diagnostic.
 - Local-only Qwen transcription over authenticated loopback HTTP/WebSocket APIs.
 - Microphone, all-system, selected-application, and combined capture modes.
 - Browser controls for start, pause, resume, and stop.
@@ -131,9 +133,40 @@ Deferred from section 14.3: the `audio`, `config`, `diagnostics`, and
 Scoped grants are not enforced until the signed application can issue them; see
 `.claude/plans/public-cli.md` for the reviewed deviations.
 
+### Completed slice: Unified microphone capture
+
+Goal: give every surface one way to reach the microphone, replacing three
+microphone implementations and two ways to control a capture client.
+
+Steps:
+
+- [x] Let the control plane start microphone-only native capture.
+- [x] Route every browser capture mode through that one path.
+- [x] Drop the CLI's microphone-only special case.
+- [x] Update the Python, service, and CLI tests for one capture path.
+
+Completion criteria:
+
+- Microphone-only capture starts from both the browser and the CLI.
+- No `getUserMedia`, `AudioContext`, or client-side resampling remains in the
+  frontend.
+- `capabilities` no longer advertises a mode that `capture start` refuses.
+- Python and frontend checks pass, verified in the real application.
+
+Result: completed. Verified by driving the real application: microphone-only
+browser capture transcribed live speech end to end, pause/resume/stop worked,
+and all five capture modes produced the correct helper arguments under one
+rule. The public CLI drove the same lifecycle against the same helper.
+
+The `/v1/ui/capture/*` route is still UI-namespaced; extracting a domain
+capture route is deferred with the durable session registry below.
+
 ### P0: Target-Mac capture acceptance
 
 - Repeat the native system-audio test with known audible applications.
+- Microphone capture is now confirmed working end to end through the native
+  helper, so it is the control case: a failure that affects both sources is
+  not ScreenCaptureKit-specific.
 - Confirm microphone, all-system, selected-application, and combined sessions.
 - Record permission state, audio delivery, source labels, and saved output.
 - If ScreenCaptureKit still supplies silence, isolate the OS/framework cause or

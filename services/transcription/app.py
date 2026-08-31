@@ -393,10 +393,14 @@ def create_app(
             raise HTTPException(status_code=409, detail="a native capture session is already running")
         sources = tuple(dict.fromkeys(options.sources))
         applications = tuple(dict.fromkeys(item.strip() for item in options.applications if item.strip()))
-        if Source.SYSTEM not in sources:
-            raise HTTPException(status_code=422, detail="native UI capture must include system audio")
+        if not sources:
+            raise HTTPException(status_code=422, detail="capture needs at least one source")
         if any(source not in {Source.MICROPHONE, Source.SYSTEM} for source in sources):
             raise HTTPException(status_code=422, detail="unsupported native capture source")
+        if applications and Source.SYSTEM not in sources:
+            raise HTTPException(
+                status_code=422, detail="selected applications require the system source"
+            )
         if options.applications and not applications:
             raise HTTPException(status_code=422, detail="selected-application capture needs an application")
         session_id = _new_session_id()
@@ -412,11 +416,14 @@ def create_app(
             command.append("--retain-audio")
         if Source.MICROPHONE in sources:
             command.append("--mic")
-        if applications:
-            for bundle_id in applications:
-                command.extend(("--app", bundle_id))
-        else:
-            command.append("--system-all")
+        if Source.SYSTEM in sources:
+            # Selected applications narrow the system source; without them the
+            # system source means every application.
+            if applications:
+                for bundle_id in applications:
+                    command.extend(("--app", bundle_id))
+            else:
+                command.append("--system-all")
         try:
             process = subprocess.Popen(
                 command,
