@@ -37,7 +37,11 @@
   .states { display: grid; gap: 14px; }
   .state-row { display: grid; grid-template-columns: 92px 1fr; gap: 18px; align-items: center; }
   .state-name { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; text-align: right; padding-top: 2px; }
-  .frame { padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: 0 4px 14px rgba(36,35,29,.04); }
+  /* At the real 1220px workspace the recorder and session cards are about
+     575px wide inside their padding. Frames are held to that so a control is
+     judged at the width it will actually ship at, not stretched across a
+     browser window it will never occupy. */
+  .frame { max-width: 615px; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: 0 4px 14px rgba(36,35,29,.04); }
   .frame.panel { background: #f7f6f0; padding: 0; overflow: hidden; }
 
   /* A — recorder row, mirroring .audio-retention-control */
