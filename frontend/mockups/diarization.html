@@ -100,52 +100,45 @@
     than after it ships.
   </p>
   <div class="banner">
-    <b>Mockup only.</b> This file is outside every build root and imports nothing from the app.
-    No production component has been touched. Pick one and I'll implement it.
+    <b>Approved and implemented: A's toggle, B's status.</b> The recorder card carries a single
+    on/off control and nothing else; every processing state lives in the transcript header instead.
+    A's running / ready / failed / stale rows below are kept as the record of what was considered
+    and are <em>not</em> what shipped. C was not taken.
   </div>
 </header>
 
-<h2>Alternative A — a control in the recorder card <span class="tag">most discoverable</span></h2>
+<h2>Alternative A — a control in the recorder card <span class="tag">shipped: toggle only</span></h2>
 <p class="rationale">
   A row directly under <b>Save audio</b>, mirroring that control exactly, so the dependency between
   them is visible: diarization needs retained audio, and here the two sit together. It is the only
   option where a user who has never heard of the feature will find it. The cost is permanent
   vertical space in the recorder, spent on something that does nothing until after Stop.
+  <br><b>What shipped:</b> only the first two rows — the off state, and the disabled state when
+  <b>Save audio</b> is off. Switching audio off also switches this off, rather than leaving a
+  control enabled that silently cannot run. The remaining rows moved to B.
 </p>
 <div class="states">
   <div class="state-row"><div class="state-name">off</div><div class="frame">
     <label class="speaker-row">
-      <span><strong>Identify speakers</strong><small>Label who spoke, after recording stops · needs saved audio</small></span>
+      <span><strong>Identify speakers</strong><small>Label who spoke, after recording stops</small></span>
       <input type="checkbox" />
     </label>
   </div></div>
-  <div class="state-row"><div class="state-name">running</div><div class="frame">
-    <label class="speaker-row on">
-      <span><strong>Identify speakers</strong><small>Finding speakers… the transcript is already saved</small></span>
-      <input type="checkbox" checked disabled />
+  <div class="state-row"><div class="state-name">no audio</div><div class="frame">
+    <label class="speaker-row" style="opacity:.58">
+      <span><strong>Identify speakers</strong><small>Needs saved audio — turn on Save audio first</small></span>
+      <input type="checkbox" disabled />
     </label>
   </div></div>
-  <div class="state-row"><div class="state-name">ready</div><div class="frame">
-    <div class="speaker-row on">
-      <span><strong>Identify speakers</strong><small>3 speakers found · 12 of 14 lines labelled</small></span>
-      <button class="row-action">View</button>
-    </div>
-  </div></div>
-  <div class="state-row"><div class="state-name">failed</div><div class="frame">
-    <div class="speaker-row warn">
-      <span><strong>Identify speakers</strong><small>Speaker processing failed. Your transcript is unaffected.</small></span>
-      <button class="row-action">Try again</button>
-    </div>
-  </div></div>
-  <div class="state-row"><div class="state-name">stale</div><div class="frame">
-    <div class="speaker-row warn">
-      <span><strong>Identify speakers</strong><small>The transcript changed since speakers were found</small></span>
-      <button class="row-action">Refresh</button>
-    </div>
+  <div class="state-row"><div class="state-name">not built</div><div class="frame">
+    <p class="empty-note">
+      The running, ready, failed, and stale rows were considered here and rejected —
+      status lives in B instead, so the recorder keeps exactly one control.
+    </p>
   </div></div>
 </div>
 
-<h2>Alternative B — a chip in the transcript header <span class="tag">least intrusive</span></h2>
+<h2>Alternative B — a chip in the transcript header <span class="tag">shipped: all states</span></h2>
 <p class="rationale">
   A chip beside the existing language chip, plus speaker labels on the caption lines themselves.
   This puts the information where the answer actually is — next to the words — and costs no layout
@@ -184,7 +177,7 @@
   </div></div>
 </div>
 
-<h2>Alternative C — a notice strip below the transcript <span class="tag">clearest failures</span></h2>
+<h2>Alternative C — a notice strip below the transcript <span class="tag">not taken</span></h2>
 <p class="rationale">
   A strip that appears only when there is something to say, and disappears when there is not. It has
   the most room for the states that need an explanation and an action, and it never competes with the

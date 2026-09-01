@@ -132,6 +132,19 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
 .panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 28px 30px 22px; border-bottom: 1px solid var(--line); }
 .panel-heading h2 { margin: 0; font-size: 23px; letter-spacing: -.04em; }
 .language-chip { padding: 7px 9px; border-radius: 8px; background: #e9e8e0; color: #64675e; font-size: 10px; font-weight: 650; }
+.panel-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.speaker-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(250,249,244,.72); color: #55594f; font-size: 10px; font-weight: 650; white-space: nowrap; }
+.speaker-chip i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #b9bbb2; }
+.speaker-chip.on i { background: #5b9270; box-shadow: 0 0 0 3px rgba(91,146,112,.13); }
+.speaker-chip.busy i { background: var(--orange); box-shadow: 0 0 0 3px rgba(238,93,50,.13); animation: speaker-pulse 1.5s ease-in-out infinite; }
+.speaker-chip.warn { border-color: rgba(211,154,66,.5); background: rgba(211,154,66,.09); color: #7a5a22; }
+.speaker-chip.warn i { background: #d39a42; }
+@keyframes speaker-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
+@media (prefers-reduced-motion: reduce) { .speaker-chip.busy i { animation: none; } }
+/* Speaker identification depends on retained audio, so it reads as a
+   continuation of the control above it rather than an independent choice. */
+.speaker-control { margin-top: 8px; }
+.speaker-control:has(input:disabled) { opacity: .58; }
 .caption-list { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-behavior: smooth; padding: 8px 30px; outline: none; }
 .caption-list:focus-visible { box-shadow: inset 0 0 0 2px rgba(238, 93, 50, .34); }
 .caption-list::-webkit-scrollbar { width: 8px; }

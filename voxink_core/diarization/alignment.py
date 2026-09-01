@@ -62,6 +62,12 @@ class SegmentLabel:
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "canonical_ref": self.block.canonical_ref(),
+            # Session-relative times are repeated here so a consumer can place a
+            # segment on the timeline -- and match it to a caption it is already
+            # showing -- without parsing the canonical transcript to find out
+            # when block 7 of part 2 happened.
+            "start_ms": self.block.start_ms,
+            "end_ms": self.block.end_ms,
             "speaker_id": self.speaker_id,
             "speaker_coverage": round(self.speaker_coverage, 4),
             "segment_coverage": round(self.segment_coverage, 4),

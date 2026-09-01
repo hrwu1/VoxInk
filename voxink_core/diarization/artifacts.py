@@ -209,6 +209,8 @@ def validate_document(document: Mapping[str, Any]) -> None:
             raise ValueError("every segment must reference a canonical block")
         if not 0.0 <= segment["speaker_coverage"] <= 1.0:
             raise ValueError("speaker_coverage must be a ratio within [0, 1]")
+        if "start_ms" in segment and not 0 <= segment["start_ms"] <= segment["end_ms"]:
+            raise ValueError("segment times must satisfy 0 <= start_ms <= end_ms")
     _reject_sensitive_keys(document)
 
 

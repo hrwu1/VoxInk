@@ -1,12 +1,61 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { CaptureMode, useVoxInkRecorder } from './use-voxink-recorder';
+import { Caption, CaptureMode, Diarization, useVoxInkRecorder } from './use-voxink-recorder';
 import { useVocabulary } from './use-vocabulary';
 import { VocabularyPanel } from './vocabulary-panel';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
 type Tab = 'record' | 'vocabulary';
+
+/** Render an anonymous session-local speaker id as something readable.
+ *
+ * `MIC_SPEAKER_00` becomes `Speaker 1`. The raw identifier is deliberately not
+ * shown: it looks like a durable identity, and it is not one — the numbering
+ * means nothing outside this session and is never matched to a person.
+ */
+function speakerName(speakerId: string): string {
+  const index = Number(speakerId.slice(speakerId.lastIndexOf('_') + 1));
+  return Number.isFinite(index) ? `Speaker ${index + 1}` : speakerId;
+}
+
+/** The label for one caption, or null to leave the source tag in place. */
+function speakerFor(diarization: Diarization, caption: Caption): string | null {
+  if (diarization.state !== 'ready' || caption.source === 'system') return null;
+  const middle = caption.startMs + (caption.endMs - caption.startMs) / 2;
+  const segment = diarization.segments.find((item) => item.startMs === caption.startMs)
+    ?? diarization.segments.find((item) => item.startMs <= middle && middle < item.endMs);
+  if (!segment) return null;
+  // A segment with no speaker is a deliberate outcome, not a gap: reconciliation
+  // saw a tie or too little speech and refused to guess. Saying so is better
+  // than showing a blank the reader has to interpret.
+  return segment.speakerId ? speakerName(segment.speakerId) : 'Unclear';
+}
+
+function SpeakerChip({ diarization }: { diarization: Diarization }) {
+  if (diarization.state === 'disabled') return null;
+  if (diarization.state === 'waiting_for_stop') {
+    return <span className="speaker-chip"><i />Speakers after stop</span>;
+  }
+  if (diarization.state === 'processing') {
+    return <span className="speaker-chip busy"><i />Finding speakers…</span>;
+  }
+  if (diarization.state === 'ready') {
+    const count = diarization.speakerCount;
+    return (
+      <span className="speaker-chip on">
+        <i />{count} {count === 1 ? 'speaker' : 'speakers'}
+        {diarization.labeledSegments < diarization.totalSegments
+          && ` · ${diarization.labeledSegments}/${diarization.totalSegments} labelled`}
+      </span>
+    );
+  }
+  return (
+    <span className="speaker-chip warn">
+      <i />{diarization.state === 'stale' ? 'Speakers out of date' : 'Speakers unavailable'}
+    </span>
+  );
+}
 
 export default function Home() {
   const recorder = useVoxInkRecorder();
@@ -140,6 +189,25 @@ export default function Home() {
               />
             </label>
 
+            {recorder.diarizationAvailable && (
+              <label className="audio-retention-control speaker-control">
+                <span>
+                  <strong>Identify speakers</strong>
+                  <small>
+                    {recorder.retainAudio
+                      ? 'Label who spoke, after recording stops'
+                      : 'Needs saved audio — turn on Save audio first'}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={recorder.identifySpeakers}
+                  disabled={selectionLocked || !recorder.retainAudio}
+                  onChange={(event) => recorder.setIdentifySpeakers(event.target.checked)}
+                />
+              </label>
+            )}
+
             {choosingApplications && (
               <div className="application-picker">
                 <div className="application-picker-heading">
@@ -191,7 +259,10 @@ export default function Home() {
           <aside className="session-card">
             <div className="panel-heading">
               <div><p className="eyebrow">Live transcript</p><h2>Captions</h2></div>
-              <span className="language-chip">Auto · EN / 中文</span>
+              <div className="panel-chips">
+                <SpeakerChip diarization={recorder.diarization} />
+                <span className="language-chip">Auto · EN / 中文</span>
+              </div>
             </div>
             <div
               ref={captionListRef}
@@ -203,7 +274,13 @@ export default function Home() {
               {captions.length ? captions.map((caption) => (
                 <article className="caption-line" key={caption.id}>
                   <time>{formatTime(caption.startMs)}</time>
-                  <div><span className="speaker-label">{caption.source === 'system' ? 'SYSTEM / APP' : 'MIC'}</span><p>{caption.text}</p></div>
+                  <div>
+                    <span className="speaker-label">
+                      {speakerFor(recorder.diarization, caption)
+                        ?? (caption.source === 'system' ? 'SYSTEM / APP' : 'MIC')}
+                    </span>
+                    <p>{caption.text}</p>
+                  </div>
                 </article>
               )) : (
                 <div className="empty-captions">

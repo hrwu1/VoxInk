@@ -176,6 +176,75 @@ class DiarizationServiceTests(unittest.TestCase):
         response = self.client.post(f"/v1/sessions/{SESSION_ID}/unknown-action")
         self.assertEqual(response.status_code, 404)
 
+    # -- segments for the caption view ---------------------------------------
+
+    def test_ready_status_carries_segment_times_and_speakers(self):
+        """The UI matches these to captions it already shows, by time."""
+        self.prepare_finished_session()
+        self.client.post(f"/v1/sessions/{SESSION_ID}/diarization")
+        self.runtime.diarization.wait(SESSION_ID, timeout=10)
+        status = self.client.get(f"/v1/sessions/{SESSION_ID}/diarization").json()
+        segments = status["segments"]
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["start_ms"], 0)
+        self.assertEqual(segments[0]["end_ms"], 1000)
+        self.assertEqual(segments[0]["speaker_id"], "MIC_SPEAKER_00")
+
+    def test_status_segments_never_carry_transcript_text(self):
+        self.prepare_finished_session()
+        self.client.post(f"/v1/sessions/{SESSION_ID}/diarization")
+        self.runtime.diarization.wait(SESSION_ID, timeout=10)
+        status = self.client.get(f"/v1/sessions/{SESSION_ID}/diarization").json()
+        for segment in status["segments"]:
+            self.assertEqual(
+                set(segment), {"start_ms", "end_ms", "speaker_id", "overlap_detected"}
+            )
+
+    # -- the UI capture opt-in -----------------------------------------------
+
+    def test_native_capture_records_the_diarization_request(self):
+        self.runtime.settings.native_capture_path
+        self.runtime.pending_diarization.clear()
+        # Exercised directly: starting real native capture needs the Swift
+        # helper and a microphone permission prompt.
+        self.runtime.pending_diarization.add(SESSION_ID)
+        from services.transcription.app import _diarization_requested
+
+        self.assertTrue(
+            _diarization_requested(
+                self.runtime, SESSION_ID, (Source.MICROPHONE,),
+                {"audio_saved": True, "save_separate_audio": True},
+            )
+        )
+
+    def test_the_request_is_dropped_when_retention_cannot_support_it(self):
+        from services.transcription.app import _diarization_requested
+
+        self.runtime.pending_diarization.add(SESSION_ID)
+        for retention in (
+            {"audio_saved": False, "save_separate_audio": True},
+            {"audio_saved": True, "save_separate_audio": False},
+        ):
+            with self.subTest(**retention):
+                # Dropped rather than honoured: SessionConfig would reject the
+                # whole session, failing a recording over an optional extra.
+                self.assertFalse(
+                    _diarization_requested(
+                        self.runtime, SESSION_ID, (Source.MICROPHONE,), retention
+                    )
+                )
+
+    def test_a_session_that_never_asked_does_not_diarize(self):
+        from services.transcription.app import _diarization_requested
+
+        self.runtime.pending_diarization.clear()
+        self.assertFalse(
+            _diarization_requested(
+                self.runtime, SESSION_ID, (Source.MICROPHONE,),
+                {"audio_saved": True, "save_separate_audio": True},
+            )
+        )
+
     # -- status --------------------------------------------------------------
 
     def test_status_reports_ready_from_disk_and_names_no_filenames_to_guess(self):

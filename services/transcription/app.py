@@ -121,6 +121,7 @@ class NativeCaptureRequest(BaseModel):
     sources: list[Source]
     applications: list[str] = Field(default_factory=list)
     retain_audio: bool = False
+    diarize: bool = False
 
 
 class ModelSelectionRequest(BaseModel):
@@ -197,6 +198,11 @@ class ServiceRuntime:
         self.native_stderr: deque[str] = deque(maxlen=200)
         self.native_stderr_reader: threading.Thread | None = None
         self.shutting_down = False
+        # Sessions the UI asked to diarize. The capture helper builds the
+        # session from its own stream message and knows nothing about speakers,
+        # so the request is remembered here and applied when that session is
+        # created, rather than widening the native capture protocol.
+        self.pending_diarization: set[str] = set()
 
 
 @dataclass
@@ -462,6 +468,12 @@ def create_app(
             raise HTTPException(status_code=503, detail=f"cannot start native capture: {exc}") from exc
         runtime.native_process = process
         runtime.native_session_id = session_id
+        runtime.pending_diarization.discard(session_id)
+        if options.diarize and options.retain_audio and Source.MICROPHONE in sources:
+            # Silently ignored without retained microphone audio: the UI already
+            # prevents that combination, and refusing the whole capture over an
+            # optional post-processing step would be a poor trade.
+            runtime.pending_diarization.add(session_id)
         runtime.native_capture_state = "recording"
         runtime.native_error = None
         runtime.native_stderr.clear()
@@ -1244,6 +1256,27 @@ def _dispatch_diarization(runtime: ServiceRuntime, session: Session) -> None:
         pass
 
 
+def _diarization_requested(
+    runtime: ServiceRuntime,
+    session_id: str,
+    sources: tuple[Source, ...],
+    retention: dict[str, bool],
+) -> bool:
+    """Whether this session should diarize, given what it is actually keeping.
+
+    The flag is dropped rather than honoured when the retention the capture
+    client negotiated cannot support it. `SessionConfig` would otherwise reject
+    the whole session, which would fail a recording over an optional extra.
+    """
+    if session_id not in runtime.pending_diarization:
+        return False
+    return bool(
+        retention.get("audio_saved")
+        and retention.get("save_separate_audio", True)
+        and Source.MICROPHONE in sources
+    )
+
+
 def _session_directory(runtime: ServiceRuntime, session_id: str) -> Path:
     try:
         config = runtime.sessions.get(session_id).config
@@ -1449,6 +1482,7 @@ def _ensure_started_session(
     try:
         session = runtime.sessions.get(session_id)
     except KeyError:
+        settings = dict(retention or {})
         session = runtime.sessions.create(
             SessionConfig(
                 session_id=session_id,
@@ -1456,7 +1490,8 @@ def _ensure_started_session(
                 applications=applications,
                 provider=runtime.provider.name,
                 model=runtime.active_model_id,
-                **(retention or {}),
+                diarize=_diarization_requested(runtime, session_id, sources or (source,), settings),
+                **settings,
             )
         )
     if source not in session.config.sources:

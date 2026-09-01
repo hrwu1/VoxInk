@@ -20,6 +20,7 @@ export type LocalModel = {
 type LaunchConfig = { origin: string; token: string; retainAudio: boolean };
 type NativeStatus = {
   state: 'ready' | 'recording' | 'paused' | 'stopping' | 'failed';
+  session_id?: string | null;
   events: Array<{ segment_id: string; source: string; text: string; start_ms: number; end_ms: number; is_final: boolean }>;
   next_cursor: number;
   exit_code: number | null;
@@ -27,7 +28,37 @@ type NativeStatus = {
   retention?: { retaining: boolean; retained_bytes: number; stopped_reason: string | null };
 };
 
+export type DiarizationState =
+  | 'disabled' | 'waiting_for_stop' | 'processing' | 'ready' | 'failed' | 'stale';
+export type SpeakerSegment = {
+  startMs: number; endMs: number; speakerId: string | null; overlapDetected: boolean;
+};
+export type Diarization = {
+  state: DiarizationState;
+  speakerCount: number;
+  labeledSegments: number;
+  totalSegments: number;
+  segments: SpeakerSegment[];
+};
+
+type DiarizationStatus = {
+  state: DiarizationState;
+  speaker_count: number;
+  labeled_segments: number;
+  total_segments: number;
+  segments?: Array<{
+    start_ms: number; end_ms: number; speaker_id: string | null; overlap_detected: boolean;
+  }>;
+};
+
+const IDLE_DIARIZATION: Diarization = {
+  state: 'disabled', speakerCount: 0, labeledSegments: 0, totalSegments: 0, segments: [],
+};
+
 const MAX_VISIBLE_CAPTIONS = 250;
+// Diarization runs for minutes, not milliseconds, so it is polled far more
+// slowly than the caption feed. Nothing waits on it.
+const DIARIZATION_POLL_MS = 3000;
 
 /** Map a capture mode to the source set the control plane understands. */
 function captureSources(mode: CaptureMode): string[] {
@@ -42,6 +73,10 @@ export function useVoxInkRecorder() {
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [launch, setLaunch] = useState<LaunchConfig | null>(null);
   const [retainAudio, setRetainAudioState] = useState(true);
+  const [identifySpeakers, setIdentifySpeakersState] = useState(false);
+  const [diarization, setDiarization] = useState<Diarization>(IDLE_DIARIZATION);
+  const [diarizationAvailable, setDiarizationAvailable] = useState(false);
+  const diarizedSessionId = useRef<string | null>(null);
   const [message, setMessage] = useState('Open through voxink-dev to connect');
   const [mode, setModeState] = useState<CaptureMode>('microphone');
   const [nativeAvailable, setNativeAvailable] = useState(false);
@@ -249,10 +284,64 @@ export function useVoxInkRecorder() {
     return () => window.clearInterval(timer);
   }, [active, applyNativeStatus, authorizedFetch, launch]);
 
+  // Ask once whether diarization can run here. The weights are a separate
+  // licence-gated download, so "supported" and "installed" are different
+  // questions and the control should not offer what cannot happen.
+  useEffect(() => {
+    if (!launch) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await authorizedFetch('/v1/diarization');
+        const capability = await response.json() as { available?: boolean };
+        if (!cancelled) setDiarizationAvailable(Boolean(capability.available));
+      } catch {
+        if (!cancelled) setDiarizationAvailable(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authorizedFetch, launch]);
+
+  // Poll only after Stop, and only until the job settles. Nothing here blocks
+  // the transcript, which is already complete and on screen.
+  useEffect(() => {
+    const sessionId = diarizedSessionId.current;
+    if (!launch || !sessionId) return;
+    if (state !== 'ready' && state !== 'failed') return;
+    if (diarization.state === 'ready' || diarization.state === 'failed') return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
+        const status = await response.json() as DiarizationStatus;
+        if (cancelled) return;
+        setDiarization({
+          state: status.state,
+          speakerCount: status.speaker_count ?? 0,
+          labeledSegments: status.labeled_segments ?? 0,
+          totalSegments: status.total_segments ?? 0,
+          segments: (status.segments ?? []).map((item) => ({
+            startMs: item.start_ms, endMs: item.end_ms,
+            speakerId: item.speaker_id, overlapDetected: item.overlap_detected,
+          })),
+        });
+      } catch {
+        // A failed poll is not a failed job; the next tick tries again.
+      }
+    };
+    const timer = window.setInterval(() => void poll(), DIARIZATION_POLL_MS);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [authorizedFetch, diarization.state, launch, state]);
+
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
     if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
     setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
+    // Speakers are only findable in audio that was kept, so the two travel
+    // together. The control is disabled without retention, and this makes the
+    // request agree with what the UI already shows.
+    const wantsSpeakers = identifySpeakers && retainAudio && diarizationAvailable;
     try {
       if ((mode === 'applications' || mode === 'microphone_applications') && selectedApplications.length === 0) throw new Error('Choose at least one running application first');
       setMessage('Starting macOS audio capture…');
@@ -262,14 +351,19 @@ export function useVoxInkRecorder() {
           sources: captureSources(mode),
           applications: mode.endsWith('applications') ? selectedApplications : [],
           retain_audio: retainAudio,
+          diarize: wantsSpeakers,
         }),
       });
       const status = await response.json() as NativeStatus;
       nativeCursor.current = status.next_cursor;
+      diarizedSessionId.current = wantsSpeakers ? status.session_id ?? null : null;
+      setDiarization(wantsSpeakers
+        ? { ...IDLE_DIARIZATION, state: 'waiting_for_stop' }
+        : IDLE_DIARIZATION);
       beginElapsed();
       setActive(true); setState('recording'); setMessage('Listening locally with macOS capture');
     } catch (error) { fail(error); }
-  }, [authorizedFetch, beginElapsed, fail, launch, mode, modelSwitching, resetElapsed, retainAudio, selectedApplications]);
+  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, launch, mode, modelSwitching, resetElapsed, retainAudio, selectedApplications]);
 
   const control = useCallback(async (
     action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
@@ -308,8 +402,21 @@ export function useVoxInkRecorder() {
   const setRetainAudio = useCallback((enabled: boolean) => {
     if (state !== 'ready' && state !== 'failed') return;
     setRetainAudioState(enabled);
+    // Speaker identification reads the retained microphone track, so turning
+    // audio off turns it off too rather than leaving a control switched on
+    // that silently cannot run.
+    if (!enabled) setIdentifySpeakersState(false);
     setMessage(enabled ? 'Audio will be saved locally with the transcript' : 'Audio saving is off for the next session');
   }, [state]);
+
+  const setIdentifySpeakers = useCallback((enabled: boolean) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    if (enabled && !retainAudio) return;
+    setIdentifySpeakersState(enabled);
+    setMessage(enabled
+      ? 'Speakers will be identified after you stop recording'
+      : 'Speaker identification is off for the next session');
+  }, [retainAudio, state]);
 
   const selectModel = useCallback(async (modelId: string) => {
     if (!launch || modelId === activeModel || modelSwitching) return;
@@ -337,6 +444,7 @@ export function useVoxInkRecorder() {
   return {
     state, elapsed, captions, message, isLive: Boolean(launch), mode, setMode,
     retainAudio, setRetainAudio,
+    identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization,
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
     models, activeModel, selectModel, modelSwitching,
     start, pause, resume, stop,

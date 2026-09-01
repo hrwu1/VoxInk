@@ -173,6 +173,19 @@ class DiarizationJobManager:
             ),
         )
         payload = resolved.to_dict()
+        # Times and speakers only -- never transcript text. A caller that is
+        # already displaying captions can match these by time and label them,
+        # which is the whole reason the segment carries its own timestamps.
+        payload["segments"] = [
+            {
+                "start_ms": segment.get("start_ms"),
+                "end_ms": segment.get("end_ms"),
+                "speaker_id": segment.get("speaker_id"),
+                "overlap_detected": segment.get("overlap_detected", False),
+            }
+            for segment in document.get("segments", ())
+            if segment.get("start_ms") is not None
+        ]
         if stale:
             payload["state"] = JobState.STALE.value
             payload["error"] = DiarizationError(

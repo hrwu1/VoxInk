@@ -69,3 +69,6 @@ models/pyannote-speaker-diarization-community-1/
 !models/pyannote-speaker-diarization-community-1/
 models/pyannote-speaker-diarization-community-1/*
 !models/pyannote-speaker-diarization-community-1/voxink-model-manifest.json
+
+# TypeScript incremental build state
+*.tsbuildinfo
