@@ -37,7 +37,7 @@ from .models import (
     DiarizationResult,
     JobState,
 )
-from .pyannote import OFFLINE_ENVIRONMENT
+from .pyannote import OFFLINE_ENVIRONMENT, resolve_device
 from .transcript import file_digest, part_digests, read_blocks
 from .worker import decode_result
 
@@ -93,13 +93,14 @@ class DiarizationJobManager:
         self,
         *,
         model_path: str | Path,
-        device: str = "cpu",
+        device: str = "auto",
         policy: ReconciliationPolicy | None = None,
         min_timeout_seconds: float = 600.0,
         # Measured CPU real-time factor is 0.378, so twice the audio duration
-        # leaves better than fivefold headroom. The budget is deliberately set
-        # against CPU: MPS is roughly eight times faster, and a timeout tuned
-        # to it would kill legitimate work on the default device.
+        # leaves better than fivefold headroom. The budget stays sized against
+        # CPU even though `auto` normally picks MPS: CPU is still the fallback
+        # wherever MPS is unavailable, and a budget tuned to the fast device
+        # would kill legitimate work on the slow one.
         timeout_factor: float = 2.0,
         runner: Runner | None = None,
         enabled: bool = True,
@@ -130,6 +131,9 @@ class DiarizationJobManager:
             "enabled": self.enabled,
             "available": self.enabled and available,
             "device": self.device,
+            # What `auto` actually picks, so a caller is not left guessing
+            # whether the fast path is in play.
+            "resolved_device": resolve_device(self.device),
             "model_id": model.source_model_id if model else None,
             "model_revision": model.revision if model else None,
             "error": detail,

@@ -78,9 +78,10 @@ class ServiceSettings:
     diarization_model_path: Path = (
         PROJECT_ROOT / "models" / "pyannote-speaker-diarization-community-1"
     )
-    # CPU is the correctness baseline; MPS is roughly eight times faster but is
-    # not yet validated on multi-speaker audio.
-    diarization_device: str = "cpu"
+    # "auto" prefers Apple MPS, which matched CPU turn-for-turn on both the
+    # single- and three-speaker benchmarks at roughly nine times the speed, and
+    # falls back to CPU where it is unavailable.
+    diarization_device: str = "auto"
     diarization_enabled: bool = True
 
 

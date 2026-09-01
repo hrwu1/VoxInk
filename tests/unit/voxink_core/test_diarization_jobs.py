@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
+from voxink_core.diarization.pyannote import resolve_device
 from voxink_core.models import Source
 from voxink_core.diarization.artifacts import MARKDOWN_FILENAME, TURNS_FILENAME
 from voxink_core.diarization.jobs import WORKING_DIRECTORY, DiarizationJobManager
@@ -108,7 +111,7 @@ class SuccessTests(JobTestCase):
         payload, timeout = self.calls[0]
         self.assertTrue(payload["audio_path"].endswith("microphone-joined.wav"))
         self.assertEqual(payload["source"], "microphone")
-        self.assertEqual(payload["device"], "cpu")
+        self.assertEqual(payload["device"], "auto")
         self.assertGreaterEqual(timeout, 600.0)
 
     def test_the_timeout_scales_with_a_long_recording(self):
@@ -265,6 +268,31 @@ class CapabilityTests(JobTestCase):
         capability = self.manager(enabled=False).capability()
         self.assertFalse(capability["enabled"])
         self.assertFalse(capability["available"])
+
+    def test_reports_the_device_that_will_actually_be_used(self):
+        capability = self.manager().capability()
+        self.assertEqual(capability["device"], "auto")
+        self.assertIn(capability["resolved_device"], {"cpu", "mps", "cuda"})
+
+    def test_an_explicit_device_is_reported_unchanged(self):
+        capability = self.manager(device="cpu").capability()
+        self.assertEqual(capability["device"], "cpu")
+        self.assertEqual(capability["resolved_device"], "cpu")
+
+
+class DeviceResolutionTests(unittest.TestCase):
+    def test_an_explicit_preference_is_never_overridden(self):
+        self.assertEqual(resolve_device("cpu"), "cpu")
+        self.assertEqual(resolve_device("mps"), "mps")
+        self.assertEqual(resolve_device("cuda"), "cuda")
+
+    def test_auto_resolves_to_a_device_that_exists(self):
+        self.assertIn(resolve_device("auto"), {"cpu", "mps"})
+
+    def test_auto_falls_back_to_cpu_when_probing_fails(self):
+        """An accelerator that cannot be probed must not fail the job."""
+        with mock.patch.dict(sys.modules, {"torch": None}):
+            self.assertEqual(resolve_device("auto"), "cpu")
 
 
 if __name__ == "__main__":

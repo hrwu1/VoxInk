@@ -49,6 +49,26 @@ def apply_offline_environment(environment: dict[str, str] | None = None) -> None
     target.update(OFFLINE_ENVIRONMENT)
 
 
+def resolve_device(preference: str = "auto") -> str:
+    """Turn a device preference into the device that will actually be used.
+
+    `auto` prefers Apple MPS, which ran roughly nine times faster than CPU and
+    produced turn-for-turn identical output on both the single- and
+    three-speaker benchmarks. It falls back to CPU wherever MPS is absent, so
+    the timeout budget stays sized for CPU: the slow device is still reachable.
+    """
+    if preference != "auto":
+        return preference
+    try:
+        import torch  # noqa: PLC0415 - deferred: importing Torch costs seconds
+
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:  # noqa: BLE001 - any probe failure means "use the CPU"
+        return "cpu"
+    return "cpu"
+
+
 apply_offline_environment()
 
 
@@ -57,13 +77,9 @@ class PyannoteCommunityProvider:
 
     name = "pyannote-local"
 
-    def __init__(self, *, device: str = "cpu") -> None:
-        # CPU is the correctness baseline. MPS is roughly eight times faster on
-        # Apple silicon and produced identical turns on the single-speaker
-        # benchmark, but a one-speaker sample never exercises clustering, which
-        # is where float differences would actually change an answer. It stays
-        # opt-in until multi-speaker evaluation says otherwise.
+    def __init__(self, *, device: str = "auto") -> None:
         self.device = device
+        self.resolved_device: str | None = None
         self._pipeline: Any | None = None
         self._pipeline_path: Path | None = None
 
@@ -118,10 +134,17 @@ class PyannoteCommunityProvider:
                 "pipeline configuration was not understood by pyannote",
                 model_path=model.path.name,
             )
-        if self.device != "cpu":
+        device = resolve_device(self.device)
+        self.resolved_device = device
+        if device != "cpu":
             import torch  # noqa: PLC0415
 
-            pipeline.to(torch.device(self.device))
+            try:
+                pipeline.to(torch.device(device))
+            except Exception:  # noqa: BLE001
+                # An accelerator that enumerates but will not accept the model
+                # is not a reason to fail the job; CPU always works.
+                self.resolved_device = "cpu"
         self._pipeline = pipeline
         self._pipeline_path = model.path
         return pipeline

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VoxInk · Speaker diarization UI alternatives</title>
+<style>
+  :root {
+    --ink: #171814;
+    --muted: #72756c;
+    --line: #ddded6;
+    --paper: #f2f1eb;
+    --card: #faf9f4;
+    --orange: #ee5d32;
+    --orange-dark: #d84a22;
+    --green: #4f765f;
+    --amber: #d39a42;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--paper); }
+  body {
+    margin: 0;
+    padding: 40px clamp(20px, 5vw, 64px) 80px;
+    background: radial-gradient(circle at 78% 8%, rgba(238,93,50,.07), transparent 25%), var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  }
+  header.page { max-width: 900px; margin-bottom: 8px; }
+  .eyebrow { margin: 0 0 9px; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .17em; text-transform: uppercase; }
+  h1 { margin: 0 0 14px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(32px, 4vw, 52px); font-weight: 400; line-height: 1; letter-spacing: -.05em; }
+  .lede { max-width: 720px; margin: 0 0 10px; color: #55594f; font-size: 14px; line-height: 1.65; }
+  .banner { max-width: 720px; margin: 18px 0 40px; padding: 12px 15px; border: 1px solid rgba(238,93,50,.35); border-left: 3px solid var(--orange); border-radius: 10px; background: rgba(238,93,50,.06); color: #7a3d26; font-size: 12px; line-height: 1.6; }
+  h2 { margin: 46px 0 4px; font-size: 19px; font-weight: 680; letter-spacing: -.02em; }
+  h2 .tag { margin-left: 10px; padding: 3px 8px; border-radius: 999px; background: #e7e6de; color: #64675e; font-size: 10px; font-weight: 700; letter-spacing: .04em; vertical-align: middle; }
+  .rationale { max-width: 720px; margin: 6px 0 22px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
+  .rationale b { color: #55594f; font-weight: 650; }
+  .states { display: grid; gap: 14px; }
+  .state-row { display: grid; grid-template-columns: 92px 1fr; gap: 18px; align-items: center; }
+  .state-name { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; text-align: right; padding-top: 2px; }
+  .frame { padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: 0 4px 14px rgba(36,35,29,.04); }
+  .frame.panel { background: #f7f6f0; padding: 0; overflow: hidden; }
+
+  /* A — recorder row, mirroring .audio-retention-control */
+  .speaker-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(242,241,235,.58); }
+  .speaker-row > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .speaker-row strong { font-size: 12px; font-weight: 650; }
+  .speaker-row small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+  .speaker-row.on { border-color: rgba(79,118,95,.42); background: rgba(79,118,95,.07); }
+  .speaker-row.warn { border-color: rgba(211,154,66,.45); background: rgba(211,154,66,.08); }
+  .speaker-row input { width: 17px; height: 17px; flex: none; accent-color: var(--green); }
+  .row-action { padding: 6px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: inherit; font-size: 11px; font-weight: 640; cursor: pointer; white-space: nowrap; }
+  .row-action:hover { border-color: #c9cabf; }
+
+  /* B — header chip, beside .language-chip */
+  .panel-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; padding: 22px 26px 16px; }
+  .panel-heading h3 { margin: 0; font-family: Georgia, serif; font-weight: 400; font-size: 25px; letter-spacing: -.03em; }
+  .chips { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(250,249,244,.72); color: #55594f; font-size: 11px; font-weight: 620; white-space: nowrap; }
+  .chip i { width: 7px; height: 7px; border-radius: 50%; background: #b9bbb2; font-style: normal; flex: none; }
+  .chip.on i { background: #5b9270; box-shadow: 0 0 0 4px rgba(91,146,112,.12); }
+  .chip.busy i { background: var(--orange); box-shadow: 0 0 0 4px rgba(238,93,50,.13); animation: pulse 1.5s ease-in-out infinite; }
+  .chip.warn { border-color: rgba(211,154,66,.5); background: rgba(211,154,66,.09); color: #7a5a22; }
+  .chip.warn i { background: var(--amber); }
+  .chip button { margin-left: 2px; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
+  .caption-line { display: flex; gap: 14px; padding: 13px 26px; border-top: 1px solid rgba(23,24,20,.06); }
+  .caption-line time { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; padding-top: 3px; white-space: nowrap; }
+  .caption-line p { margin: 3px 0 0; font-size: 13px; line-height: 1.55; }
+  .speaker-label { display: inline-block; color: var(--green); font-size: 9px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
+  .speaker-label.none { color: #a9aba1; }
+
+  /* C — footer notice strip */
+  .notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 18px; border-radius: 12px; font-size: 12px; }
+  .notice > span { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .notice i { width: 8px; height: 8px; border-radius: 50%; flex: none; font-style: normal; }
+  .notice.busy { border: 1px solid rgba(238,93,50,.3); background: rgba(238,93,50,.06); color: #7a3d26; }
+  .notice.busy i { background: var(--orange); animation: pulse 1.5s ease-in-out infinite; }
+  .notice.ok { border: 1px solid rgba(79,118,95,.35); background: rgba(79,118,95,.07); color: #3c5b49; }
+  .notice.ok i { background: #5b9270; }
+  .notice.warn { border: 1px solid rgba(211,154,66,.45); background: rgba(211,154,66,.09); color: #7a5a22; }
+  .notice.warn i { background: var(--amber); }
+  .notice .row-action { background: rgba(255,255,255,.6); }
+  .empty-note { color: #a9aba1; font-size: 11.5px; font-style: italic; padding: 4px 2px; }
+  footer.page { max-width: 720px; margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.7; }
+  footer.page code { padding: 1px 5px; border-radius: 5px; background: #e7e6de; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <p class="eyebrow">VoxInk · design review</p>
+  <h1>Speaker diarization</h1>
+  <p class="lede">
+    Three ways to surface diarization in the recorder. All five job states are shown for each,
+    so the least pleasant ones — failed and stale — get judged alongside the happy path rather
+    than after it ships.
+  </p>
+  <div class="banner">
+    <b>Mockup only.</b> This file is outside every build root and imports nothing from the app.
+    No production component has been touched. Pick one and I'll implement it.
+  </div>
+</header>
+
+<h2>Alternative A — a control in the recorder card <span class="tag">most discoverable</span></h2>
+<p class="rationale">
+  A row directly under <b>Save audio</b>, mirroring that control exactly, so the dependency between
+  them is visible: diarization needs retained audio, and here the two sit together. It is the only
+  option where a user who has never heard of the feature will find it. The cost is permanent
+  vertical space in the recorder, spent on something that does nothing until after Stop.
+</p>
+<div class="states">
+  <div class="state-row"><div class="state-name">off</div><div class="frame">
+    <label class="speaker-row">
+      <span><strong>Identify speakers</strong><small>Label who spoke, after recording stops · needs saved audio</small></span>
+      <input type="checkbox" />
+    </label>
+  </div></div>
+  <div class="state-row"><div class="state-name">running</div><div class="frame">
+    <label class="speaker-row on">
+      <span><strong>Identify speakers</strong><small>Finding speakers… the transcript is already saved</small></span>
+      <input type="checkbox" checked disabled />
+    </label>
+  </div></div>
+  <div class="state-row"><div class="state-name">ready</div><div class="frame">
+    <div class="speaker-row on">
+      <span><strong>Identify speakers</strong><small>3 speakers found · 12 of 14 lines labelled</small></span>
+      <button class="row-action">View</button>
+    </div>
+  </div></div>
+  <div class="state-row"><div class="state-name">failed</div><div class="frame">
+    <div class="speaker-row warn">
+      <span><strong>Identify speakers</strong><small>Speaker processing failed. Your transcript is unaffected.</small></span>
+      <button class="row-action">Try again</button>
+    </div>
+  </div></div>
+  <div class="state-row"><div class="state-name">stale</div><div class="frame">
+    <div class="speaker-row warn">
+      <span><strong>Identify speakers</strong><small>The transcript changed since speakers were found</small></span>
+      <button class="row-action">Refresh</button>
+    </div>
+  </div></div>
+</div>
+
+<h2>Alternative B — a chip in the transcript header <span class="tag">least intrusive</span></h2>
+<p class="rationale">
+  A chip beside the existing language chip, plus speaker labels on the caption lines themselves.
+  This puts the information where the answer actually is — next to the words — and costs no layout
+  when diarization is off. The weakness is discovery: nothing advertises the feature, so it has to
+  be enabled somewhere else, and an unlabelled line needs to explain its own blankness.
+</p>
+<div class="states">
+  <div class="state-row"><div class="state-name">off</div><div class="frame panel">
+    <div class="panel-heading"><div><p class="eyebrow">Transcript</p><h3>Captions</h3></div>
+      <div class="chips"><span class="chip">Auto · EN / 中文</span></div></div>
+    <div class="caption-line"><time>00:00:01</time><div><p>Could we review the first proposal?</p></div></div>
+    <div class="caption-line"><time>00:00:05</time><div><p>Yes — I have the figures here.</p></div></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">running</div><div class="frame panel">
+    <div class="panel-heading"><div><p class="eyebrow">Transcript</p><h3>Captions</h3></div>
+      <div class="chips"><span class="chip busy"><i></i>Finding speakers…</span><span class="chip">Auto · EN / 中文</span></div></div>
+    <div class="caption-line"><time>00:00:01</time><div><p>Could we review the first proposal?</p></div></div>
+    <div class="caption-line"><time>00:00:05</time><div><p>Yes — I have the figures here.</p></div></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">ready</div><div class="frame panel">
+    <div class="panel-heading"><div><p class="eyebrow">Transcript</p><h3>Captions</h3></div>
+      <div class="chips"><span class="chip on"><i></i>3 speakers</span><span class="chip">Auto · EN / 中文</span></div></div>
+    <div class="caption-line"><time>00:00:01</time><div><span class="speaker-label">Speaker 1</span><p>Could we review the first proposal?</p></div></div>
+    <div class="caption-line"><time>00:00:05</time><div><span class="speaker-label">Speaker 2</span><p>Yes — I have the figures here.</p></div></div>
+    <div class="caption-line"><time>00:00:09</time><div><span class="speaker-label none">Unclear — two voices</span><p>…if we could just — sorry, go ahead.</p></div></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">failed</div><div class="frame panel">
+    <div class="panel-heading"><div><p class="eyebrow">Transcript</p><h3>Captions</h3></div>
+      <div class="chips"><span class="chip warn"><i></i>Speakers unavailable <button>Retry</button></span><span class="chip">Auto · EN / 中文</span></div></div>
+    <div class="caption-line"><time>00:00:01</time><div><p>Could we review the first proposal?</p></div></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">stale</div><div class="frame panel">
+    <div class="panel-heading"><div><p class="eyebrow">Transcript</p><h3>Captions</h3></div>
+      <div class="chips"><span class="chip warn"><i></i>Speakers out of date <button>Refresh</button></span><span class="chip">Auto · EN / 中文</span></div></div>
+    <div class="caption-line"><time>00:00:01</time><div><span class="speaker-label">Speaker 1</span><p>Could we review the first proposal?</p></div></div>
+  </div></div>
+</div>
+
+<h2>Alternative C — a notice strip below the transcript <span class="tag">clearest failures</span></h2>
+<p class="rationale">
+  A strip that appears only when there is something to say, and disappears when there is not. It has
+  the most room for the states that need an explanation and an action, and it never competes with the
+  transcript for attention while recording. The cost is that it enters and leaves the layout, which
+  shifts content, and like B it needs the opt-in to live somewhere else.
+</p>
+<div class="states">
+  <div class="state-row"><div class="state-name">off</div><div class="frame">
+    <p class="empty-note">Nothing shown — the strip is absent entirely.</p>
+  </div></div>
+  <div class="state-row"><div class="state-name">running</div><div class="frame">
+    <div class="notice busy"><span><i></i>Finding speakers… your transcript is already saved and readable.</span></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">ready</div><div class="frame">
+    <div class="notice ok"><span><i></i>3 speakers found · 12 of 14 lines labelled · 2 too unclear to attribute</span><button class="row-action">Open</button></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">failed</div><div class="frame">
+    <div class="notice warn"><span><i></i>Speaker processing failed. Your transcript and audio are unaffected.</span><button class="row-action">Try again</button></div>
+  </div></div>
+  <div class="state-row"><div class="state-name">stale</div><div class="frame">
+    <div class="notice warn"><span><i></i>The transcript changed after speakers were found, so the labels may be wrong.</span><button class="row-action">Refresh</button></div>
+  </div></div>
+</div>
+
+<footer class="page">
+  <p><b>Shared by all three.</b> Labels read <code>Speaker 1</code>, not <code>MIC_SPEAKER_00</code>:
+  the underlying identifier is session-local and anonymous, and showing its raw form would suggest a
+  durable identity that deliberately does not exist. Nothing claims a name.</p>
+  <p><b>Unlabelled lines stay unlabelled.</b> Roughly one line in seven is expected to be too
+  ambiguous to attribute, so every alternative has to make a blank line look deliberate rather than
+  broken — that is what the third caption in B is testing.</p>
+  <p><b>No filenames appear anywhere.</b> The UI shows a state and an action; the service reports
+  which artifacts exist. No client constructs <code>speaker-turns.json</code> for itself.</p>
+</footer>
+
+</body>
+</html>
