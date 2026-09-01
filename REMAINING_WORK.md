@@ -121,6 +121,9 @@ Goal: make the existing project Python environment capable of running the
 local Community-1 diarization pipeline without implementing or advertising
 speaker diarization yet.
 
+The approved architecture, contracts, milestones, and acceptance gates are in
+`DIARIZATION_IMPLEMENTATION_GUIDE.md`.
+
 - [x] Add pinned pyannote, torchaudio, and TorchCodec dependencies in a clearly
       labelled section of `requirements.txt` while retaining the existing Qwen
       and service pins.
