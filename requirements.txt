@@ -5,3 +5,8 @@ uvicorn==0.52.4
 websockets==17.0.1
 python-multipart==0.0.32
 PyYAML==6.0.3
+
+# Speaker diarization (pyannote Community-1)
+pyannote.audio==4.0.7
+torchaudio==2.11.0
+torchcodec==0.16.0

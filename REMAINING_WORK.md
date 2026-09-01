@@ -115,6 +115,32 @@ Complete when the capture lifecycle has automated coverage that runs without
 being named file by file, and a helper crash or a full disk is a tested path
 rather than an assumption.
 
+## P1: Prepare the pyannote Community-1 environment
+
+Goal: make the existing project Python environment capable of running the
+local Community-1 diarization pipeline without implementing or advertising
+speaker diarization yet.
+
+- [x] Add pinned pyannote, torchaudio, and TorchCodec dependencies in a clearly
+      labelled section of `requirements.txt` while retaining the existing Qwen
+      and service pins.
+- [x] Install the added packages into the existing `.venv` and install FFmpeg
+      for TorchCodec audio decoding.
+- [x] Verify package versions, dependency consistency, FFmpeg discovery, and a
+      basic pyannote import without downloading gated model weights.
+- [x] Run the existing Python test suite to detect regressions in the Qwen and
+      service environment.
+
+Complete when one `.venv` imports both the existing Qwen stack and
+`pyannote.audio`, `pip check` reports no conflicts, FFmpeg is available, and
+the existing Python tests still pass. Model download, model execution, speaker
+alignment, APIs, and UI work remain separate approval-gated implementation.
+
+Verified on 2026-08-31 with PyTorch 2.13.0, pyannote.audio 4.0.7,
+TorchAudio 2.11.0, TorchCodec 0.16.0, and FFmpeg 9.0.1. `pip check` reported no
+conflicts, both Qwen and pyannote imports succeeded, TorchCodec decoded a local
+16 kHz WAV through pyannote, and all 304 existing Python tests passed.
+
 ## P1: Complete developer controls
 
 Partly done. The browser shows model identity and offers model selection
