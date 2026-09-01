@@ -91,6 +91,9 @@ class SessionConfig:
     audio_saved: bool = False
     save_separate_audio: bool = True
     save_combined_audio: bool = False
+    # Diarization runs after Stop over retained microphone audio, so it can
+    # only be honoured when that audio is actually kept.
+    diarize: bool = False
     output_directory: Path | None = None
 
     def __post_init__(self) -> None:
@@ -120,6 +123,15 @@ class SessionConfig:
             raise ValueError(
                 "audio_saved requires save_separate_audio, save_combined_audio, or both"
             )
+        # Refuse the combination up front rather than accepting a session that
+        # can only ever fail with audio_unavailable once it is too late to
+        # re-record it.
+        if self.diarize and not (self.audio_saved and self.save_separate_audio):
+            raise ValueError(
+                "diarize requires audio_saved and save_separate_audio"
+            )
+        if self.diarize and Source.MICROPHONE not in self.sources:
+            raise ValueError("diarize requires the microphone source")
 
 
 @dataclass(frozen=True)

@@ -29,7 +29,7 @@ from .models import (
 #: cannot be talked out of it afterwards. Offline is the product promise, so it
 #: is enforced by the process environment rather than by remembering to pass a
 #: flag at every call site.
-_OFFLINE_ENVIRONMENT = {
+OFFLINE_ENVIRONMENT = {
     "HF_HUB_OFFLINE": "1",
     "HF_HUB_DISABLE_TELEMETRY": "1",
     "PYANNOTE_METRICS_ENABLED": "0",
@@ -46,7 +46,7 @@ EXPECTED_SAMPLE_WIDTH = 2
 def apply_offline_environment(environment: dict[str, str] | None = None) -> None:
     """Force offline hub behaviour. Call before importing pyannote."""
     target = os.environ if environment is None else environment
-    target.update(_OFFLINE_ENVIRONMENT)
+    target.update(OFFLINE_ENVIRONMENT)
 
 
 apply_offline_environment()

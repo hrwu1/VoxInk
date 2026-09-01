@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
+from voxink_core.diarization.jobs import DiarizationJobManager
 from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
 from voxink_core.local_models import (
     LocalModelPackage,
@@ -74,6 +75,13 @@ class ServiceSettings:
     native_capture_path: Path | None = None
     # None means the default beside the transcripts; the file need not exist.
     vocabulary_path: Path | None = None
+    diarization_model_path: Path = (
+        PROJECT_ROOT / "models" / "pyannote-speaker-diarization-community-1"
+    )
+    # CPU is the correctness baseline; MPS is roughly eight times faster but is
+    # not yet validated on multi-speaker audio.
+    diarization_device: str = "cpu"
+    diarization_enabled: bool = True
 
 
 class SessionCreateRequest(BaseModel):
@@ -88,6 +96,15 @@ class SessionCreateRequest(BaseModel):
     audio_saved: bool = False
     save_separate_audio: bool = True
     save_combined_audio: bool = False
+    diarize: bool = False
+
+
+class DiarizationRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Re-run over a session that already has artifacts, for example after the
+    #: transcript changed and the existing ones went stale.
+    regenerate: bool = False
 
 
 class SessionView(BaseModel):
@@ -158,6 +175,11 @@ class ServiceRuntime:
             settings.vocabulary_path or settings.output_root / VOCABULARY_FILENAME
         )
         self.sessions = sessions or SessionManager(settings.output_root)
+        self.diarization = DiarizationJobManager(
+            model_path=settings.diarization_model_path,
+            device=settings.diarization_device,
+            enabled=settings.diarization_enabled,
+        )
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         self.active_streams: dict[str, set[str]] = {}
         self.paused_streams: dict[str, set[str]] = {}
@@ -173,6 +195,7 @@ class ServiceRuntime:
         self.native_error: str | None = None
         self.native_stderr: deque[str] = deque(maxlen=200)
         self.native_stderr_reader: threading.Thread | None = None
+        self.shutting_down = False
 
 
 @dataclass
@@ -493,11 +516,52 @@ def create_app(
                     audio_saved=request.audio_saved,
                     save_separate_audio=request.save_separate_audio,
                     save_combined_audio=request.save_combined_audio,
+                    diarize=request.diarize,
                 )
             )
         except (ValueError, FileExistsError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _session_view(session)
+
+    @app.get("/v1/diarization")
+    async def diarization_capability() -> dict[str, Any]:
+        """Whether speaker diarization can run on this installation."""
+        return runtime.diarization.capability()
+
+    @app.get("/v1/sessions/{session_id}/diarization")
+    async def diarization_status(session_id: str) -> dict[str, Any]:
+        directory = _session_directory(runtime, session_id)
+        return await asyncio.to_thread(
+            runtime.diarization.describe, directory, session_id
+        )
+
+    @app.post("/v1/sessions/{session_id}/diarization", status_code=202)
+    async def start_diarization(
+        session_id: str, body: DiarizationRequestBody | None = None
+    ) -> dict[str, Any]:
+        """Request diarization for a session that has already stopped.
+
+        Accepted, not completed: the job runs in the background and its state
+        is polled from the companion GET.
+        """
+        directory = _session_directory(runtime, session_id)
+        if not directory.is_dir():
+            raise HTTPException(status_code=404, detail="session not found")
+        try:
+            session = runtime.sessions.get(session_id)
+        except KeyError:
+            session = None
+        if session is not None and session.state is not SessionState.STOPPED:
+            raise HTTPException(
+                status_code=409,
+                detail="diarization runs after the session stops",
+            )
+        job = runtime.diarization.request(
+            directory,
+            session_id,
+            regenerate=(body or DiarizationRequestBody()).regenerate,
+        )
+        return job.to_dict()
 
     @app.get("/v1/devices")
     async def devices() -> dict[str, Any]:
@@ -962,6 +1026,7 @@ async def _report_lag(
 
 def _shutdown(runtime: ServiceRuntime) -> None:
     """Close every open session so no transcript part is left unterminated."""
+    runtime.shutting_down = True
     try:
         _stop_native_capture(runtime)
     except Exception:
@@ -976,6 +1041,9 @@ def _shutdown(runtime: ServiceRuntime) -> None:
         except (InvalidSessionTransition, KeyError):
             continue
         _finalize_audio(runtime, session)
+    # Give any job already running a moment to finish and clear its scratch
+    # directory, rather than abandoning it at process exit.
+    runtime.diarization.shutdown()
 
 
 def _native_capture_executable(runtime: ServiceRuntime) -> Path:
@@ -1131,20 +1199,56 @@ def _record_audio(
 
 def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
     writer = runtime.audio_writers.pop(session.config.session_id, None)
-    if writer is None:
+    if writer is not None:
+        writer.close()
+        if session.config.save_combined_audio:
+            try:
+                writer.generate_combined()
+            except FileExistsError:
+                # A recovered or re-stopped session already has combined parts.
+                # Keeping them is required: recovery must never overwrite audio.
+                pass
+        if not session.config.save_separate_audio:
+            for source in Source:
+                for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
+                    path.unlink()
+    # Dispatch even when no writer was ever created. A session that asked for
+    # diarization and captured no audio should say so as a typed failure, not
+    # silently report that diarization was never requested.
+    _dispatch_diarization(runtime, session)
+
+
+def _dispatch_diarization(runtime: ServiceRuntime, session: Session) -> None:
+    """Start diarization now that the session is finished on disk.
+
+    This is called from `_finalize_audio`, which every Stop path goes through,
+    and only after the transcript writer has been closed and the audio writer
+    has committed its WAV headers. That ordering is the trigger condition: a
+    job dispatched earlier would diarize a partial recording.
+
+    Dispatch returns immediately, so Stop never waits for a model, and any
+    failure lands in the job rather than in the caller's response.
+    """
+    if not session.config.diarize or runtime.shutting_down:
+        # A job started as the process exits would be killed mid-inference and
+        # leave its scratch directory behind. The transcript and audio are
+        # already safe, so diarization can be requested again later.
         return
-    writer.close()
-    if session.config.save_combined_audio:
-        try:
-            writer.generate_combined()
-        except FileExistsError:
-            # A recovered or re-stopped session already has combined parts.
-            # Keeping them is required: recovery must never overwrite audio.
-            pass
-    if not session.config.save_separate_audio:
-        for source in Source:
-            for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
-                path.unlink()
+    try:
+        runtime.diarization.request(
+            _session_directory(runtime, session.config.session_id),
+            session.config.session_id,
+        )
+    except Exception:  # noqa: BLE001 - Stop must succeed even if dispatch cannot
+        pass
+
+
+def _session_directory(runtime: ServiceRuntime, session_id: str) -> Path:
+    try:
+        config = runtime.sessions.get(session_id).config
+    except KeyError:
+        return runtime.settings.output_root / session_id
+    return config.output_directory or runtime.settings.output_root / session_id
 
 
 def _release_stream(
