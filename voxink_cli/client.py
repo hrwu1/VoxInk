@@ -127,6 +127,25 @@ class ControlClient:
     def session(self, session_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/sessions/{_segment(session_id)}")
 
+    # -- Speaker diarization -----------------------------------------------
+
+    def diarization_capability(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/diarization")
+
+    def diarization(self, session_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET", f"/v1/sessions/{_segment(session_id)}/diarization"
+        )
+
+    def start_diarization(
+        self, session_id: str, *, regenerate: bool = False
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/v1/sessions/{_segment(session_id)}/diarization",
+            body={"regenerate": regenerate},
+        )
+
     def transcripts(self) -> dict[str, Any]:
         return self._request("GET", "/v1/transcripts")
 

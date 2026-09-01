@@ -71,6 +71,7 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
     health = client.health()
     capture = client.capture_capabilities()
     native = bool(capture.get("native_capture_available"))
+    diarization = client.diarization_capability()
     data = {
         "protocol_version": health.get("protocol_version"),
         "schema_version": SCHEMA_VERSION,
@@ -89,6 +90,13 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
             "transcripts.read": {"supported": True, "available": True, "permitted": True},
             "models.switch": {"supported": True, "available": True, "permitted": True},
             "vocabulary.write": {"supported": True, "available": True, "permitted": True},
+            # Supported by this build; available only once the local weights
+            # are installed, which is a separate, licence-gated download.
+            "diarization.speakers": {
+                "supported": True,
+                "available": bool(diarization.get("available")),
+                "permitted": bool(diarization.get("enabled")),
+            },
             "durable_session_registry": {
                 "supported": False,
                 "available": False,
@@ -114,6 +122,11 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
         warnings.append(
             "Native capture is unavailable, so no capture mode can start. "
             "Build it with: ./scripts/build-macos-capture"
+        )
+    if diarization.get("enabled") and not diarization.get("available"):
+        warnings.append(
+            "Speaker diarization is supported but its local weights are not "
+            "installed. See: voxink diarization capability"
         )
     return Result(data, tuple(warnings), "\n".join(lines))
 
@@ -391,6 +404,88 @@ def _sessions_show(args: argparse.Namespace, client: ControlClient) -> Result:
         f"applications: {', '.join(session.get('applications', [])) or 'none'}"
     )
     return Result(session, text=text)
+
+
+_DIARIZATION_HINTS = {
+    "disabled": "Diarization was not requested for this session.",
+    "waiting_for_stop": "Diarization starts when the session stops.",
+    "processing": "Speaker processing is running; the transcript is already complete.",
+    "ready": "Speaker artifacts are ready.",
+    "failed": "Speaker processing failed. The transcript is unaffected.",
+    "stale": "The transcript changed after processing. Re-run with --regenerate.",
+}
+
+
+def _diarization_capability(args: argparse.Namespace, client: ControlClient) -> Result:
+    capability = client.diarization_capability()
+    lines = [
+        f"enabled: {str(capability.get('enabled', False)).lower()}",
+        f"available: {str(capability.get('available', False)).lower()}",
+        f"device: {capability.get('device', 'unknown')}",
+    ]
+    if capability.get("model_id"):
+        lines.append(f"model: {capability['model_id']}")
+    warnings = ()
+    error = capability.get("error")
+    if error:
+        warnings = (
+            f"{error['code']}: {error['message']}",
+        )
+    return Result(capability, warnings, "\n".join(lines))
+
+
+def _diarization_show(args: argparse.Namespace, client: ControlClient) -> Result:
+    status = client.diarization(args.session_id)
+    return Result(status, _diarization_warnings(status), _diarization_text(status))
+
+
+def _diarization_start(args: argparse.Namespace, client: ControlClient) -> Result:
+    status = client.start_diarization(args.session_id, regenerate=args.regenerate)
+    if not args.wait:
+        return Result(status, _diarization_warnings(status), _diarization_text(status))
+    # Deliberately not --timeout: that bounds one request to the helper, while
+    # this bounds a model run that legitimately takes minutes on CPU.
+    deadline = time.monotonic() + args.wait_timeout
+    warnings: tuple[str, ...] = ()
+    while True:
+        status = client.diarization(args.session_id)
+        if status.get("state") != "processing":
+            break
+        if time.monotonic() >= deadline:
+            warnings = (
+                f"Still processing after {args.wait_timeout:g}s; "
+                "it continues in the background.",
+            )
+            break
+        time.sleep(1.0)
+    return Result(
+        status, warnings + _diarization_warnings(status), _diarization_text(status)
+    )
+
+
+def _diarization_text(status: dict[str, Any]) -> str:
+    state = status.get("state", "unknown")
+    lines = [f"{status.get('session_id', '')}", f"state: {state}"]
+    if status.get("speaker_count"):
+        lines.append(f"speakers: {status['speaker_count']}")
+    if status.get("total_segments"):
+        lines.append(
+            f"labeled: {status.get('labeled_segments', 0)}/{status['total_segments']} segment(s)"
+        )
+    # Artifact names come from the service so no client has to guess a filename.
+    for name in status.get("artifacts", []):
+        lines.append(f"artifact: {name}")
+    hint = _DIARIZATION_HINTS.get(state)
+    if hint:
+        lines.append(hint)
+    return "\n".join(line for line in lines if line)
+
+
+def _diarization_warnings(status: dict[str, Any]) -> tuple[str, ...]:
+    error = status.get("error")
+    if not error:
+        return ()
+    return (f"{error['code']}: {error['message']}",)
 
 
 def _transcripts_list(args: argparse.Namespace, client: ControlClient) -> Result:
@@ -681,6 +776,31 @@ def build_parser() -> argparse.ArgumentParser:
     transcript_show.add_argument("session_id")
     transcript_show.add_argument("--part", type=int, default=None, help="read one part only")
     transcript_show.set_defaults(handler=_transcripts_show, command="transcripts.show")
+
+    diarization = group("diarization", "Inspect and run local speaker diarization.")
+    leaf(
+        diarization, "capability", "Report whether diarization can run here."
+    ).set_defaults(handler=_diarization_capability, command="diarization.capability")
+    diarization_show = leaf(diarization, "show", "Show one session's diarization state.")
+    diarization_show.add_argument("session_id")
+    diarization_show.set_defaults(handler=_diarization_show, command="diarization.show")
+    diarization_run = leaf(diarization, "run", "Diarize a session that has stopped.")
+    diarization_run.add_argument("session_id")
+    diarization_run.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="re-run even when artifacts already exist, for example when stale",
+    )
+    diarization_run.add_argument(
+        "--wait", action="store_true", help="wait until processing settles"
+    )
+    diarization_run.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=1800.0,
+        help="seconds to wait with --wait (default: 1800; CPU runs are slow)",
+    )
+    diarization_run.set_defaults(handler=_diarization_start, command="diarization.run")
 
     models = group("models", "Inspect and select local models.")
     leaf(models, "list", "List installed local models.").set_defaults(
