@@ -43,7 +43,15 @@ class DiarizationServiceTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.output_root = Path(self.temporary.name) / "outputs"
         app = create_app(
-            ServiceSettings(output_root=self.output_root), provider=FakeProvider()
+            ServiceSettings(
+                output_root=self.output_root,
+                # Pointed at nothing on purpose. These tests drive the job with
+                # a fake worker, and the real weights are an optional download,
+                # so reading the project's models directory would make the
+                # result depend on whether this machine happens to have them.
+                diarization_model_path=Path(self.temporary.name) / "absent-model",
+            ),
+            provider=FakeProvider(),
         )
         self.runtime = app.state.runtime
         self.runtime.diarization._runner = worker_response

@@ -50,7 +50,14 @@ class DiarizationCommandTests(unittest.TestCase):
         self.endpoint_path = self.root / "control-endpoint.json"
 
         app = create_app(
-            ServiceSettings(output_root=self.output_root, auth_secret=AUTH_SECRET),
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret=AUTH_SECRET,
+                # Deliberately absent: the weights are an optional download, so
+                # pointing at the project's models directory would make these
+                # results depend on whether this machine happens to have them.
+                diarization_model_path=self.root / "absent-model",
+            ),
             provider=FakeProvider(),
         )
         self.runtime = app.state.runtime
