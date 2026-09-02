@@ -205,8 +205,12 @@ class DiarizationServiceTests(unittest.TestCase):
         status = self.client.get(f"/v1/sessions/{SESSION_ID}/diarization").json()
         for segment in status["segments"]:
             self.assertEqual(
-                set(segment), {"start_ms", "end_ms", "speaker_id", "overlap_detected"}
+                set(segment), {"start_ms", "end_ms", "speaker_id", "overlap_detected", "pieces"}
             )
+            for piece in segment["pieces"]:
+                self.assertEqual(
+                    set(piece), {"text_start", "text_end", "start_ms", "end_ms", "speaker_id"}
+                )
 
     # -- the UI capture opt-in -----------------------------------------------
 

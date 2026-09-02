@@ -32,14 +32,16 @@ from .artifacts import (
 from .audio import assemble, source_parts
 from .base import require_local_model
 from .models import (
+    AlignmentBlock,
     DiarizationError,
     DiarizationErrorCode,
     DiarizationResult,
     JobState,
 )
 from .pyannote import OFFLINE_ENVIRONMENT, resolve_device
-from .transcript import file_digest, part_digests, read_blocks
-from .worker import decode_result
+from .splitting import SplitPolicy
+from .transcript import TranscriptBlock, file_digest, part_digests, read_blocks
+from .worker import decode_alignment, decode_result
 
 
 #: Private scratch space inside the session directory. Anything here is
@@ -67,6 +69,11 @@ class DiarizationJob:
     speaker_count: int = 0
     labeled_segments: int = 0
     total_segments: int = 0
+    #: Blocks that word alignment split into more than one speaker's pieces.
+    split_segments: int = 0
+    #: Why blocks were not aligned, when they were not: the typed error the
+    #: aligner stage reported, or None when it ran or was never configured.
+    alignment_error: dict[str, Any] | None = None
     artifacts: tuple[str, ...] = ()
     _thread: threading.Thread | None = field(default=None, repr=False, compare=False)
 
@@ -82,6 +89,8 @@ class DiarizationJob:
             "speaker_count": self.speaker_count,
             "labeled_segments": self.labeled_segments,
             "total_segments": self.total_segments,
+            "split_segments": self.split_segments,
+            "alignment_error": self.alignment_error,
             "artifacts": list(self.artifacts),
         }
 
@@ -95,6 +104,10 @@ class DiarizationJobManager:
         model_path: str | Path,
         device: str = "auto",
         policy: ReconciliationPolicy | None = None,
+        # The forced aligner that lets a block be split between speakers.
+        # Optional: without it, blocks are labeled whole, as before.
+        aligner_path: str | Path | None = None,
+        split_policy: SplitPolicy | None = None,
         min_timeout_seconds: float = 600.0,
         # Measured CPU real-time factor is 0.378, so twice the audio duration
         # leaves better than fivefold headroom. The budget stays sized against
@@ -108,6 +121,8 @@ class DiarizationJobManager:
         self.model_path = Path(model_path)
         self.device = device
         self.policy = policy or ReconciliationPolicy()
+        self.aligner_path = Path(aligner_path) if aligner_path else None
+        self.split_policy = split_policy or SplitPolicy()
         self.min_timeout_seconds = min_timeout_seconds
         self.timeout_factor = timeout_factor
         self.enabled = enabled
@@ -127,6 +142,7 @@ class DiarizationJobManager:
             available = False
             detail = exc.to_dict()
             model = None
+        aligner = self._aligner_model()
         return {
             "enabled": self.enabled,
             "available": self.enabled and available,
@@ -137,7 +153,20 @@ class DiarizationJobManager:
             "model_id": model.source_model_id if model else None,
             "model_revision": model.revision if model else None,
             "error": detail,
+            # Whether blocks can be split between speakers. Not a condition
+            # of `available`: diarization works without it, more coarsely.
+            "alignment_available": aligner is not None,
+            "aligner_model_id": aligner.source_model_id if aligner else None,
+            "aligner_model_revision": aligner.revision if aligner else None,
         }
+
+    def _aligner_model(self):
+        if self.aligner_path is None:
+            return None
+        try:
+            return require_local_model(self.aligner_path)
+        except DiarizationError:
+            return None
 
     def get(self, session_id: str, source: Source = Source.MICROPHONE) -> DiarizationJob | None:
         with self._lock:
@@ -182,10 +211,25 @@ class DiarizationJobManager:
                 "end_ms": segment.get("end_ms"),
                 "speaker_id": segment.get("speaker_id"),
                 "overlap_detected": segment.get("overlap_detected", False),
+                # Character ranges, not text: a caller holding the caption can
+                # slice it, and one that is not never sees a word of it.
+                "pieces": [
+                    {
+                        "text_start": piece["text_start"],
+                        "text_end": piece["text_end"],
+                        "start_ms": piece["start_ms"],
+                        "end_ms": piece["end_ms"],
+                        "speaker_id": piece.get("speaker_id"),
+                    }
+                    for piece in segment.get("pieces", ())
+                ],
             }
             for segment in document.get("segments", ())
             if segment.get("start_ms") is not None
         ]
+        payload["split_segments"] = sum(
+            1 for s in document.get("segments", ()) if s.get("unlabeled_reason") == "multiple_speakers"
+        )
         if stale:
             payload["state"] = JobState.STALE.value
             payload["error"] = DiarizationError(
@@ -264,20 +308,32 @@ class DiarizationJobManager:
             self._require_disk(session_dir, job.source)
             job.duration_ms = assemble(session_dir, joined, source=job.source)
             os.chmod(joined, 0o600)
-            response = self._runner(
-                {
-                    "session_id": job.session_id,
-                    "source": job.source.value,
-                    "audio_path": str(joined),
-                    "model_path": str(self.model_path),
-                    "device": self.device,
-                },
-                self._timeout_for(job.duration_ms),
-            )
+            blocks = read_blocks(session_dir)
+            payload = {
+                "session_id": job.session_id,
+                "source": job.source.value,
+                "audio_path": str(joined),
+                "model_path": str(self.model_path),
+                "device": self.device,
+            }
+            aligner = self._aligner_model()
+            if aligner is not None:
+                payload["alignment"] = {
+                    "model_path": str(aligner.path),
+                    "blocks": [
+                        block.to_dict() for block in _alignment_blocks(blocks, job.source)
+                    ],
+                }
+            response = self._runner(payload, self._timeout_for(job.duration_ms))
             if not response.get("ok"):
                 raise _from_response(response)
             result = decode_result(response["result"], source=job.source)
-            self._publish(job, session_dir, joined, result)
+            alignment = response.get("alignment") or {}
+            if aligner is not None and not alignment.get("ok"):
+                job.alignment_error = (alignment.get("error") or DiarizationError(
+                    DiarizationErrorCode.WORKER_CRASHED, "worker returned no alignment"
+                ).to_dict())
+            self._publish(job, session_dir, blocks, result, alignment)
             job.state = JobState.READY
         except DiarizationError as exc:
             job.state = JobState.FAILED
@@ -297,16 +353,22 @@ class DiarizationJobManager:
         self,
         job: DiarizationJob,
         session_dir: Path,
-        joined: Path,
+        blocks: tuple[TranscriptBlock, ...],
         result: DiarizationResult,
+        alignment: dict[str, Any],
     ) -> None:
-        blocks = read_blocks(session_dir)
+        words = decode_alignment(alignment)
+        alignments = {
+            _block_ref(block_id): timings for block_id, timings in words.items()
+        }
         labels = reconcile(
             blocks,
             exclusive_turns=result.exclusive_turns,
             raw_turns=result.raw_turns,
             source=job.source,
             policy=self.policy,
+            alignments=alignments,
+            split_policy=self.split_policy,
         )
         sources = dict(part_digests(session_dir))
         for part in source_parts(session_dir, job.source):
@@ -318,10 +380,19 @@ class DiarizationJobManager:
             result=result,
             labels=labels,
             source_artifacts=sources,
+            aligner=(
+                {
+                    "model_id": alignment["model_id"],
+                    "model_revision": alignment["model_revision"],
+                }
+                if words
+                else None
+            ),
         )
         job.speaker_count = len(result.speaker_ids)
         job.total_segments = len(labels)
         job.labeled_segments = sum(1 for label in labels if label.labeled)
+        job.split_segments = sum(1 for label in labels if label.reason == "multiple_speakers")
         job.artifacts = (TURNS_FILENAME, MARKDOWN_FILENAME)
 
     def _timeout_for(self, duration_ms: int) -> float:
@@ -393,6 +464,31 @@ def _from_response(response: dict[str, Any]) -> DiarizationError:
     return DiarizationError(
         code, error.get("message", "diarization failed"), **(error.get("metadata") or {})
     )
+
+
+def _alignment_blocks(
+    blocks: tuple[TranscriptBlock, ...], source: Source
+) -> list[AlignmentBlock]:
+    """The blocks this job can speak for, addressed so timings come back home."""
+    return [
+        AlignmentBlock(
+            id=_block_id(block),
+            start_ms=block.start_ms,
+            end_ms=block.end_ms,
+            text=block.text,
+        )
+        for block in blocks
+        if block.source is source and block.has_valid_range and block.text.strip()
+    ]
+
+
+def _block_id(block: TranscriptBlock) -> str:
+    return f"{block.part}#{block.block}"
+
+
+def _block_ref(block_id: str) -> tuple[str, int]:
+    part, _, index = block_id.rpartition("#")
+    return part, int(index)
 
 
 def _key(session_id: str, source: Source) -> tuple[str, str]:

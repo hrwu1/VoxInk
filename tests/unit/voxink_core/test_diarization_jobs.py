@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -19,6 +20,40 @@ from voxink_core.diarization.models import (
 
 from tests.fixtures.transcripts import SESSION_ID, make_event, write_session
 from tests.unit.voxink_core.test_diarization_audio import write_wav
+from tests.unit.voxink_core.test_diarization_base import _write_package
+
+
+def aligner_package(root: Path) -> Path:
+    """A fake aligner package, in its own directory so it cannot be mistaken
+    for the diarization model the same helper fakes."""
+    home = root / "aligner"
+    home.mkdir()
+    return _write_package(
+        home,
+        display_name="Qwen3 Forced Aligner 0.6B",
+        profile="Alignment",
+        provider="qwen-aligner-local",
+        source_model_id="Qwen/Qwen3-ForcedAligner-0.6B",
+        revision="c7cbfc20",
+        license="apache-2.0",
+    )
+
+
+def alignment_response(words_by_block, **overrides):
+    payload = {
+        "ok": True,
+        "model_id": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "model_revision": "c7cbfc20",
+        "device": "cpu",
+        "words": {
+            block_id: [
+                {"text": text, "start_ms": start, "end_ms": end} for text, start, end in words
+            ]
+            for block_id, words in words_by_block.items()
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 def worker_result(**overrides):
@@ -293,6 +328,90 @@ class DeviceResolutionTests(unittest.TestCase):
         """An accelerator that cannot be probed must not fail the job."""
         with mock.patch.dict(sys.modules, {"torch": None}):
             self.assertEqual(resolve_device("auto"), "cpu")
+
+
+class AlignmentStageTests(JobTestCase):
+    """The optional second stage: word timings that let blocks be split."""
+
+    def setUp(self):
+        super().setUp()
+        for part in self.directory.glob("transcript-part-*.md"):
+            part.unlink()
+        write_session(self.directory, [make_event(0, 2000, "可能太香了。真的好吃。")])
+        self.aligner = aligner_package(self.directory)
+
+    def manager(self, response=None, *, runner=None, **kwargs):
+        kwargs.setdefault("aligner_path", self.aligner)
+        return super().manager(response, runner=runner, **kwargs)
+
+    def test_capability_reports_the_aligner(self):
+        capability = self.manager().capability()
+        self.assertTrue(capability["alignment_available"])
+        self.assertEqual(capability["aligner_model_id"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        absent = self.manager(aligner_path=self.directory / "absent").capability()
+        self.assertFalse(absent["alignment_available"])
+        self.assertIsNone(absent["aligner_model_id"])
+
+    def test_blocks_with_text_are_sent_for_alignment(self):
+        self.run_job(self.manager())
+        payload, _ = self.calls[0]
+        self.assertEqual(payload["alignment"]["model_path"], str(self.aligner.resolve()))
+        blocks = payload["alignment"]["blocks"]
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["id"], "transcript-part-001.md#1")
+        self.assertEqual((blocks[0]["start_ms"], blocks[0]["end_ms"]), (0, 2000))
+        self.assertEqual(blocks[0]["text"], "可能太香了。真的好吃。")
+
+    def test_no_aligner_means_no_alignment_request(self):
+        self.run_job(self.manager(aligner_path=None))
+        self.assertNotIn("alignment", self.calls[0][0])
+        job = self.run_job(self.manager(aligner_path=self.directory / "absent"))
+        self.assertIs(job.state, JobState.READY)
+        self.assertNotIn("alignment", self.calls[-1][0])
+
+    def test_aligned_words_split_the_block_in_the_artifacts(self):
+        words = [(c, 100 + i * 200, 300 + i * 200) for i, c in enumerate("可能太香了真的好吃")]
+        response = worker_result(
+            exclusive_turns=[
+                {"speaker_id": "MIC_SPEAKER_01", "start_ms": 0, "end_ms": 1100},
+                {"speaker_id": "MIC_SPEAKER_00", "start_ms": 1100, "end_ms": 2000},
+            ]
+        )
+        response["alignment"] = alignment_response({"transcript-part-001.md#1": words})
+        job = self.run_job(self.manager(response))
+        self.assertIs(job.state, JobState.READY, job.error)
+        self.assertEqual(job.split_segments, 1)
+        self.assertIsNone(job.alignment_error)
+        document = json.loads((self.directory / TURNS_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(document["producer"]["aligner"]["model_revision"], "c7cbfc20")
+        pieces = document["segments"][0]["pieces"]
+        self.assertEqual([p["speaker_id"] for p in pieces], ["MIC_SPEAKER_01", "MIC_SPEAKER_00"])
+        markdown = (self.directory / MARKDOWN_FILENAME).read_text(encoding="utf-8")
+        self.assertIn("[MIC_SPEAKER_01]**\n可能太香了。", markdown)
+        self.assertIn("[MIC_SPEAKER_00]**\n真的好吃。", markdown)
+        status = self.manager().describe(self.directory, SESSION_ID)
+        self.assertEqual(status["split_segments"], 1)
+        self.assertEqual(len(status["segments"][0]["pieces"]), 2)
+        self.assertNotIn("text", status["segments"][0]["pieces"][0])
+
+    def test_a_failed_alignment_stage_still_publishes_block_labels(self):
+        response = worker_result()
+        response["alignment"] = {
+            "ok": False,
+            "error": {"code": "model_unavailable", "message": "aligner could not be loaded", "metadata": {}},
+        }
+        job = self.run_job(self.manager(response))
+        self.assertIs(job.state, JobState.READY)
+        self.assertEqual(job.alignment_error["code"], "model_unavailable")
+        self.assertEqual(job.to_dict()["alignment_error"]["code"], "model_unavailable")
+        document = json.loads((self.directory / TURNS_FILENAME).read_text(encoding="utf-8"))
+        self.assertIsNone(document["producer"]["aligner"])
+        self.assertNotIn("pieces", document["segments"][0])
+
+    def test_a_worker_that_returns_no_alignment_is_reported(self):
+        job = self.run_job(self.manager(worker_result()))
+        self.assertIs(job.state, JobState.READY)
+        self.assertEqual(job.alignment_error["code"], "worker_crashed")
 
 
 if __name__ == "__main__":

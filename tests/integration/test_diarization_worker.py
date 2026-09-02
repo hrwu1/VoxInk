@@ -31,9 +31,23 @@ MODEL_PATH = Path(
 )
 
 
+ALIGNER_PATH = Path(
+    os.environ.get(
+        "VOXINK_ALIGNER_MODEL",
+        PROJECT_ROOT / "models" / "Qwen3-ForcedAligner-0.6B",
+    )
+)
+
+
 def _model_installed() -> bool:
     return (MODEL_PATH / "voxink-model-manifest.json").is_file() and (
         MODEL_PATH / "config.yaml"
+    ).is_file()
+
+
+def _aligner_installed() -> bool:
+    return (ALIGNER_PATH / "voxink-model-manifest.json").is_file() and (
+        ALIGNER_PATH / "model.safetensors"
     ).is_file()
 
 
@@ -87,6 +101,29 @@ class RealWorkerTests(unittest.TestCase):
         self.assertTrue((self.directory / MARKDOWN_FILENAME).is_file())
         self.assertEqual(canonical.read_bytes(), before, "canonical transcript changed")
         self.assertFalse((self.directory / WORKING_DIRECTORY).exists())
+
+    @unittest.skipUnless(_aligner_installed(), f"aligner weights not installed at {ALIGNER_PATH}")
+    def test_the_real_aligner_times_words_offline(self):
+        """The second stage runs in the same isolated worker, offline.
+
+        The fixture text is not what the sample says, so nothing is asserted
+        about where the words land; what matters is that the stage ran, said
+        so, and left the block-level result intact.
+        """
+        manager = DiarizationJobManager(model_path=MODEL_PATH, aligner_path=ALIGNER_PATH)
+        self.assertTrue(manager.capability()["alignment_available"])
+        manager.request(self.directory, SESSION_ID)
+        manager.wait(SESSION_ID, timeout=600)
+        job = manager.get(SESSION_ID)
+        self.assertIs(job.state, JobState.READY, job.error)
+        self.assertIsNone(job.alignment_error)
+        document = json.loads((self.directory / TURNS_FILENAME).read_text(encoding="utf-8"))
+        aligner = document["producer"]["aligner"]
+        self.assertEqual(aligner["model_id"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertTrue(aligner["model_revision"])
+        for segment in document["segments"]:
+            for piece in segment.get("pieces", ()):
+                self.assertNotIn("text", piece)
 
     def test_weights_load_with_the_hub_forced_offline(self):
         """Succeeding under HF_HUB_OFFLINE=1 is what proves nothing was fetched.

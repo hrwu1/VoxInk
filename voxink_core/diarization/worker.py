@@ -20,13 +20,15 @@ from typing import Any
 
 # Imported before pyannote so the offline environment is in place first.
 from .pyannote import PyannoteCommunityProvider, apply_offline_environment
+from .aligner import QwenForcedAligner
 from .models import (
+    AlignmentBlock,
     DiarizationError,
     DiarizationErrorCode,
     DiarizationRequest,
     DiarizationResult,
 )
-from ..models import Source
+from ..models import Source, WordTimestamp
 
 
 def run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -42,7 +44,7 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
             max_speakers=payload.get("max_speakers"),
         )
         provider = PyannoteCommunityProvider(device=payload.get("device", "cpu"))
-        return {"ok": True, "result": encode_result(provider.diarize(request))}
+        response: dict[str, Any] = {"ok": True, "result": encode_result(provider.diarize(request))}
     except DiarizationError as exc:
         return {"ok": False, "error": exc.to_dict()}
     except (KeyError, TypeError, ValueError) as exc:
@@ -52,6 +54,66 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
                 DiarizationErrorCode.INVALID_AUDIO, f"{type(exc).__name__}: {exc}"
             ).to_dict(),
         }
+    alignment = payload.get("alignment")
+    if alignment:
+        # Diarization succeeded; the pipeline is released before the aligner is
+        # loaded so the two never have to fit in memory together.
+        del provider
+        response["alignment"] = _align(alignment, request.audio_path, payload.get("device", "cpu"))
+    return response
+
+
+def _align(alignment: dict[str, Any], audio_path: Path, device: str) -> dict[str, Any]:
+    """Run the best-effort second stage: word timings for every block sent.
+
+    Nothing raised here reaches the caller as a failure. Alignment refines
+    labels; a session without it is labeled the way it was before alignment
+    existed, and the response says why.
+    """
+    try:
+        blocks = [AlignmentBlock(**item) for item in alignment["blocks"]]
+        aligner = QwenForcedAligner(device=device)
+        model = aligner.load(Path(alignment["model_path"]))
+        timings = aligner.align(audio_path, blocks)
+    except DiarizationError as exc:
+        return {"ok": False, "error": exc.to_dict()}
+    except Exception as exc:  # noqa: BLE001 - a crashed stage, not a crashed job
+        return {
+            "ok": False,
+            "error": DiarizationError(
+                DiarizationErrorCode.WORKER_CRASHED, f"{type(exc).__name__}: {exc}"
+            ).to_dict(),
+        }
+    return {
+        "ok": True,
+        "model_id": model.source_model_id,
+        "model_revision": model.revision,
+        "device": aligner.resolved_device,
+        "words": {
+            block_id: [
+                {"text": word.text, "start_ms": word.start_ms, "end_ms": word.end_ms}
+                for word in words
+            ]
+            for block_id, words in timings.items()
+        },
+    }
+
+
+def decode_alignment(payload: dict[str, Any] | None) -> dict[str, tuple[WordTimestamp, ...]]:
+    """Rebuild the aligned words in the parent, re-validating each one."""
+    if not payload or not payload.get("ok"):
+        return {}
+    return {
+        str(block_id): tuple(
+            WordTimestamp(
+                text=str(item["text"]),
+                start_ms=int(item["start_ms"]),
+                end_ms=int(item["end_ms"]),
+            )
+            for item in words
+        )
+        for block_id, words in payload.get("words", {}).items()
+    }
 
 
 def encode_result(result: DiarizationResult) -> dict[str, Any]:

@@ -472,6 +472,8 @@ def _diarization_text(status: dict[str, Any]) -> str:
         lines.append(
             f"labeled: {status.get('labeled_segments', 0)}/{status['total_segments']} segment(s)"
         )
+    if status.get("split_segments"):
+        lines.append(f"split between speakers: {status['split_segments']} segment(s)")
     # Artifact names come from the service so no client has to guess a filename.
     for name in status.get("artifacts", []):
         lines.append(f"artifact: {name}")
@@ -482,10 +484,12 @@ def _diarization_text(status: dict[str, Any]) -> str:
 
 
 def _diarization_warnings(status: dict[str, Any]) -> tuple[str, ...]:
-    error = status.get("error")
-    if not error:
-        return ()
-    return (f"{error['code']}: {error['message']}",)
+    warnings = []
+    for key, prefix in (("error", ""), ("alignment_error", "speaker splitting unavailable, ")):
+        error = status.get(key)
+        if error:
+            warnings.append(f"{prefix}{error['code']}: {error['message']}")
+    return tuple(warnings)
 
 
 def _transcripts_list(args: argparse.Namespace, client: ControlClient) -> Result:

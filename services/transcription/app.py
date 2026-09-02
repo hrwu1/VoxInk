@@ -83,6 +83,11 @@ class ServiceSettings:
     # falls back to CPU where it is unavailable.
     diarization_device: str = "auto"
     diarization_enabled: bool = True
+    # The forced aligner that lets a transcript block be split where the
+    # speaker changed. Optional: absent, blocks are labeled whole.
+    diarization_aligner_path: Path | None = (
+        PROJECT_ROOT / "models" / "Qwen3-ForcedAligner-0.6B"
+    )
 
 
 class SessionCreateRequest(BaseModel):
@@ -180,6 +185,7 @@ class ServiceRuntime:
         self.diarization = DiarizationJobManager(
             model_path=settings.diarization_model_path,
             device=settings.diarization_device,
+            aligner_path=settings.diarization_aligner_path,
             enabled=settings.diarization_enabled,
         )
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
