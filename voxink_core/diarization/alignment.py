@@ -9,12 +9,17 @@ turns in `speaker-turns.json` remain available for a human to inspect.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Iterable, Mapping, Sequence
 
-from ..models import Source
+from ..models import Source, WordTimestamp
 from .models import SpeakerTurn
+from .splitting import Piece, SplitPolicy, split_block
 from .transcript import TranscriptBlock
+
+
+#: Word timings per block, keyed by `(part, block index)`.
+Alignments = Mapping[tuple[str, int], Sequence[WordTimestamp]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,9 @@ class SegmentLabel:
     attributed_ms: int
     overlap_detected: bool
     reason: str | None
+    #: Same-speaker character ranges of the block, when word timings allowed
+    #: it to be split. Empty means the block was labeled as a whole.
+    pieces: tuple[Piece, ...] = ()
 
     @property
     def labeled(self) -> bool:
@@ -76,6 +84,8 @@ class SegmentLabel:
         }
         if self.reason is not None:
             payload["unlabeled_reason"] = self.reason
+        if self.pieces:
+            payload["pieces"] = [piece.to_dict() for piece in self.pieces]
         return payload
 
 
@@ -86,16 +96,52 @@ def reconcile(
     raw_turns: Sequence[SpeakerTurn],
     source: Source,
     policy: ReconciliationPolicy | None = None,
+    alignments: Alignments | None = None,
+    split_policy: SplitPolicy | None = None,
 ) -> tuple[SegmentLabel, ...]:
-    """Attach a speaker to each block that clearly has exactly one."""
+    """Attach a speaker to each block that clearly has exactly one.
+
+    With word timings for a block, the block is first split into pieces and
+    the block-level label follows from them: one speaker throughout, or
+    `multiple_speakers` with the detail in the pieces. Without timings, or
+    when they do not fit the block, the block is labeled as a whole.
+    """
     policy = policy or ReconciliationPolicy()
+    split_policy = split_policy or SplitPolicy()
     source = Source(source)
     exclusive = [turn for turn in exclusive_turns if turn.source is source]
     raw = [turn for turn in raw_turns if turn.source is source]
+    alignments = alignments or {}
     # Every block is returned, including blocks from another source: the
     # derived Markdown has to reproduce the transcript in full, so a block this
     # job cannot speak for is carried through unlabeled rather than dropped.
-    return tuple(_label(block, exclusive, raw, source, policy) for block in blocks)
+    labels = []
+    for block in blocks:
+        label = _label(block, exclusive, raw, source, policy)
+        words = alignments.get((block.part, block.block))
+        if words and label.reason not in ("other_source", "invalid_range"):
+            pieces = split_block(block, words, exclusive, split_policy)
+            if pieces:
+                label = _from_pieces(label, pieces)
+        labels.append(label)
+    return tuple(labels)
+
+
+def _from_pieces(label: SegmentLabel, pieces: Sequence[Piece]) -> SegmentLabel:
+    """Derive the block-level decision from its pieces.
+
+    The block-level time statistics are kept as they were: they are the
+    evidence a reader tuning the policy wants to see next to the outcome.
+    """
+    speakers = sorted({piece.speaker_id for piece in pieces if piece.speaker_id})
+    if len(speakers) >= 2:
+        return replace(label, speaker_id=None, reason="multiple_speakers", pieces=tuple(pieces))
+    only = speakers[0]
+    if all(piece.labeled for piece in pieces) or label.speaker_id == only:
+        return replace(label, speaker_id=only, reason=None, pieces=tuple(pieces))
+    # One speaker was placed, but some of the text could not be, and the
+    # block-level view does not vouch for that speaker either.
+    return replace(label, speaker_id=None, reason="partially_aligned", pieces=tuple(pieces))
 
 
 def _label(

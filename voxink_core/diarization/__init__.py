@@ -19,7 +19,9 @@ from .artifacts import (
 )
 from .base import DiarizationProvider, LocalDiarizationModel, require_local_model
 from .transcript import TranscriptBlock, part_digests, read_blocks
+from .splitting import Piece, SplitPolicy, split_block
 from .models import (
+    AlignmentBlock,
     DiarizationError,
     DiarizationErrorCode,
     DiarizationRequest,
@@ -35,6 +37,7 @@ from .models import (
 __all__ = [
     "MARKDOWN_FILENAME",
     "TURNS_FILENAME",
+    "AlignmentBlock",
     "ArtifactPaths",
     "DiarizationError",
     "DiarizationErrorCode",
@@ -43,9 +46,11 @@ __all__ = [
     "DiarizationResult",
     "JobState",
     "LocalDiarizationModel",
+    "Piece",
     "ReconciliationPolicy",
     "SegmentLabel",
     "SpeakerTurn",
+    "SplitPolicy",
     "TranscriptBlock",
     "normalize_turns",
     "part_digests",
@@ -56,6 +61,7 @@ __all__ = [
     "seconds_to_ms",
     "sort_turns",
     "speaker_label",
+    "split_block",
     "stale_sources",
     "write_artifacts",
 ]

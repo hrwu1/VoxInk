@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from voxink_core.models import Source
+from voxink_core.models import Source, WordTimestamp
 from voxink_core.diarization.alignment import reconcile
 from voxink_core.diarization.artifacts import (
     MARKDOWN_FILENAME,
@@ -332,6 +332,102 @@ class StalenessTests(ArtifactTestCase):
 
     def test_read_document_returns_none_when_absent(self):
         self.assertIsNone(read_document(self.directory))
+
+
+class SplitBlockArtifactTests(unittest.TestCase):
+    """A block split by word alignment is rendered as its pieces."""
+
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+        write_session(self.directory, [make_event(0, 15_000, "可能太香了。真的好吃。")])
+        self.blocks = read_blocks(self.directory)
+        self.result = DiarizationResult(
+            model="pyannote/speaker-diarization-community-1",
+            model_revision="3533c8cf",
+            raw_turns=(turn("MIC_SPEAKER_01", 0, 1_100, exclusive=False), turn("MIC_SPEAKER_00", 1_100, 2_000, exclusive=False)),
+            exclusive_turns=(turn("MIC_SPEAKER_01", 0, 1_100), turn("MIC_SPEAKER_00", 1_100, 2_000)),
+        )
+        words = tuple(
+            WordTimestamp(c, 100 + i * 200, 300 + i * 200) for i, c in enumerate("可能太香了真的好吃")
+        )
+        self.labels = reconcile(
+            self.blocks,
+            exclusive_turns=self.result.exclusive_turns,
+            raw_turns=self.result.raw_turns,
+            source=Source.MICROPHONE,
+            alignments={(self.blocks[0].part, self.blocks[0].block): words},
+        )
+        self.aligner = {"model_id": "Qwen/Qwen3-ForcedAligner-0.6B", "model_revision": "c7cbfc20"}
+
+    def write(self):
+        return write_artifacts(
+            self.directory,
+            session_id=SESSION_ID,
+            source=Source.MICROPHONE,
+            result=self.result,
+            labels=self.labels,
+            source_artifacts=part_digests(self.directory),
+            created_at=CREATED_AT,
+            aligner=self.aligner,
+        )
+
+    def test_markdown_shows_one_sub_block_per_piece_with_the_text_intact(self):
+        paths = self.write()
+        markdown = paths.markdown.read_text(encoding="utf-8")
+        self.assertIn("**[00:00:00.100-00:00:01.100] [MIC] [MIC_SPEAKER_01]**\n可能太香了。", markdown)
+        self.assertIn("**[00:00:01.100-00:00:01.900] [MIC] [MIC_SPEAKER_00]**\n真的好吃。", markdown)
+        self.assertNotIn("[00:00:00.000-00:00:15.000]", markdown)
+        self.assertIn('aligner_model_id: "Qwen/Qwen3-ForcedAligner-0.6B"', markdown)
+
+    def test_document_records_pieces_as_ranges_and_the_aligner(self):
+        self.write()
+        document = read_document(self.directory)
+        self.assertEqual(document["producer"]["version"], "2")
+        self.assertEqual(document["producer"]["aligner"]["model_id"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        segment = document["segments"][0]
+        self.assertEqual(segment["unlabeled_reason"], "multiple_speakers")
+        self.assertEqual(
+            [(p["text_start"], p["text_end"], p["speaker_id"]) for p in segment["pieces"]],
+            [(0, 6, "MIC_SPEAKER_01"), (6, 11, "MIC_SPEAKER_00")],
+        )
+        self.assertNotIn('"text":', json.dumps(document))
+
+    def test_a_canonical_speaker_is_never_split(self):
+        write_session(self.directory, [make_event(0, 15_000, "可能太香了。真的好吃。", speaker="Host")])
+        self.blocks = read_blocks(self.directory)
+        words = tuple(
+            WordTimestamp(c, 100 + i * 200, 300 + i * 200) for i, c in enumerate("可能太香了真的好吃")
+        )
+        self.labels = reconcile(
+            self.blocks,
+            exclusive_turns=self.result.exclusive_turns,
+            raw_turns=self.result.raw_turns,
+            source=Source.MICROPHONE,
+            alignments={(self.blocks[0].part, self.blocks[0].block): words},
+        )
+        markdown = self.write().markdown.read_text(encoding="utf-8")
+        self.assertIn("[MIC] [Host]**\n可能太香了。真的好吃。", markdown)
+
+    def test_validation_rejects_pieces_that_do_not_tile_the_block(self):
+        document = build_document(
+            session_id=SESSION_ID,
+            source=Source.MICROPHONE,
+            result=self.result,
+            labels=self.labels,
+            source_artifacts=part_digests(self.directory),
+            created_at=CREATED_AT,
+        )
+        validate_document(document)
+        document["segments"][0]["pieces"][1]["text_start"] = 7
+        with self.assertRaises(ValueError):
+            validate_document(document)
+
+    def test_no_aligner_means_no_producer_entry(self):
+        self.aligner = None
+        self.write()
+        self.assertIsNone(read_document(self.directory)["producer"]["aligner"])
 
 
 if __name__ == "__main__":

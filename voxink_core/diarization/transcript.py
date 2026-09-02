@@ -23,6 +23,7 @@ from ..persistence.markdown import COMPLETE_MARKER, PART_PREFIX, RECOVERED_MARKE
 PART_GLOB = f"{PART_PREFIX}[0-9][0-9][0-9].md"
 
 _SOURCE_BY_TAG = {"MIC": Source.MICROPHONE, "SYSTEM": Source.SYSTEM}
+_TAG_BY_SOURCE = {source: tag for tag, source in _SOURCE_BY_TAG.items()}
 
 #: Matches the header `MarkdownTranscriptWriter._event_block` writes. Hours are
 #: not capped at two digits: the writer widens the field rather than truncating,
@@ -112,6 +113,11 @@ def block_digest(text: str) -> str:
     does not invalidate every block inside it.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def source_tag(source: Source) -> str:
+    """The header tag the canonical writer uses for a source."""
+    return _TAG_BY_SOURCE[Source(source)]
 
 
 def parse_timestamp(value: str) -> int:

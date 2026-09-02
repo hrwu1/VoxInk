@@ -21,21 +21,25 @@ import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models import Source
+from ..persistence.markdown import format_timestamp
 from .alignment import SegmentLabel
+from .splitting import Piece
 from .models import (
     DiarizationError,
     DiarizationErrorCode,
     DiarizationResult,
     SpeakerTurn,
 )
-from .transcript import file_digest
+from .transcript import TranscriptBlock, file_digest, source_tag
 
 
 SCHEMA_VERSION = 1
 TURNS_FILENAME = "speaker-turns.json"
 MARKDOWN_FILENAME = "transcript-with-speakers.md"
 PRODUCER_NAME = "voxink-pyannote-community-1"
-PRODUCER_VERSION = "1"
+#: Bumped when the meaning of the output changes. Version 2 added `pieces`:
+#: a block may be split at speaker boundaries by forced word alignment.
+PRODUCER_VERSION = "2"
 
 #: Derived artifacts are user data written into the user's own directory, and
 #: they describe who was speaking. Group and world get nothing.
@@ -57,8 +61,13 @@ def write_artifacts(
     labels: Sequence[SegmentLabel],
     source_artifacts: Mapping[str, str],
     created_at: datetime | None = None,
+    aligner: Mapping[str, str] | None = None,
 ) -> ArtifactPaths:
-    """Publish both derived artifacts, or leave the previous pair untouched."""
+    """Publish both derived artifacts, or leave the previous pair untouched.
+
+    `aligner` names the word-alignment model that split blocks into pieces,
+    as `model_id` and `model_revision`, or is None when no block was aligned.
+    """
     directory = Path(session_dir)
     source = Source(source)
     stamp = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -69,6 +78,7 @@ def write_artifacts(
         labels=labels,
         source_artifacts=source_artifacts,
         created_at=stamp,
+        aligner=aligner,
     )
     markdown = render_markdown(
         session_id=session_id,
@@ -77,6 +87,7 @@ def write_artifacts(
         labels=labels,
         source_artifacts=source_artifacts,
         created_at=stamp,
+        aligner=aligner,
     )
     validate_document(document)
     paths = ArtifactPaths(directory / TURNS_FILENAME, directory / MARKDOWN_FILENAME)
@@ -105,6 +116,7 @@ def build_document(
     labels: Sequence[SegmentLabel],
     source_artifacts: Mapping[str, str],
     created_at: datetime,
+    aligner: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble `speaker-turns.json` as a plain dictionary."""
     return {
@@ -117,6 +129,14 @@ def build_document(
             "version": PRODUCER_VERSION,
             "model_id": result.model,
             "model_revision": result.model_revision,
+            "aligner": (
+                {
+                    "model_id": str(aligner["model_id"]),
+                    "model_revision": str(aligner["model_revision"]),
+                }
+                if aligner
+                else None
+            ),
         },
         "created_at": _timestamp(created_at),
         "source_artifacts": [
@@ -137,11 +157,23 @@ def render_markdown(
     labels: Sequence[SegmentLabel],
     source_artifacts: Mapping[str, str],
     created_at: datetime,
+    aligner: Mapping[str, str] | None = None,
 ) -> str:
-    """Render the readable view, copying canonical blocks in their original order."""
+    """Render the readable view, copying canonical blocks in their original order.
+
+    A block split by word alignment is rendered as one sub-block per piece,
+    each with its own time range and label. The pieces' text, read in order,
+    is the canonical block's text exactly.
+    """
     digests = "\n".join(
         f'  - path: "{path}"\n    sha256: "{digest}"'
         for path, digest in sorted(source_artifacts.items())
+    )
+    aligner_lines = (
+        f'aligner_model_id: "{aligner["model_id"]}"\n'
+        f'aligner_model_revision: "{aligner["model_revision"]}"\n'
+        if aligner
+        else ""
     )
     header = (
         "---\n"
@@ -153,6 +185,7 @@ def render_markdown(
         f'producer_version: "{PRODUCER_VERSION}"\n'
         f'model_id: "{result.model}"\n'
         f'model_revision: "{result.model_revision}"\n'
+        f"{aligner_lines}"
         f'created_at: "{_timestamp(created_at)}"\n'
         f'speaker_turns: "{TURNS_FILENAME}"\n'
         "source_artifacts:\n"
@@ -161,7 +194,8 @@ def render_markdown(
         "# Transcript with speakers\n\n"
         "Derived from the canonical transcript parts listed above; it is not\n"
         "one of them. Blocks whose speaker could not be determined confidently\n"
-        "are reproduced without a label.\n\n"
+        "are reproduced without a label. A block in which more than one person\n"
+        "spoke is shown as several sub-blocks, split where the speaker changed.\n\n"
     )
     return header + "".join(_block_markdown(label) for label in labels)
 
@@ -211,7 +245,21 @@ def validate_document(document: Mapping[str, Any]) -> None:
             raise ValueError("speaker_coverage must be a ratio within [0, 1]")
         if "start_ms" in segment and not 0 <= segment["start_ms"] <= segment["end_ms"]:
             raise ValueError("segment times must satisfy 0 <= start_ms <= end_ms")
+        _validate_pieces(segment.get("pieces", ()))
     _reject_sensitive_keys(document)
+
+
+def _validate_pieces(pieces: Sequence[Mapping[str, Any]]) -> None:
+    """Pieces must tile their block from its first character on, in order."""
+    expected_start = 0
+    for piece in pieces:
+        if piece["text_start"] != expected_start or piece["text_end"] <= piece["text_start"]:
+            raise ValueError("pieces must be contiguous, non-empty character ranges from 0")
+        if not 0 <= piece["start_ms"] <= piece["end_ms"]:
+            raise ValueError("piece times must satisfy 0 <= start_ms <= end_ms")
+        if not 0.0 <= piece["speaker_coverage"] <= 1.0:
+            raise ValueError("piece speaker_coverage must be a ratio within [0, 1]")
+        expected_start = piece["text_end"]
 
 
 def read_document(session_dir: str | Path) -> dict[str, Any] | None:
@@ -247,12 +295,27 @@ def stale_sources(session_dir: str | Path, document: Mapping[str, Any]) -> tuple
 
 def _block_markdown(label: SegmentLabel) -> str:
     block = label.block
+    if label.pieces:
+        # A block that already carries a canonical speaker is never split:
+        # the transcript itself said who spoke, and this view adds to that
+        # rather than second-guessing it.
+        if not block.speaker:
+            return "".join(_piece_markdown(block, piece) for piece in label.pieces)
     header = block.header or f"**[{block.start_ms}-{block.end_ms}] [{block.source.value}]**"
     # A block that already carries a canonical speaker keeps it; this view adds
     # information, it never overrides what the transcript itself recorded.
     if label.speaker_id and not block.speaker:
         header = f"{header[:-2]} [{label.speaker_id}]**"
     return f"{header}\n{block.text}\n\n"
+
+
+def _piece_markdown(block: TranscriptBlock, piece: Piece) -> str:
+    speaker = f" [{piece.speaker_id}]" if piece.speaker_id else ""
+    header = (
+        f"**[{format_timestamp(piece.start_ms)}-{format_timestamp(piece.end_ms)}] "
+        f"[{source_tag(block.source)}]{speaker}**"
+    )
+    return f"{header}\n{block.text[piece.text_start : piece.text_end].strip()}\n\n"
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:

@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import unittest
 
-from voxink_core.models import Source
+from voxink_core.models import Source, WordTimestamp
 from voxink_core.diarization.alignment import ReconciliationPolicy, reconcile
 from voxink_core.diarization.models import SpeakerTurn
 from voxink_core.diarization.transcript import TranscriptBlock, block_digest
 
 
-def block(start_ms: int, end_ms: int, *, source: Source = Source.MICROPHONE, index: int = 1):
+def block(
+    start_ms: int,
+    end_ms: int,
+    *,
+    source: Source = Source.MICROPHONE,
+    index: int = 1,
+    text: str = "words",
+):
     return TranscriptBlock(
         part="transcript-part-001.md",
         block=index,
         source=source,
         start_ms=start_ms,
         end_ms=end_ms,
-        text="words",
+        text=text,
         speaker=None,
         sha256=block_digest(f"{start_ms}-{end_ms}"),
         header=f"**[{start_ms}-{end_ms}]**",
@@ -307,6 +314,79 @@ class PolicyValidationTests(unittest.TestCase):
             with self.subTest(**kwargs):
                 with self.assertRaises(ValueError):
                     ReconciliationPolicy(**kwargs)
+
+
+class AlignedSplitTests(unittest.TestCase):
+    """With word timings, a block is split and labeled from its pieces."""
+
+    def aligned(self, text: str, start_ms: int, step_ms: int):
+        return tuple(
+            WordTimestamp(character, start_ms + i * step_ms, start_ms + (i + 1) * step_ms)
+            for i, character in enumerate(text)
+        )
+
+    def reconcile_one(self, block_, words, exclusive):
+        return reconcile(
+            [block_],
+            exclusive_turns=list(exclusive),
+            raw_turns=list(exclusive),
+            source=Source.MICROPHONE,
+            alignments={(block_.part, block_.block): words},
+        )[0]
+
+    def test_two_speakers_in_one_block_become_pieces(self):
+        block_ = block(0, 15_000, text="太香了。好吃。")
+        result = self.reconcile_one(
+            block_,
+            self.aligned("太香了好吃", 100, 200),
+            [turn("MIC_SPEAKER_01", 0, 700), turn("MIC_SPEAKER_00", 700, 1_200)],
+        )
+        self.assertIsNone(result.speaker_id)
+        self.assertEqual(result.reason, "multiple_speakers")
+        self.assertEqual([p.speaker_id for p in result.pieces], ["MIC_SPEAKER_01", "MIC_SPEAKER_00"])
+        payload = result.to_dict()
+        self.assertEqual(payload["unlabeled_reason"], "multiple_speakers")
+        self.assertEqual(len(payload["pieces"]), 2)
+        self.assertNotIn("text", payload["pieces"][0])
+
+    def test_one_speaker_placed_by_words_is_labeled_despite_a_mostly_silent_window(self):
+        """The case block-level policy called insufficient_speech."""
+        block_ = block(0, 15_000, text="嗯。")
+        without = label_one(block_, exclusive=[turn("MIC_SPEAKER_01", 5_000, 5_600)])
+        self.assertEqual(without.reason, "insufficient_speech")
+        result = self.reconcile_one(
+            block_, self.aligned("嗯", 5_000, 600), [turn("MIC_SPEAKER_01", 5_000, 5_600)]
+        )
+        self.assertEqual(result.speaker_id, "MIC_SPEAKER_01")
+        self.assertIsNone(result.reason)
+        self.assertEqual(len(result.pieces), 1)
+
+    def test_words_that_do_not_fit_fall_back_to_the_block_rule(self):
+        block_ = block(0, 1_000, text="words")
+        result = self.reconcile_one(
+            block_, self.aligned("其他", 0, 100), [turn("MIC_SPEAKER_00", 0, 1_000)]
+        )
+        self.assertEqual(result.speaker_id, "MIC_SPEAKER_00")
+        self.assertEqual(result.pieces, ())
+        self.assertNotIn("pieces", result.to_dict())
+
+    def test_unplaced_text_with_one_speaker_defers_to_the_block_view(self):
+        block_ = block(0, 15_000, text="好吃。你是说你想再睡。")
+        placed = self.aligned("好吃", 0, 300)
+        stacked = tuple(WordTimestamp(c, 14_900, 14_900) for c in "你是说你想再睡")
+        exclusive = [turn("MIC_SPEAKER_00", 0, 600)]
+        result = self.reconcile_one(block_, placed + stacked, exclusive)
+        # Block-level: 600 ms of speech in 15 s is insufficient, and the
+        # unplaced words could be anyone's, so the block stays unlabeled.
+        self.assertIsNone(result.speaker_id)
+        self.assertEqual(result.reason, "partially_aligned")
+        self.assertEqual([p.speaker_id for p in result.pieces], ["MIC_SPEAKER_00", None])
+
+    def test_other_sources_and_invalid_ranges_are_never_split(self):
+        block_ = block(0, 1_000, source=Source.SYSTEM, text="好吃")
+        result = self.reconcile_one(block_, self.aligned("好吃", 0, 100), [turn("MIC_SPEAKER_00", 0, 1_000)])
+        self.assertEqual(result.reason, "other_source")
+        self.assertEqual(result.pieces, ())
 
 
 if __name__ == "__main__":

@@ -195,12 +195,13 @@ def _event_block(event: TranscriptEvent) -> str:
     source = "MIC" if event.source.value == "microphone" else "SYSTEM"
     speaker = f" [{event.speaker}]" if event.speaker else ""
     return (
-        f"**[{_format_timestamp(event.start_ms)}-{_format_timestamp(event.end_ms)}] "
+        f"**[{format_timestamp(event.start_ms)}-{format_timestamp(event.end_ms)}] "
         f"[{source}]{speaker}**\n{event.text.strip()}\n\n"
     )
 
 
-def _format_timestamp(milliseconds: int) -> str:
+def format_timestamp(milliseconds: int) -> str:
+    """Render milliseconds as the `HH:MM:SS.mmm` the block header carries."""
     hours, remainder = divmod(milliseconds, 3_600_000)
     minutes, remainder = divmod(remainder, 60_000)
     seconds, millis = divmod(remainder, 1_000)

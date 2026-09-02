@@ -102,6 +102,43 @@ class DiarizationRequest:
 
 
 @dataclass(frozen=True)
+class AlignmentBlock:
+    """One transcript block's text and window, for word-level alignment.
+
+    The `id` is opaque to the aligner: it is whatever the caller needs to
+    match timings back to the block, and it comes back unchanged.
+    """
+
+    id: str
+    start_ms: int
+    end_ms: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            raise ValueError("id must not be empty")
+        for value in (self.start_ms, self.end_ms):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError("timestamps must be integers")
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("timestamps must satisfy 0 <= start_ms < end_ms")
+        if not self.text.strip():
+            raise ValueError("text must not be blank")
+
+    @property
+    def duration_ms(self) -> int:
+        return self.end_ms - self.start_ms
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True)
 class SpeakerTurn:
     """One speaker's uninterrupted activity, in session-relative milliseconds."""
 
