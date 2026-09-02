@@ -270,9 +270,21 @@ The 70% threshold is a configurable policy with 0.70 as the version-one
 default, not a model constant. Tests should lock down boundary behavior at
 69.9%, 70%, ties, gaps, nested overlap, and zero-length intersections.
 
-Do not split a transcript segment in version one. Qwen currently has no forced
-word alignment, so inventing a textual split at a diarization boundary would
-be misleading. A later forced-alignment module can enable safe splitting.
+A transcript segment is a chunker window of up to fifteen seconds, while a
+turn in a conversation lasts a second or two, so the rules above cannot label
+real dialogue: the window holds both people. Splitting is therefore done, but
+only on evidence. The post-Stop worker runs `Qwen3-ForcedAligner-0.6B`
+(`qwen_asr`'s forced aligner, Apache-2.0, offline) over each block's audio
+and text to time every word; `splitting.py` then places each word against the
+exclusive turns and cuts the block into consecutive same-speaker pieces,
+snapping a cut to the nearest punctuation within two words. Words the aligner
+could not place -- a run stacked on one instant, or timed past the block's
+end -- stay unlabeled rather than inheriting a neighbour. A block whose pieces
+all agree takes that speaker; one whose pieces disagree is
+`multiple_speakers` at block level, with the detail in `pieces`. Text is
+never rewritten: a piece is a character range of the canonical block and the
+ranges tile it exactly. Without the aligner package, blocks are labeled whole
+as above.
 
 ### 8.1 Canonical transcript references
 
