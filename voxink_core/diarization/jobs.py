@@ -42,6 +42,7 @@ from .pyannote import OFFLINE_ENVIRONMENT, resolve_device
 from .splitting import SplitPolicy
 from .transcript import TranscriptBlock, file_digest, part_digests, read_blocks
 from .worker import decode_alignment, decode_result
+from ..speakers import SpeakerRegistry, SpeakerRegistryError
 
 
 #: Private scratch space inside the session directory. Anything here is
@@ -75,6 +76,8 @@ class DiarizationJob:
     #: aligner stage reported, or None when it ran or was never configured.
     alignment_error: dict[str, Any] | None = None
     artifacts: tuple[str, ...] = ()
+    #: Speakers the local registry recognized, by anonymous id.
+    recognized: dict[str, str] = field(default_factory=dict)
     _thread: threading.Thread | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +95,7 @@ class DiarizationJob:
             "split_segments": self.split_segments,
             "alignment_error": self.alignment_error,
             "artifacts": list(self.artifacts),
+            "recognized_speakers": dict(self.recognized),
         }
 
 
@@ -117,12 +121,15 @@ class DiarizationJobManager:
         timeout_factor: float = 2.0,
         runner: Runner | None = None,
         enabled: bool = True,
+        # Voices the user chose to remember; None disables recognition.
+        registry: SpeakerRegistry | None = None,
     ) -> None:
         self.model_path = Path(model_path)
         self.device = device
         self.policy = policy or ReconciliationPolicy()
         self.aligner_path = Path(aligner_path) if aligner_path else None
         self.split_policy = split_policy or SplitPolicy()
+        self.registry = registry
         self.min_timeout_seconds = min_timeout_seconds
         self.timeout_factor = timeout_factor
         self.enabled = enabled
@@ -230,6 +237,16 @@ class DiarizationJobManager:
         payload["split_segments"] = sum(
             1 for s in document.get("segments", ()) if s.get("unlabeled_reason") == "multiple_speakers"
         )
+        # Names and registry links only; the embeddings stay in the file.
+        payload["speakers"] = {
+            speaker_id: {
+                "name": (info or {}).get("name"),
+                "registry_id": (info or {}).get("registry_id"),
+                "similarity": (info or {}).get("similarity"),
+                "has_embedding": bool((info or {}).get("embedding")),
+            }
+            for speaker_id, info in (document.get("speakers") or {}).items()
+        }
         if stale:
             payload["state"] = JobState.STALE.value
             payload["error"] = DiarizationError(
@@ -373,6 +390,7 @@ class DiarizationJobManager:
         sources = dict(part_digests(session_dir))
         for part in source_parts(session_dir, job.source):
             sources[part.name] = file_digest(part)
+        speakers = self._identify(result)
         write_artifacts(
             session_dir,
             session_id=job.session_id,
@@ -388,12 +406,48 @@ class DiarizationJobManager:
                 if words
                 else None
             ),
+            speakers=speakers,
         )
+        job.recognized = {
+            speaker_id: info["name"] for speaker_id, info in speakers.items() if info.get("name")
+        }
         job.speaker_count = len(result.speaker_ids)
         job.total_segments = len(labels)
         job.labeled_segments = sum(1 for label in labels if label.labeled)
         job.split_segments = sum(1 for label in labels if label.reason == "multiple_speakers")
         job.artifacts = (TURNS_FILENAME, MARKDOWN_FILENAME)
+
+    def _identify(self, result: DiarizationResult) -> dict[str, dict[str, Any]]:
+        """Match this session's voices against the ones the user remembered.
+
+        One registry voice may claim at most one session speaker: if two
+        anonymous speakers both resemble the same known voice, the closer one
+        gets the name and the other stays anonymous rather than duplicating a
+        person.
+        """
+        registry = self.registry
+        if registry is None or not result.embeddings:
+            return {}
+        candidates = []
+        for speaker_id, embedding in result.embeddings.items():
+            try:
+                match = registry.match(embedding, model_id=result.model)
+            except SpeakerRegistryError:
+                match = None
+            if match is not None:
+                candidates.append((match.similarity, speaker_id, match))
+        speakers: dict[str, dict[str, Any]] = {}
+        claimed: set[str] = set()
+        for similarity, speaker_id, match in sorted(candidates, key=lambda item: -item[0]):
+            if match.speaker.id in claimed:
+                continue
+            claimed.add(match.speaker.id)
+            speakers[speaker_id] = {
+                "name": match.speaker.name,
+                "registry_id": match.speaker.id,
+                "similarity": round(similarity, 4),
+            }
+        return speakers
 
     def _timeout_for(self, duration_ms: int) -> float:
         return max(self.min_timeout_seconds, duration_ms / 1000.0 * self.timeout_factor)

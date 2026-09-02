@@ -30,7 +30,7 @@ from .models import (
     DiarizationResult,
     SpeakerTurn,
 )
-from .transcript import TranscriptBlock, file_digest, source_tag
+from .transcript import TranscriptBlock, file_digest, read_blocks, source_tag
 
 
 SCHEMA_VERSION = 1
@@ -62,11 +62,15 @@ def write_artifacts(
     source_artifacts: Mapping[str, str],
     created_at: datetime | None = None,
     aligner: Mapping[str, str] | None = None,
+    speakers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> ArtifactPaths:
     """Publish both derived artifacts, or leave the previous pair untouched.
 
     `aligner` names the word-alignment model that split blocks into pieces,
     as `model_id` and `model_revision`, or is None when no block was aligned.
+    `speakers` carries, per anonymous speaker id, the optional `name`,
+    `registry_id`, `similarity`, and `embedding` the identification step
+    produced; names appear in the Markdown view in place of the ids.
     """
     directory = Path(session_dir)
     source = Source(source)
@@ -79,6 +83,7 @@ def write_artifacts(
         source_artifacts=source_artifacts,
         created_at=stamp,
         aligner=aligner,
+        speakers=speakers,
     )
     markdown = render_markdown(
         session_id=session_id,
@@ -88,8 +93,13 @@ def write_artifacts(
         source_artifacts=source_artifacts,
         created_at=stamp,
         aligner=aligner,
+        names=speaker_names(document),
     )
     validate_document(document)
+    return _publish(directory, document, markdown)
+
+
+def _publish(directory: Path, document: Mapping[str, Any], markdown: str) -> ArtifactPaths:
     paths = ArtifactPaths(directory / TURNS_FILENAME, directory / MARKDOWN_FILENAME)
     try:
         # Markdown first: if publishing the JSON then fails, the readable view
@@ -108,6 +118,92 @@ def write_artifacts(
     return paths
 
 
+def speaker_names(document: Mapping[str, Any]) -> dict[str, str]:
+    """Anonymous id to display name, for every speaker the document names."""
+    names = {}
+    for speaker_id, info in (document.get("speakers") or {}).items():
+        name = (info or {}).get("name")
+        if isinstance(name, str) and name.strip():
+            names[str(speaker_id)] = " ".join(name.split())
+    return names
+
+
+def rename_speaker(
+    session_dir: str | Path,
+    speaker_id: str,
+    name: str | None,
+    *,
+    registry_id: str | None = None,
+    similarity: float | None = None,
+) -> dict[str, Any]:
+    """Name (or un-name) one anonymous speaker and re-render the Markdown view.
+
+    The JSON keeps its turns, segments, and embeddings; only the `speakers`
+    entry changes, and the readable view is rebuilt from the canonical blocks
+    so it never drifts from the transcript.
+    """
+    directory = Path(session_dir)
+    document = read_document(directory)
+    if document is None:
+        raise DiarizationError(
+            DiarizationErrorCode.AUDIO_UNAVAILABLE, "this session has no speaker artifacts"
+        )
+    speakers = dict(document.get("speakers") or {})
+    known = {turn["speaker_id"] for turn in document.get("raw_turns", ())}
+    if speaker_id not in known and speaker_id not in speakers:
+        raise DiarizationError(
+            DiarizationErrorCode.INVALID_AUDIO, f"unknown speaker: {speaker_id}"
+        )
+    entry = dict(speakers.get(speaker_id) or {})
+    cleaned = " ".join((name or "").split())[:80]
+    entry["name"] = cleaned or None
+    entry["registry_id"] = registry_id if cleaned else None
+    entry["similarity"] = similarity if cleaned else None
+    entry.setdefault("embedding", None)
+    speakers[speaker_id] = entry
+    document = {**document, "speakers": speakers}
+    validate_document(document)
+    markdown = render_from_document(directory, document)
+    _publish(directory, document, markdown)
+    return document
+
+
+def render_from_document(session_dir: str | Path, document: Mapping[str, Any]) -> str:
+    """Re-render the Markdown view from a stored document and the canonical parts."""
+    directory = Path(session_dir)
+    blocks = {(block.part, block.block): block for block in read_blocks(directory)}
+    names = speaker_names(document)
+    producer = document.get("producer") or {}
+    aligner = producer.get("aligner")
+    body = []
+    for segment in document.get("segments", ()):
+        reference = segment.get("canonical_ref") or {}
+        block = blocks.get((reference.get("part"), reference.get("block")))
+        if block is None:
+            continue
+        pieces = tuple(
+            (
+                int(piece["text_start"]), int(piece["text_end"]),
+                int(piece["start_ms"]), int(piece["end_ms"]), piece.get("speaker_id"),
+            )
+            for piece in segment.get("pieces", ())
+        )
+        body.append(_render_block(block, segment.get("speaker_id"), pieces, names))
+    header = _markdown_header(
+        session_id=str(document.get("session_id", "")),
+        source=Source(document.get("source", "microphone")),
+        model=str(producer.get("model_id", "")),
+        model_revision=str(producer.get("model_revision", "")),
+        source_artifacts={
+            item["path"]: item["sha256"] for item in document.get("source_artifacts", ())
+        },
+        created_at=str(document.get("created_at", "")),
+        aligner=aligner,
+        names=names,
+    )
+    return header + "".join(body)
+
+
 def build_document(
     *,
     session_id: str,
@@ -117,8 +213,19 @@ def build_document(
     source_artifacts: Mapping[str, str],
     created_at: datetime,
     aligner: Mapping[str, str] | None = None,
+    speakers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble `speaker-turns.json` as a plain dictionary."""
+    identities: dict[str, dict[str, Any]] = {}
+    for speaker_id in result.speaker_ids:
+        info = dict((speakers or {}).get(speaker_id) or {})
+        embedding = result.embeddings.get(speaker_id)
+        identities[speaker_id] = {
+            "name": info.get("name"),
+            "registry_id": info.get("registry_id"),
+            "similarity": info.get("similarity"),
+            "embedding": list(embedding) if embedding else None,
+        }
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ready",
@@ -146,6 +253,7 @@ def build_document(
         "raw_turns": [turn.to_dict() for turn in result.raw_turns],
         "exclusive_turns": [turn.to_dict() for turn in result.exclusive_turns],
         "segments": [label.to_dict() for label in labels],
+        "speakers": identities,
     }
 
 
@@ -158,13 +266,40 @@ def render_markdown(
     source_artifacts: Mapping[str, str],
     created_at: datetime,
     aligner: Mapping[str, str] | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> str:
     """Render the readable view, copying canonical blocks in their original order.
 
     A block split by word alignment is rendered as one sub-block per piece,
     each with its own time range and label. The pieces' text, read in order,
-    is the canonical block's text exactly.
+    is the canonical block's text exactly. `names` replaces anonymous ids
+    with the names the user gave or the registry recognized.
     """
+    names = dict(names or {})
+    header = _markdown_header(
+        session_id=session_id,
+        source=source,
+        model=result.model,
+        model_revision=result.model_revision,
+        source_artifacts=source_artifacts,
+        created_at=_timestamp(created_at),
+        aligner=aligner,
+        names=names,
+    )
+    return header + "".join(_block_markdown(label, names) for label in labels)
+
+
+def _markdown_header(
+    *,
+    session_id: str,
+    source: Source,
+    model: str,
+    model_revision: str,
+    source_artifacts: Mapping[str, str],
+    created_at: str,
+    aligner: Mapping[str, str] | None,
+    names: Mapping[str, str],
+) -> str:
     digests = "\n".join(
         f'  - path: "{path}"\n    sha256: "{digest}"'
         for path, digest in sorted(source_artifacts.items())
@@ -175,7 +310,12 @@ def render_markdown(
         if aligner
         else ""
     )
-    header = (
+    name_lines = "".join(
+        f'  {speaker_id}: "{name.replace(chr(34), chr(39))}"\n'
+        for speaker_id, name in sorted(names.items())
+    )
+    speakers_block = f"speakers:\n{name_lines}" if name_lines else ""
+    return (
         "---\n"
         "schema_version: 1\n"
         "derived: true\n"
@@ -183,11 +323,12 @@ def render_markdown(
         f'source: "{Source(source).value}"\n'
         f'producer: "{PRODUCER_NAME}"\n'
         f'producer_version: "{PRODUCER_VERSION}"\n'
-        f'model_id: "{result.model}"\n'
-        f'model_revision: "{result.model_revision}"\n'
+        f'model_id: "{model}"\n'
+        f'model_revision: "{model_revision}"\n'
         f"{aligner_lines}"
-        f'created_at: "{_timestamp(created_at)}"\n'
+        f'created_at: "{created_at}"\n'
         f'speaker_turns: "{TURNS_FILENAME}"\n'
+        f"{speakers_block}"
         "source_artifacts:\n"
         f"{digests}\n"
         "---\n\n"
@@ -197,7 +338,6 @@ def render_markdown(
         "are reproduced without a label. A block in which more than one person\n"
         "spoke is shown as several sub-blocks, split where the speaker changed.\n\n"
     )
-    return header + "".join(_block_markdown(label) for label in labels)
 
 
 def validate_document(document: Mapping[str, Any]) -> None:
@@ -293,29 +433,53 @@ def stale_sources(session_dir: str | Path, document: Mapping[str, Any]) -> tuple
     return tuple(sorted(changed))
 
 
-def _block_markdown(label: SegmentLabel) -> str:
-    block = label.block
-    if label.pieces:
+def _block_markdown(label: SegmentLabel, names: Mapping[str, str] | None = None) -> str:
+    pieces = tuple(
+        (piece.text_start, piece.text_end, piece.start_ms, piece.end_ms, piece.speaker_id)
+        for piece in label.pieces
+    )
+    return _render_block(label.block, label.speaker_id, pieces, names or {})
+
+
+_PieceTuple = tuple[int, int, int, int, str | None]
+
+
+def _render_block(
+    block: TranscriptBlock,
+    speaker_id: str | None,
+    pieces: Sequence[_PieceTuple],
+    names: Mapping[str, str],
+) -> str:
+    if pieces:
         # A block that already carries a canonical speaker is never split:
         # the transcript itself said who spoke, and this view adds to that
         # rather than second-guessing it.
         if not block.speaker:
-            return "".join(_piece_markdown(block, piece) for piece in label.pieces)
+            return "".join(_piece_markdown(block, piece, names) for piece in pieces)
     header = block.header or f"**[{block.start_ms}-{block.end_ms}] [{block.source.value}]**"
     # A block that already carries a canonical speaker keeps it; this view adds
     # information, it never overrides what the transcript itself recorded.
-    if label.speaker_id and not block.speaker:
-        header = f"{header[:-2]} [{label.speaker_id}]**"
+    if speaker_id and not block.speaker:
+        header = f"{header[:-2]} [{_display(speaker_id, names)}]**"
     return f"{header}\n{block.text}\n\n"
 
 
-def _piece_markdown(block: TranscriptBlock, piece: Piece) -> str:
-    speaker = f" [{piece.speaker_id}]" if piece.speaker_id else ""
+def _piece_markdown(block: TranscriptBlock, piece: _PieceTuple, names: Mapping[str, str]) -> str:
+    text_start, text_end, start_ms, end_ms, speaker_id = piece
+    speaker = f" [{_display(speaker_id, names)}]" if speaker_id else ""
     header = (
-        f"**[{format_timestamp(piece.start_ms)}-{format_timestamp(piece.end_ms)}] "
+        f"**[{format_timestamp(start_ms)}-{format_timestamp(end_ms)}] "
         f"[{source_tag(block.source)}]{speaker}**"
     )
-    return f"{header}\n{block.text[piece.text_start : piece.text_end].strip()}\n\n"
+    return f"{header}\n{block.text[text_start:text_end].strip()}\n\n"
+
+
+def _display(speaker_id: str, names: Mapping[str, str]) -> str:
+    """A name in brackets must not contain a bracket, or the header breaks."""
+    name = names.get(speaker_id)
+    if not name:
+        return speaker_id
+    return name.replace("[", "(").replace("]", ")")
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:

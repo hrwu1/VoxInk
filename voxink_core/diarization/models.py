@@ -8,7 +8,7 @@ untested surface left is the thin adapter that talks to the pipeline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import math
 from pathlib import Path
@@ -184,6 +184,9 @@ class DiarizationResult:
     model_revision: str
     raw_turns: tuple[SpeakerTurn, ...]
     exclusive_turns: tuple[SpeakerTurn, ...]
+    #: One voice embedding per anonymous speaker id, when the pipeline
+    #: produced them. Session-local until the user chooses to remember one.
+    embeddings: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("model", "model_revision"):
@@ -191,6 +194,13 @@ class DiarizationResult:
                 raise ValueError(f"{name} must not be empty")
         for name in ("raw_turns", "exclusive_turns"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        cleaned = {}
+        for speaker_id, vector in dict(self.embeddings).items():
+            values = tuple(float(value) for value in vector)
+            if not values or any(not math.isfinite(value) for value in values):
+                raise ValueError(f"embedding for {speaker_id} must be a finite, non-empty vector")
+            cleaned[str(speaker_id)] = values
+        object.__setattr__(self, "embeddings", cleaned)
 
     @property
     def speaker_ids(self) -> tuple[str, ...]:
@@ -240,6 +250,20 @@ def normalize_turns(
         _build_turns(raw_spans, mapping, source, exclusive=False),
         _build_turns(exclusive_spans, mapping, source, exclusive=True),
     )
+
+
+def speaker_mapping(
+    raw: Sequence[tuple[str, float, float]],
+    exclusive: Sequence[tuple[str, float, float]],
+    *,
+    source: Source,
+) -> dict[str, str]:
+    """The pipeline-label to anonymous-id mapping `normalize_turns` applies.
+
+    Exposed so per-speaker data the pipeline keys by its own labels, such as
+    voice embeddings, can be re-keyed the same way as the turns.
+    """
+    return _label_mapping(_to_spans(raw), _to_spans(exclusive), Source(source))
 
 
 def sort_turns(turns: Iterable[SpeakerTurn]) -> tuple[SpeakerTurn, ...]:

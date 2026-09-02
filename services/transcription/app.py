@@ -50,6 +50,9 @@ from voxink_core.persistence.audio import AudioRetentionWriter
 from voxink_core.providers.base import TranscriptionProvider
 from voxink_core.providers.qwen import QwenLocalProvider
 from voxink_core.session_ids import new_session_id
+from voxink_core.diarization.artifacts import read_document, rename_speaker
+from voxink_core.diarization.models import DiarizationError
+from voxink_core.speakers import SPEAKERS_FILENAME, SpeakerRegistry, SpeakerRegistryError
 from voxink_core.sessions import (
     InvalidSessionTransition,
     Session,
@@ -155,6 +158,21 @@ class GrantClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     claim_secret: str
+
+
+class SpeakerNameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Empty clears the name.
+    name: str = ""
+    #: Store this session's voice embedding under the name for later sessions.
+    remember: bool = False
+
+
+class KnownSpeakerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
 
 
 class SessionCreateRequest(BaseModel):
@@ -269,11 +287,14 @@ class ServiceRuntime:
             settings.vocabulary_path or settings.output_root / VOCABULARY_FILENAME
         )
         self.sessions = sessions or SessionManager(settings.output_root)
+        # Voices the user asked to remember. Opt-in per voice, local only.
+        self.speakers = SpeakerRegistry(settings.state_root / SPEAKERS_FILENAME)
         self.diarization = DiarizationJobManager(
             model_path=settings.diarization_model_path,
             device=settings.diarization_device,
             aligner_path=settings.diarization_aligner_path,
             enabled=settings.diarization_enabled,
+            registry=self.speakers,
         )
         self.translator = translator or _default_translator(settings)
         # Serializes translation across streams; the model is not re-entrant.
@@ -1016,6 +1037,93 @@ def create_app(
             regenerate=(body or DiarizationRequestBody()).regenerate,
         )
         return job.to_dict()
+
+    # -- speakers who keep their names ------------------------------------------
+
+    @app.get("/v1/speakers")
+    async def known_speakers(http: Request) -> dict[str, Any]:
+        _require_owner(http)
+        return {
+            "speakers": [item.to_dict() for item in runtime.speakers.list()],
+            "threshold": runtime.speakers.threshold,
+            "path": str(runtime.speakers.path),
+        }
+
+    @app.post("/v1/speakers/{registry_id}")
+    async def rename_known_speaker(http: Request, registry_id: str, body: KnownSpeakerRequest) -> dict[str, Any]:
+        _require_owner(http)
+        try:
+            known = runtime.speakers.rename(registry_id, body.name)
+        except SpeakerRegistryError as exc:
+            raise HTTPException(status_code=404 if "unknown" in str(exc) else 422, detail=str(exc)) from exc
+        runtime.audit.record("speakers.rename", client="owner", result="ok", registry_id=registry_id)
+        return {"speaker": known.to_dict()}
+
+    @app.delete("/v1/speakers/{registry_id}")
+    async def forget_known_speaker(http: Request, registry_id: str) -> dict[str, Any]:
+        _require_owner(http)
+        try:
+            known = runtime.speakers.forget(registry_id)
+        except SpeakerRegistryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        runtime.audit.record("speakers.forget", client="owner", result="ok", registry_id=registry_id)
+        return {"speaker": known.to_dict()}
+
+    @app.post("/v1/sessions/{session_id}/speakers/{speaker_id}")
+    async def name_session_speaker(
+        http: Request, session_id: str, speaker_id: str, body: SpeakerNameRequest
+    ) -> dict[str, Any]:
+        """Name one anonymous speaker of a finished session, and maybe remember the voice."""
+        _require_owner(http)
+        directory = _session_directory(runtime, session_id)
+        document = await asyncio.to_thread(read_document, directory)
+        if document is None:
+            raise HTTPException(status_code=404, detail="this session has no speaker artifacts yet")
+        job = runtime.diarization.get(session_id)
+        if job is not None and job.state.value == "processing":
+            raise HTTPException(status_code=409, detail="speakers are still being identified")
+        name = " ".join(body.name.split())
+        registry_id: str | None = None
+        similarity: float | None = None
+        if name and body.remember:
+            embedding = ((document.get("speakers") or {}).get(speaker_id) or {}).get("embedding")
+            if not embedding:
+                raise HTTPException(
+                    status_code=409,
+                    detail="this speaker has no voice embedding to remember; name it without remembering",
+                )
+            try:
+                known = await asyncio.to_thread(
+                    runtime.speakers.enroll,
+                    name,
+                    embedding,
+                    model_id=str((document.get("producer") or {}).get("model_id", "")),
+                )
+            except SpeakerRegistryError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            registry_id = known.id
+            similarity = 1.0
+        try:
+            updated = await asyncio.to_thread(
+                rename_speaker, directory, speaker_id, name or None,
+                registry_id=registry_id, similarity=similarity,
+            )
+        except DiarizationError as exc:
+            raise HTTPException(status_code=404 if "unknown speaker" in exc.message else 409, detail=exc.message) from exc
+        runtime.audit.record(
+            "speakers.name", client="owner", result="ok", session_id=session_id,
+            speaker_id=speaker_id, remembered=bool(registry_id),
+        )
+        return {
+            "session_id": session_id,
+            "speaker_id": speaker_id,
+            "name": name or None,
+            "registry_id": registry_id,
+            "speakers": {
+                identifier: {"name": (info or {}).get("name"), "registry_id": (info or {}).get("registry_id")}
+                for identifier, info in (updated.get("speakers") or {}).items()
+            },
+        }
 
     @app.get("/v1/devices")
     async def devices() -> dict[str, Any]:

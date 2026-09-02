@@ -279,6 +279,26 @@ class ControlClient:
             body={"regenerate": regenerate},
         )
 
+    # -- Speakers who keep their names --------------------------------------
+
+    def known_speakers(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/speakers")
+
+    def name_speaker(
+        self, session_id: str, speaker_id: str, *, name: str, remember: bool = False
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/v1/sessions/{_segment(session_id)}/speakers/{_segment(speaker_id)}",
+            body={"name": name, "remember": remember},
+        )
+
+    def rename_known_speaker(self, registry_id: str, name: str) -> dict[str, Any]:
+        return self._request("POST", f"/v1/speakers/{_segment(registry_id)}", body={"name": name})
+
+    def forget_speaker(self, registry_id: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/speakers/{_segment(registry_id)}")
+
     def transcripts(self) -> dict[str, Any]:
         return self._request("GET", "/v1/transcripts")
 

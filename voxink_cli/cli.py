@@ -649,6 +649,44 @@ def _vocabulary_replace(args: argparse.Namespace, client: ControlClient) -> Resu
 
 
 # ---------------------------------------------------------------------------
+# Speakers who keep their names
+# ---------------------------------------------------------------------------
+
+
+def _speakers_list(args: argparse.Namespace, client: ControlClient) -> Result:
+    response = client.known_speakers()
+    speakers = response.get("speakers", [])
+    text = "\n".join(
+        f"{item['id']}\t{item['name']}\t{item.get('samples', 1)} sample(s)\t{item.get('model_id', '')}"
+        for item in speakers
+    )
+    return Result(
+        {"speakers": speakers, "threshold": response.get("threshold"), "path": response.get("path")},
+        text=text or "No remembered voices.",
+    )
+
+
+def _speakers_name(args: argparse.Namespace, client: ControlClient) -> Result:
+    named = client.name_speaker(
+        args.session_id, args.speaker_id, name=args.name, remember=args.remember
+    )
+    text = f"{args.speaker_id} is now {named.get('name') or 'unnamed'} in {args.session_id}"
+    if named.get("registry_id"):
+        text += f"; voice remembered as {named['registry_id']}"
+    return Result(named, text=text)
+
+
+def _speakers_rename(args: argparse.Namespace, client: ControlClient) -> Result:
+    speaker = client.rename_known_speaker(args.registry_id, args.name).get("speaker", {})
+    return Result({"speaker": speaker}, text=f"{speaker.get('id')} is now {speaker.get('name')}")
+
+
+def _speakers_forget(args: argparse.Namespace, client: ControlClient) -> Result:
+    speaker = client.forget_speaker(args.registry_id).get("speaker", {})
+    return Result({"speaker": speaker}, text=f"forgot {speaker.get('name')} ({speaker.get('id')})")
+
+
+# ---------------------------------------------------------------------------
 # Permissions (§14.5): ask, claim, inspect. Never issue.
 # ---------------------------------------------------------------------------
 
@@ -1010,6 +1048,26 @@ def build_parser() -> argparse.ArgumentParser:
     select = leaf(models, "select", "Make one installed model active.")
     select.add_argument("model")
     select.set_defaults(handler=_models_select, command="models.select")
+
+    speakers = group("speakers", "Name speakers and manage remembered voices.")
+    leaf(speakers, "list", "List voices remembered on this Mac.").set_defaults(
+        handler=_speakers_list, command="speakers.list"
+    )
+    name = leaf(speakers, "name", "Name a speaker in a finished session.")
+    name.add_argument("session_id")
+    name.add_argument("speaker_id", help="anonymous id such as MIC_SPEAKER_00")
+    name.add_argument("name", help="display name; an empty string clears it")
+    name.add_argument(
+        "--remember", action="store_true", help="store the voice so later sessions recognize it"
+    )
+    name.set_defaults(handler=_speakers_name, command="speakers.name")
+    rename = leaf(speakers, "rename", "Rename a remembered voice.")
+    rename.add_argument("registry_id")
+    rename.add_argument("name")
+    rename.set_defaults(handler=_speakers_rename, command="speakers.rename")
+    forget = leaf(speakers, "forget", "Delete a remembered voice.")
+    forget.add_argument("registry_id")
+    forget.set_defaults(handler=_speakers_forget, command="speakers.forget")
 
     permissions = group("permissions", "Ask for, claim, and inspect agent grants.")
     leaf(permissions, "scopes", "List the scopes a grant can carry.").set_defaults(

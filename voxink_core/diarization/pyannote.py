@@ -21,6 +21,7 @@ from .models import (
     DiarizationRequest,
     DiarizationResult,
     normalize_turns,
+    speaker_mapping,
 )
 
 
@@ -99,16 +100,17 @@ class PyannoteCommunityProvider:
                 audio=request.audio_path.name,
                 duration_ms=duration_ms,
             ) from exc
-        raw_turns, exclusive_turns = normalize_turns(
-            _triples(getattr(output, "speaker_diarization", None)),
-            _triples(getattr(output, "exclusive_speaker_diarization", None)),
-            source=request.source,
-        )
+        raw = _triples(getattr(output, "speaker_diarization", None))
+        exclusive = _triples(getattr(output, "exclusive_speaker_diarization", None))
+        raw_turns, exclusive_turns = normalize_turns(raw, exclusive, source=request.source)
         return DiarizationResult(
             model=model.source_model_id,
             model_revision=model.revision,
             raw_turns=raw_turns,
             exclusive_turns=exclusive_turns,
+            embeddings=_embeddings(
+                output, speaker_mapping(raw, exclusive, source=request.source)
+            ),
         )
 
     def _load(self, model: LocalDiarizationModel) -> Any:
@@ -200,6 +202,34 @@ def _speaker_bounds(request: DiarizationRequest) -> dict[str, int]:
     if request.max_speakers is not None:
         bounds["max_speakers"] = request.max_speakers
     return bounds
+
+
+def _embeddings(output: Any, mapping: dict[str, str]) -> dict[str, tuple[float, ...]]:
+    """One centroid per speaker, re-keyed to the anonymous session ids.
+
+    Community-1 returns `speaker_embeddings[i]` for the i-th label of
+    `speaker_diarization.labels()`. A pipeline without embeddings, or one
+    whose rows do not line up with its labels, simply yields none: names are
+    an extra on top of diarization, never a reason for it to fail.
+    """
+    vectors = getattr(output, "speaker_embeddings", None)
+    annotation = getattr(output, "speaker_diarization", None)
+    if vectors is None or annotation is None:
+        return {}
+    try:
+        labels = list(annotation.labels())
+        rows = [[float(value) for value in row] for row in vectors]
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    if len(rows) != len(labels):
+        return {}
+    embeddings = {}
+    for label, row in zip(labels, rows):
+        speaker_id = mapping.get(str(label))
+        if speaker_id is None or not row or any(value != value for value in row):
+            continue
+        embeddings[speaker_id] = tuple(row)
+    return embeddings
 
 
 def _triples(annotation: Any) -> Sequence[tuple[str, float, float]]:

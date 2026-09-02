@@ -122,6 +122,9 @@ def encode_result(result: DiarizationResult) -> dict[str, Any]:
         "model_revision": result.model_revision,
         "raw_turns": [_encode_turn(turn) for turn in result.raw_turns],
         "exclusive_turns": [_encode_turn(turn) for turn in result.exclusive_turns],
+        "embeddings": {
+            speaker_id: list(vector) for speaker_id, vector in result.embeddings.items()
+        },
     }
 
 
@@ -141,11 +144,19 @@ def decode_result(payload: dict[str, Any], *, source: Source) -> DiarizationResu
             for item in payload[key]
         )
 
+    embeddings = payload.get("embeddings") or {}
+    if not isinstance(embeddings, dict):
+        embeddings = {}
     return DiarizationResult(
         model=payload["model"],
         model_revision=payload["model_revision"],
         raw_turns=turns("raw_turns", False),
         exclusive_turns=turns("exclusive_turns", True),
+        embeddings={
+            str(speaker_id): tuple(float(value) for value in vector)
+            for speaker_id, vector in embeddings.items()
+            if isinstance(vector, (list, tuple)) and vector
+        },
     )
 
 
