@@ -29,8 +29,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
+from voxink_core.audit import AUDIT_FILENAME, AuditLog
 from voxink_core.diarization.jobs import DiarizationJobManager
 from voxink_core.echo import EchoDetector
+from voxink_core.grants import (
+    GRANT_SCOPES,
+    GRANTS_FILENAME,
+    TOKEN_PREFIX,
+    Grant,
+    GrantError,
+    GrantStore,
+)
 from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
 from voxink_core.local_models import (
     LocalModelPackage,
@@ -106,6 +115,46 @@ class ServiceSettings:
     # Local instruct model used to translate finalized segments. Optional:
     # absent, translation is reported unavailable and never requested.
     translation_model_path: Path | None = PROJECT_ROOT / "models" / "Qwen3-0.6B"
+    # Owner-only state: agent grants and the audit trail live here.
+    state_root: Path = Path.home() / "Library" / "Application Support" / "VoxInk"
+
+
+class GrantIssueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = "agent"
+    scopes: list[str]
+    applications: list[str] = Field(default_factory=list)
+    max_duration_s: int | None = None
+    retain_audio: bool = False
+    expires_in_s: int | None = None
+    single_use: bool = False
+
+
+class GrantRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client: str = "agent"
+    reason: str = ""
+    scopes: list[str]
+    applications: list[str] = Field(default_factory=list)
+    max_duration_s: int | None = None
+    retain_audio: bool = False
+
+
+class GrantApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = None
+    expires_in_s: int | None = None
+    single_use: bool = False
+    max_duration_s: int | None = None
+
+
+class GrantClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_secret: str
 
 
 class SessionCreateRequest(BaseModel):
@@ -259,6 +308,12 @@ class ServiceRuntime:
         # that session is created, rather than widening the native protocol.
         self.pending_diarization: set[str] = set()
         self.translate_sessions: set[str] = set()
+        self.grants = GrantStore(settings.state_root / GRANTS_FILENAME)
+        self.audit = AuditLog(settings.state_root / AUDIT_FILENAME)
+        # The grant that started the running capture, and the timer that ends
+        # it when the grant's maximum duration is reached.
+        self.capture_grant: Grant | None = None
+        self.capture_deadline: asyncio.Task[None] | None = None
 
     @property
     def translation_available(self) -> bool:
@@ -379,12 +434,18 @@ def create_app(
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        public_ui = request.url.path == "/ui" or request.url.path.startswith("/ui/")
-        if (
-            public_ui
-            or request.url.path in {"/health", "/v1/ui/bootstrap"}
-            or _authorized(request.headers.get("authorization"), runtime.settings.auth_secret)
-        ):
+        path = request.url.path
+        public_ui = path == "/ui" or path.startswith("/ui/")
+        request.state.principal = _Principal.anonymous()
+        if public_ui or path in _PUBLIC_PATHS or _is_consent_path(request.method, path):
+            return await call_next(request)
+        header = request.headers.get("authorization")
+        if _authorized(header, runtime.settings.auth_secret):
+            request.state.principal = _Principal.owner()
+            return await call_next(request)
+        grant = runtime.grants.authenticate(_bearer(header)) if _bearer(header) else None
+        if grant is not None:
+            request.state.principal = _Principal.for_grant(grant)
             return await call_next(request)
         return JSONResponse(status_code=401, content={"detail": "invalid local service credential"})
 
@@ -405,6 +466,7 @@ def create_app(
                 "translation": runtime.translation_available,
                 "echo_suppression": runtime.settings.echo_suppression,
                 "channels": True,
+                "grants": True,
             },
             "ui_available": (PROJECT_ROOT / "frontend" / "static-dist" / "index.html").is_file(),
         }
@@ -445,10 +507,15 @@ def create_app(
         }
 
     @app.post("/v1/models/active")
-    async def select_model(request: ModelSelectionRequest) -> dict[str, Any]:
+    async def select_model(http: Request, request: ModelSelectionRequest) -> dict[str, Any]:
+        principal = _require(runtime, http, "models.switch")
         package = runtime.models.get(request.model)
         if package is None:
             raise HTTPException(status_code=404, detail="local model is not installed")
+        runtime.audit.record(
+            "models.select", client=principal.name, result="requested",
+            request_id=http.headers.get("x-voxink-request-id"), scope="models.switch", model=request.model,
+        )
         if request.model == runtime.active_model_id:
             return _model_view(package, active=True)
         if runtime.model_switching or _model_in_use(runtime):
@@ -481,7 +548,13 @@ def create_app(
         return _vocabulary_view(runtime)
 
     @app.put("/v1/vocabulary")
-    async def write_vocabulary(request: VocabularyUpdateRequest) -> dict[str, Any]:
+    async def write_vocabulary(http: Request, request: VocabularyUpdateRequest) -> dict[str, Any]:
+        principal = _require(runtime, http, "vocabulary.write")
+        runtime.audit.record(
+            "vocabulary.replace", client=principal.name, result="ok",
+            request_id=http.headers.get("x-voxink-request-id"), scope="vocabulary.write",
+            bytes=len(request.content.encode("utf-8")),
+        )
         try:
             await asyncio.to_thread(runtime.vocabulary.write, request.content)
         except ValueError as exc:
@@ -538,6 +611,8 @@ def create_app(
 
     @app.post("/v1/ui/capture/start")
     async def start_native_capture(request: Request, options: NativeCaptureRequest) -> dict[str, Any]:
+        principal: _Principal = request.state.principal
+        request_id = request.headers.get("x-voxink-request-id")
         executable = _native_capture_executable(runtime)
         if runtime.native_process is not None and runtime.native_process.poll() is None:
             raise HTTPException(status_code=409, detail="a native capture session is already running")
@@ -553,6 +628,37 @@ def create_app(
             )
         if options.applications and not applications:
             raise HTTPException(status_code=422, detail="selected-application capture needs an application")
+        # What this capture needs permission for, in the language of grants.
+        needed = []
+        if Source.MICROPHONE in sources:
+            needed.append("capture.microphone")
+        if Source.SYSTEM in sources:
+            needed.append("capture.applications" if applications else "capture.system")
+        if options.retain_audio:
+            needed.append("audio.retain")
+        grant = principal.grant
+        if grant is not None:
+            missing = [scope for scope in needed if not grant.allows(scope)]
+            if missing:
+                runtime.audit.record(
+                    "capture.start", client=principal.name, result="approval_required",
+                    request_id=request_id, scope=",".join(missing), sources=[s.value for s in sources],
+                )
+                raise _approval_required(runtime, principal, missing, applications, options)
+            if grant.applications and (
+                not applications or any(app not in grant.applications for app in applications)
+            ):
+                runtime.audit.record(
+                    "capture.start", client=principal.name, result="permission_denied",
+                    request_id=request_id, scope="capture.applications", applications=list(applications),
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "permission_denied",
+                        "message": "this grant may only capture: " + ", ".join(grant.applications),
+                    },
+                )
         if options.backend is not None and options.backend not in SYSTEM_AUDIO_BACKENDS:
             raise HTTPException(status_code=422, detail="unknown system audio backend")
         language = (options.language or "").strip().lower() or None
@@ -603,6 +709,21 @@ def create_app(
             raise HTTPException(status_code=503, detail=f"cannot start native capture: {exc}") from exc
         runtime.native_process = process
         runtime.native_session_id = session_id
+        runtime.capture_grant = grant
+        if grant is not None:
+            if grant.single_use:
+                runtime.grants.consume(grant.id)
+            if grant.max_duration_s:
+                _cancel_deadline(runtime)
+                runtime.capture_deadline = asyncio.create_task(
+                    _enforce_deadline(runtime, session_id, grant.max_duration_s, principal.name)
+                )
+        runtime.audit.record(
+            "capture.start", client=principal.name, result="ok", request_id=request_id,
+            session_id=session_id, scope=",".join(needed), sources=[s.value for s in sources],
+            applications=list(applications), retain_audio=options.retain_audio,
+            translate=options.translate, max_duration_s=grant.max_duration_s if grant else None,
+        )
         runtime.pending_diarization.discard(session_id)
         runtime.translate_sessions.discard(session_id)
         if options.diarize and options.retain_audio and Source.MICROPHONE in sources:
@@ -628,13 +749,18 @@ def create_app(
         return _native_capture_view(runtime, after=max(0, after))
 
     @app.post("/v1/ui/capture/mark")
-    async def mark_native_capture(body: MarkRequest | None = None) -> dict[str, Any]:
+    async def mark_native_capture(http: Request, body: MarkRequest | None = None) -> dict[str, Any]:
         """Drop a timestamped marker into the transcript being written."""
+        principal = _require_any(runtime, http, _CAPTURE_SCOPES)
         process = runtime.native_process
         session_id = runtime.native_session_id
         if process is None or process.poll() is not None or session_id is None:
             raise HTTPException(status_code=409, detail="no native capture session is running")
         label = (body or MarkRequest()).label
+        runtime.audit.record(
+            "capture.mark", client=principal.name, result="ok",
+            request_id=http.headers.get("x-voxink-request-id"), session_id=session_id,
+        )
         at_ms = _session_elapsed_ms(runtime, session_id)
         try:
             await asyncio.to_thread(runtime.sessions.mark, session_id, at_ms, label)
@@ -658,7 +784,10 @@ def create_app(
         return {"session_id": session_id, "at_ms": at_ms, "label": entry["text"]}
 
     @app.post("/v1/ui/capture/{action}")
-    async def control_native_capture(action: str) -> dict[str, Any]:
+    async def control_native_capture(http: Request, action: str) -> dict[str, Any]:
+        if action not in {"pause", "resume", "stop"}:
+            raise HTTPException(status_code=404, detail="unknown native capture action")
+        principal = _require_any(runtime, http, _CAPTURE_SCOPES)
         process = runtime.native_process
         if process is None or process.poll() is not None:
             runtime.native_capture_state = "ready"
@@ -669,16 +798,143 @@ def create_app(
         elif action == "resume":
             process.send_signal(signal.SIGUSR2)
             runtime.native_capture_state = "recording"
-        elif action == "stop":
-            runtime.native_capture_state = "stopping"
-            await asyncio.to_thread(_stop_native_capture, runtime)
         else:
-            raise HTTPException(status_code=404, detail="unknown native capture action")
+            runtime.native_capture_state = "stopping"
+            _cancel_deadline(runtime)
+            await asyncio.to_thread(_stop_native_capture, runtime)
+        runtime.audit.record(
+            f"capture.{action}", client=principal.name, result="ok",
+            request_id=http.headers.get("x-voxink-request-id"), session_id=runtime.native_session_id,
+        )
         return _native_capture_view(runtime, after=0)
 
+    # -- agent grants (§14.5) ---------------------------------------------------
+
+    @app.get("/v1/grants/scopes")
+    async def grant_scopes() -> dict[str, Any]:
+        return {"scopes": list(GRANT_SCOPES)}
+
+    @app.get("/v1/grants")
+    async def list_grants(http: Request) -> dict[str, Any]:
+        _require_owner(http)
+        return {"grants": [grant.to_dict() for grant in runtime.grants.list()]}
+
+    @app.post("/v1/grants", status_code=201)
+    async def issue_grant(http: Request, body: GrantIssueRequest) -> dict[str, Any]:
+        """Issue a grant directly. Owner only: the CLI cannot mint its own."""
+        _require_owner(http)
+        try:
+            grant, token = runtime.grants.issue(
+                label=body.label,
+                scopes=body.scopes,
+                applications=body.applications,
+                max_duration_s=body.max_duration_s,
+                retain_audio=body.retain_audio,
+                expires_in_s=body.expires_in_s,
+                single_use=body.single_use,
+            )
+        except GrantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        runtime.audit.record(
+            "grants.issue", client="owner", result="ok", scope=",".join(grant.scopes),
+            grant_id=grant.id, label=grant.label, max_duration_s=grant.max_duration_s,
+        )
+        # The token is returned exactly once; only its hash is stored.
+        return {"grant": grant.to_dict(), "token": token}
+
+    @app.delete("/v1/grants/{grant_id}")
+    async def revoke_grant(http: Request, grant_id: str) -> dict[str, Any]:
+        _require_owner(http)
+        grant = runtime.grants.revoke(grant_id)
+        if grant is None:
+            raise HTTPException(status_code=404, detail="unknown grant")
+        if runtime.capture_grant is not None and runtime.capture_grant.id == grant_id:
+            # A revoked grant's recording stops with it.
+            _cancel_deadline(runtime)
+            await asyncio.to_thread(_stop_native_capture, runtime)
+        runtime.audit.record("grants.revoke", client="owner", result="ok", grant_id=grant_id)
+        return {"grant": grant.to_dict()}
+
+    @app.get("/v1/grants/requests")
+    async def list_grant_requests(http: Request) -> dict[str, Any]:
+        _require_owner(http)
+        return {"requests": [item.to_dict() for item in runtime.grants.pending()]}
+
+    @app.post("/v1/grants/requests", status_code=201)
+    async def create_grant_request(body: GrantRequestBody) -> dict[str, Any]:
+        """An agent asks for access. Anyone on loopback may ask; only the owner answers."""
+        try:
+            pending, claim_secret = runtime.grants.request(
+                client=body.client,
+                reason=body.reason,
+                scopes=body.scopes,
+                applications=body.applications,
+                max_duration_s=body.max_duration_s,
+                retain_audio=body.retain_audio,
+            )
+        except GrantError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        runtime.audit.record(
+            "grants.request", client=f"request:{pending.client}", result="pending",
+            request_id=pending.id, scope=",".join(pending.scopes),
+        )
+        return {"request": pending.to_dict(), "claim_secret": claim_secret}
+
+    @app.post("/v1/grants/requests/{request_id}/approve")
+    async def approve_grant_request(
+        http: Request, request_id: str, body: GrantApproveRequest | None = None
+    ) -> dict[str, Any]:
+        _require_owner(http)
+        options = body or GrantApproveRequest()
+        try:
+            grant = runtime.grants.approve(
+                request_id,
+                label=options.label,
+                expires_in_s=options.expires_in_s,
+                single_use=options.single_use,
+                max_duration_s=options.max_duration_s,
+            )
+        except GrantError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.audit.record(
+            "grants.approve", client="owner", result="ok", request_id=request_id,
+            scope=",".join(grant.scopes), grant_id=grant.id, max_duration_s=grant.max_duration_s,
+        )
+        return {"grant": grant.to_dict()}
+
+    @app.post("/v1/grants/requests/{request_id}/deny")
+    async def deny_grant_request(http: Request, request_id: str) -> dict[str, Any]:
+        _require_owner(http)
+        try:
+            pending = runtime.grants.deny(request_id)
+        except GrantError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.audit.record("grants.deny", client="owner", result="ok", request_id=request_id)
+        return {"request": pending.to_dict()}
+
+    @app.post("/v1/grants/requests/{request_id}/claim")
+    async def claim_grant_request(request_id: str, body: GrantClaimRequest) -> dict[str, Any]:
+        """Hand the approved token to the holder of the claim secret, once."""
+        try:
+            pending, token = runtime.grants.claim(request_id, body.claim_secret)
+        except GrantError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if token is not None:
+            runtime.audit.record(
+                "grants.claim", client=f"request:{pending.client}", result="ok",
+                request_id=request_id, grant_id=pending.grant_id,
+            )
+        return {"request": pending.to_dict(), "token": token}
+
+    @app.get("/v1/audit")
+    async def read_audit(http: Request, limit: int = 100) -> dict[str, Any]:
+        _require_owner(http)
+        return {"entries": runtime.audit.tail(max(1, min(limit, 1000)))}
+
     @app.post("/v1/ui/actions/reveal")
-    async def reveal_session(body: RevealRequest | None = None) -> dict[str, Any]:
+    async def reveal_session(http: Request, body: RevealRequest | None = None) -> dict[str, Any]:
         """Open a session's folder in Finder, or the output root with no session."""
+        _require_owner(http)
         session_id = (body or RevealRequest()).session_id or runtime.last_session_id
         directory = (
             _session_directory(runtime, session_id) if session_id else runtime.settings.output_root
@@ -787,8 +1043,9 @@ def create_app(
         return {"devices": await asyncio.to_thread(_input_devices), "source": "python"}
 
     @app.get("/v1/transcripts")
-    async def transcripts() -> dict[str, Any]:
+    async def transcripts(http: Request) -> dict[str, Any]:
         """List transcript artifacts under the configured output root."""
+        _require(runtime, http, "transcripts.read")
         found = await asyncio.to_thread(discover_transcripts, runtime.settings.output_root)
         return {
             "output_root": str(runtime.settings.output_root),
@@ -796,7 +1053,8 @@ def create_app(
         }
 
     @app.get("/v1/transcripts/{session_id}")
-    async def transcript(session_id: str, part: int | None = None) -> dict[str, Any]:
+    async def transcript(http: Request, session_id: str, part: int | None = None) -> dict[str, Any]:
+        _require(runtime, http, "transcripts.read")
         artifacts = await asyncio.to_thread(
             read_transcript, runtime.settings.output_root, session_id
         )
@@ -815,13 +1073,14 @@ def create_app(
         return {**artifacts.to_dict(), "part": part, "text": text}
 
     @app.get("/v1/sessions")
-    async def list_sessions() -> dict[str, Any]:
+    async def list_sessions(http: Request) -> dict[str, Any]:
         """List sessions this helper is holding open.
 
         Completed and interrupted sessions from earlier runs appear here only
         once the durable session registry replaces this in-memory view; until
         then they are discoverable through their transcript artifacts.
         """
+        _require(runtime, http, "sessions.read")
         return {
             "sessions": [
                 _session_view(session).model_dump() for session in runtime.sessions.list()
@@ -830,13 +1089,15 @@ def create_app(
         }
 
     @app.get("/v1/sessions/{session_id}", response_model=SessionView)
-    async def get_session(session_id: str) -> SessionView:
+    async def get_session(http: Request, session_id: str) -> SessionView:
+        _require(runtime, http, "sessions.read")
         return _session_view(_get_session(runtime, session_id))
 
     @app.post("/v1/sessions/{session_id}/{action}", response_model=SessionView)
-    async def control_session(session_id: str, action: str) -> SessionView:
+    async def control_session(http: Request, session_id: str, action: str) -> SessionView:
         if action not in {"start", "pause", "resume", "stop"}:
             raise HTTPException(status_code=404, detail="unknown session action")
+        _require_owner(http)
         try:
             getattr(runtime.sessions, action)(session_id)
             session = runtime.sessions.get(session_id)
@@ -1050,12 +1311,153 @@ def create_app(
 def _authorized(header: str | None, secret: str | None) -> bool:
     """Compare bearer credentials without leaking timing or accepting empty secrets."""
     if secret is None:
-        return True
+        # No credential configured (direct debugging): everything is the owner,
+        # except a caller presenting a grant token, who is held to its scopes.
+        supplied = _bearer(header)
+        return not (supplied and supplied.startswith(TOKEN_PREFIX))
+    supplied = _bearer(header)
+    return bool(supplied) and secrets.compare_digest(supplied, secret)
+
+
+def _bearer(header: str | None) -> str | None:
     prefix = "Bearer "
     if not header or not header.startswith(prefix):
+        return None
+    return header[len(prefix) :] or None
+
+
+# Paths anyone on loopback may call: readiness, the UI bootstrap, and the
+# consent flow an agent uses before it has any credential at all.
+_PUBLIC_PATHS = frozenset({"/health", "/v1/ui/bootstrap", "/v1/ui/capture/capabilities", "/v1/grants/scopes"})
+_CAPTURE_SCOPES = ("capture.microphone", "capture.system", "capture.applications")
+
+
+def _is_consent_path(method: str, path: str) -> bool:
+    if method != "POST":
         return False
-    supplied = header[len(prefix) :]
-    return bool(supplied) and secrets.compare_digest(supplied, secret)
+    if path == "/v1/grants/requests":
+        return True
+    return path.startswith("/v1/grants/requests/") and path.endswith("/claim")
+
+
+@dataclass(frozen=True, slots=True)
+class _Principal:
+    """Who is calling: the owner (UI or developer credential), a grant, or nobody."""
+
+    kind: str
+    grant: Grant | None = None
+
+    @classmethod
+    def owner(cls) -> "_Principal":
+        return cls("owner")
+
+    @classmethod
+    def anonymous(cls) -> "_Principal":
+        return cls("anonymous")
+
+    @classmethod
+    def for_grant(cls, grant: Grant) -> "_Principal":
+        return cls("grant", grant)
+
+    @property
+    def name(self) -> str:
+        if self.grant is not None:
+            return f"grant:{self.grant.id}"
+        return self.kind
+
+
+def _principal(request: Request) -> _Principal:
+    return getattr(request.state, "principal", None) or _Principal.anonymous()
+
+
+def _require_owner(request: Request) -> _Principal:
+    principal = _principal(request)
+    if principal.kind != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "permission_denied", "message": "only the application owner may do this"},
+        )
+    return principal
+
+
+def _require(runtime: ServiceRuntime, request: Request, scope: str) -> _Principal:
+    """Let the owner through; hold a grant to its scopes."""
+    principal = _principal(request)
+    if principal.kind == "owner":
+        return principal
+    if principal.grant is not None and principal.grant.allows(scope):
+        return principal
+    raise _approval_required(runtime, principal, [scope])
+
+
+def _require_any(runtime: ServiceRuntime, request: Request, scopes: tuple[str, ...]) -> _Principal:
+    principal = _principal(request)
+    if principal.kind == "owner":
+        return principal
+    if principal.grant is not None and any(principal.grant.allows(scope) for scope in scopes):
+        return principal
+    raise _approval_required(runtime, principal, list(scopes))
+
+
+def _approval_required(
+    runtime: ServiceRuntime,
+    principal: _Principal,
+    missing: list[str],
+    applications: tuple[str, ...] = (),
+    options: NativeCaptureRequest | None = None,
+) -> HTTPException:
+    """Build the §14.5 refusal: a request the owner can approve, never a bypass.
+
+    The pending request is created on the caller's behalf so the UI can show
+    it right away; the claim secret goes back only to this caller.
+    """
+    client = principal.grant.label if principal.grant is not None else "agent"
+    detail: dict[str, Any] = {
+        "code": "approval_required",
+        "message": "this needs the owner's approval: " + ", ".join(missing),
+        "missing_scopes": missing,
+    }
+    try:
+        pending, claim_secret = runtime.grants.request(
+            client=client,
+            reason="requested automatically by a call that lacked the scope",
+            scopes=missing,
+            applications=applications,
+            max_duration_s=None,
+            retain_audio=bool(options and options.retain_audio),
+        )
+    except GrantError as exc:
+        detail["message"] += f" (no request was filed: {exc})"
+    else:
+        detail["request_id"] = pending.id
+        detail["claim_secret"] = claim_secret
+    return HTTPException(status_code=403, detail=detail)
+
+
+def _cancel_deadline(runtime: ServiceRuntime) -> None:
+    task = runtime.capture_deadline
+    runtime.capture_deadline = None
+    if task is not None and not task.done():
+        task.cancel()
+
+
+async def _enforce_deadline(runtime: ServiceRuntime, session_id: str, seconds: int, client: str) -> None:
+    """Stop a grant-started capture when its maximum duration runs out."""
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+    if runtime.native_session_id != session_id:
+        return
+    process = runtime.native_process
+    if process is None or process.poll() is not None:
+        return
+    runtime.native_capture_state = "stopping"
+    await asyncio.to_thread(_stop_native_capture, runtime)
+    runtime.audit.record(
+        "capture.stop", client="deadline", result="ok", session_id=session_id,
+        max_duration_s=seconds, started_by=client,
+    )
 
 
 async def _run_native_listing(executable: Path, flag: str) -> list[str]:

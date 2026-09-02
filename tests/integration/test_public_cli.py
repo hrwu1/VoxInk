@@ -28,6 +28,7 @@ from voxink_cli.envelope import (
     EXIT_CONFLICT,
     EXIT_INVALID_REQUEST,
     EXIT_NOT_FOUND,
+    EXIT_NOT_PERMITTED,
     EXIT_NOT_READY,
     EXIT_OK,
     SCHEMA_VERSION,
@@ -87,7 +88,9 @@ def _write_wav(path: Path, *, milliseconds: int = 200, sample_rate: int = 16_000
     return path
 
 
-class PublicCommandLineTests(unittest.TestCase):
+class _CommandLineHarness(unittest.TestCase):
+    """A live loopback helper plus the envelope helpers every CLI test uses."""
+
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self._temporary.cleanup)
@@ -114,6 +117,7 @@ class PublicCommandLineTests(unittest.TestCase):
                 # Whether a translation model happens to be downloaded on this
                 # machine must not change what these tests observe.
                 translation_model_path=None,
+                state_root=self.root / "state",
             ),
             provider=self.provider,
             provider_factory=lambda _: FakeProvider(),
@@ -155,6 +159,17 @@ class PublicCommandLineTests(unittest.TestCase):
         self.assertFalse(envelopes[0]["ok"], envelopes[0])
         return code, envelopes[0]["error"]
 
+    def _fake_capture_process(self) -> MagicMock:
+        process = MagicMock()
+        process.pid = 4321
+        process.returncode = 0
+        process.stderr = None
+        process.poll.return_value = None
+        return process
+
+
+
+class PublicCommandLineTests(_CommandLineHarness):
     # -- discovery ---------------------------------------------------------
 
     def test_capabilities_reports_versions_features_and_grant_scopes(self) -> None:
@@ -171,10 +186,10 @@ class PublicCommandLineTests(unittest.TestCase):
         self.assertIn("capture.microphone", data["grant_scopes"])
         self.assertEqual("developer-credential", data["grant_enforcement"])
 
-    def test_capabilities_declares_that_grants_are_not_enforced_yet(self) -> None:
-        warnings = " ".join(self._ok("capabilities")["data"] and self._ok("capabilities")["warnings"])
+    def test_capabilities_say_which_credential_is_in_use(self) -> None:
+        warnings = " ".join(self._ok("capabilities")["warnings"])
 
-        self.assertIn("Scoped grants are not enforced", warnings)
+        self.assertIn("owner credential", warnings)
 
     def test_status_reports_readiness_and_capture_state(self) -> None:
         data = self._ok("status")["data"]
@@ -315,14 +330,6 @@ class PublicCommandLineTests(unittest.TestCase):
         self.assertEqual(ErrorCode.NOT_FOUND, error["code"])
 
     # -- capture lifecycle -------------------------------------------------
-
-    def _fake_capture_process(self) -> MagicMock:
-        process = MagicMock()
-        process.pid = 4321
-        process.returncode = 0
-        process.stderr = None
-        process.poll.return_value = None
-        return process
 
     def test_the_capture_lifecycle_runs_through_the_control_api(self) -> None:
         process = self._fake_capture_process()
@@ -474,7 +481,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class LiveFeatureCommandTests(PublicCommandLineTests):
+class LiveFeatureCommandTests(_CommandLineHarness):
     """Flags and commands added with partial captions, channels, and marks."""
 
     def test_capture_start_passes_device_language_and_backend_to_the_helper(self) -> None:
@@ -521,3 +528,51 @@ class LiveFeatureCommandTests(PublicCommandLineTests):
             opened = self._ok("transcripts", "open", "opened-session")["data"]
             self.assertEqual(run.call_args.args[0], ["open", str(session_dir)])
         self.assertEqual(str(session_dir), opened["directory"])
+
+
+class PermissionCommandTests(_CommandLineHarness):
+    """`voxink permissions`: the CLI asks and claims, the owner decides."""
+
+    def test_request_claim_and_act_under_the_grant(self) -> None:
+        asked = self._ok(
+            "permissions", "request", "--scope", "transcripts.read", "--client", "Claude", "--reason", "read notes"
+        )["data"]
+        self.assertTrue(asked["request_id"].startswith("req_"))
+        token_file = self.root / "agent" / "token"
+        code, error = self._error(
+            "permissions", "claim", asked["request_id"], "--claim-secret", asked["claim_secret"], "--out", str(token_file)
+        )
+        self.assertEqual(ErrorCode.APPROVAL_REQUIRED, error["code"])
+        # Owner approves through the application's endpoint.
+        pending = self._ok("permissions", "pending")["data"]["requests"]
+        self.assertEqual([item["id"] for item in pending], [asked["request_id"]])
+        from voxink_cli.client import ControlClient, RequestContext
+        from voxink_cli.discovery import load
+
+        ControlClient(load(self.endpoint_path), RequestContext.create()).approve_grant_request(asked["request_id"])
+        claimed = self._ok(
+            "permissions", "claim", asked["request_id"], "--claim-secret", asked["claim_secret"], "--out", str(token_file)
+        )["data"]
+        self.assertTrue(claimed["grant_id"].startswith("grant_"))
+        self.assertEqual(0o600, token_file.stat().st_mode & 0o777)
+        # Under the grant: transcripts yes, sessions no, and capabilities say so.
+        self._ok("transcripts", "list", "--token-file", str(token_file))
+        code, error = self._error("sessions", "list", "--token-file", str(token_file))
+        self.assertEqual(EXIT_NOT_PERMITTED, code)
+        self.assertEqual(ErrorCode.APPROVAL_REQUIRED, error["code"])
+        capabilities = self._ok("capabilities", "--token-file", str(token_file))["data"]
+        self.assertEqual("grant-token", capabilities["grant_enforcement"])
+        self.assertTrue(capabilities["features"]["transcripts.read"]["permitted"])
+        self.assertFalse(capabilities["features"]["sessions.read"]["permitted"])
+        grants = self._ok("permissions", "list")["data"]["grants"]
+        self.assertEqual([grant["id"] for grant in grants], [claimed["grant_id"]])
+        self._ok("permissions", "revoke", claimed["grant_id"])
+        code, error = self._error("transcripts", "list", "--token-file", str(token_file))
+        self.assertEqual(ErrorCode.PERMISSION_DENIED, error["code"])
+        audit = self._ok("permissions", "audit")["data"]["entries"]
+        self.assertIn("grants.revoke", [entry["operation"] for entry in audit])
+
+    def test_scopes_are_listed_and_deferred_groups_shrink(self) -> None:
+        scopes = self._ok("permissions", "scopes")["data"]["scopes"]
+        self.assertIn("capture.system", scopes)
+        self.assertNotIn("permissions", self._ok("capabilities")["data"]["deferred_command_groups"])

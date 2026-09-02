@@ -5,11 +5,13 @@ import { sourceLabel } from './caption-feed';
 import {
   Caption, CaptionLanguage, CaptureMode, Diarization, SpeakerSegment, useVoxInkRecorder,
 } from './use-voxink-recorder';
+import { GrantsPanel } from './grants-panel';
+import { useGrants } from './use-grants';
 import { useVocabulary } from './use-vocabulary';
 import { VocabularyPanel } from './vocabulary-panel';
 
 const bars = [22, 42, 30, 58, 36, 68, 44, 76, 52, 64, 34, 72, 46, 82, 40, 62, 30, 52, 24];
-type Tab = 'record' | 'vocabulary';
+type Tab = 'record' | 'vocabulary' | 'agents';
 
 /** Render an anonymous session-local speaker id as something readable.
  *
@@ -128,6 +130,7 @@ export default function Home() {
   const recorder = useVoxInkRecorder();
   const vocabulary = useVocabulary(recorder.authorizedFetch, recorder.isLive);
   const [tab, setTab] = useState<Tab>('record');
+  const grants = useGrants(recorder.authorizedFetch, recorder.isLive, tab === 'agents');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [naming, setNaming] = useState<{ speakerId: string; current: string } | null>(null);
   const { state, elapsed, captions, message, isLive } = recorder;
@@ -279,11 +282,27 @@ export default function Home() {
             {vocabulary.summary.terms.length > 0 && <em>{vocabulary.summary.terms.length}</em>}
             {vocabulary.dirty && <i className="tab-dot" aria-label="unsaved changes" />}
           </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-agents"
+            aria-selected={tab === 'agents'}
+            aria-controls="panel-agents"
+            className={tab === 'agents' ? 'tab active' : 'tab'}
+            onClick={() => setTab('agents')}
+          >
+            Agent access
+            {grants.requests.length > 0 && <em>{grants.requests.length}</em>}
+          </button>
         </div>
 
         {tab === 'vocabulary' ? (
           <div role="tabpanel" id="panel-vocabulary" aria-labelledby="tab-vocabulary">
             <VocabularyPanel vocabulary={vocabulary} isLive={isLive} />
+          </div>
+        ) : tab === 'agents' ? (
+          <div role="tabpanel" id="panel-agents" aria-labelledby="tab-agents">
+            <GrantsPanel grants={grants} isLive={isLive} />
           </div>
         ) : (
         <div className="content-grid" role="tabpanel" id="panel-record" aria-labelledby="tab-record">

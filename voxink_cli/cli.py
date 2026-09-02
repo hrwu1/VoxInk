@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TextIO
 
-from .client import DEFAULT_TIMEOUT, ControlClient, RequestContext
+from .client import DEFAULT_TIMEOUT, GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
 from .envelope import (
     EXIT_OK,
     SCHEMA_VERSION,
@@ -27,26 +27,12 @@ from .envelope import (
     success,
 )
 
-# Scopes the application will issue grants for (§14.5). The developer edition
-# has no grant issuer yet, so possession of the loopback credential stands in
-# for every scope; `capabilities` reports that honestly rather than implying
-# grants are being enforced.
-GRANT_SCOPES = (
-    "capture.microphone",
-    "capture.system",
-    "capture.applications",
-    "sessions.read",
-    "transcripts.read",
-    "audio.read",
-    "audio.retain",
-    "vocabulary.write",
-    "models.switch",
-    "models.import",
-    "artifacts.delete",
-)
+# Scopes the application issues grants for (§14.5). The CLI never mints a
+# grant: it asks, the owner approves in the UI, and the CLI claims the token.
+from voxink_core.grants import GRANT_SCOPES  # noqa: E402
 
 # Command groups §14.3 defines but the first slice does not implement.
-DEFERRED_COMMAND_GROUPS = ("audio", "config", "diagnostics", "permissions")
+DEFERRED_COMMAND_GROUPS = ("audio", "config", "diagnostics")
 
 WATCH_INTERVAL_SECONDS = 0.5
 CAPTURE_SETTLED_STATES = frozenset({"ready", "failed"})
@@ -121,20 +107,32 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
             },
         },
         "grant_scopes": list(GRANT_SCOPES),
-        "grant_enforcement": "developer-credential",
+        "grant_enforcement": "grant-token" if client.uses_grant else "developer-credential",
         "deferred_command_groups": list(DEFERRED_COMMAND_GROUPS),
     }
+    if client.uses_grant:
+        # Under a grant, "permitted" means what the grant says, not what the
+        # helper could do for its owner.
+        granted = set(_granted_scopes(client))
+        for feature in data["features"].values():
+            feature["permitted"] = feature["permitted"] and bool(granted)
+        for scope in GRANT_SCOPES:
+            if scope in data["features"]:
+                data["features"][scope]["permitted"] = scope in granted
     lines = [
         f"protocol {data['protocol_version']}, schema {SCHEMA_VERSION}, "
         f"service {data['service_version']}",
         f"provider {data['provider']} ({data['model']}), {data['privacy_mode']}, "
         f"{data['bind_policy']}",
         "capture modes: " + (", ".join(data["capture_modes"]) or "none"),
+        f"grant enforcement: {data['grant_enforcement']}",
     ]
-    warnings = [
-        "Scoped grants are not enforced yet; the loopback credential authorizes "
-        "every scope in this edition."
-    ]
+    warnings = []
+    if not client.uses_grant:
+        warnings.append(
+            "This command holds the owner credential, which authorizes every scope. "
+            f"Agents should run under a grant token ({GRANT_TOKEN_FILE_ENV})."
+        )
     if not native:
         warnings.append(
             "Native capture is unavailable, so no capture mode can start. "
@@ -651,6 +649,128 @@ def _vocabulary_replace(args: argparse.Namespace, client: ControlClient) -> Resu
 
 
 # ---------------------------------------------------------------------------
+# Permissions (§14.5): ask, claim, inspect. Never issue.
+# ---------------------------------------------------------------------------
+
+
+def _granted_scopes(client: ControlClient) -> list[str]:
+    """Scopes the current grant token carries, learned by asking for a listing.
+
+    A grant cannot list grants (owner only), so this probes the cheapest
+    scoped read and infers from the refusal which scopes are missing.
+    """
+    scopes = []
+    for scope, probe in (
+        ("transcripts.read", client.transcripts),
+        ("sessions.read", client.sessions),
+    ):
+        try:
+            probe()
+        except Failure as failure:
+            if failure.code not in {ErrorCode.APPROVAL_REQUIRED, ErrorCode.PERMISSION_DENIED}:
+                raise
+            continue
+        scopes.append(scope)
+    return scopes
+
+
+def _permissions_scopes(args: argparse.Namespace, client: ControlClient) -> Result:
+    scopes = client.grant_scopes().get("scopes", [])
+    return Result({"scopes": scopes}, text="\n".join(scopes))
+
+
+def _permissions_request(args: argparse.Namespace, client: ControlClient) -> Result:
+    response = client.request_grant(
+        client=args.client,
+        reason=args.reason or "",
+        scopes=list(dict.fromkeys(args.scopes)),
+        applications=list(dict.fromkeys(args.applications or [])),
+        max_duration_s=(args.max_minutes * 60) if args.max_minutes else None,
+        retain_audio=args.retain_audio,
+    )
+    request = response.get("request", {})
+    data = {
+        "request_id": request.get("id"),
+        "claim_secret": response.get("claim_secret"),
+        "scopes": request.get("scopes", []),
+        "applications": request.get("applications", []),
+        "max_duration_s": request.get("max_duration_s"),
+        "state": request.get("state"),
+    }
+    return Result(
+        data,
+        text=(
+            f"request {data['request_id']} is waiting for the owner's approval in VoxInk.\n"
+            f"claim it with: voxink permissions claim {data['request_id']} --claim-secret ... --out TOKEN_FILE"
+        ),
+    )
+
+
+def _permissions_claim(args: argparse.Namespace, client: ControlClient) -> Result:
+    deadline = time.monotonic() + (args.wait_timeout if args.wait else 0.0)
+    while True:
+        response = client.claim_grant(args.request_id, args.claim_secret)
+        token = response.get("token")
+        request = response.get("request", {})
+        if token or not args.wait or time.monotonic() >= deadline:
+            break
+        time.sleep(1.0)
+    if not token:
+        raise Failure(
+            ErrorCode.APPROVAL_REQUIRED,
+            "The request has not been approved yet. Approve it in VoxInk, then claim again.",
+            details={"request_id": args.request_id, "state": request.get("state")},
+        )
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.touch(mode=0o600, exist_ok=True)
+    out.chmod(0o600)
+    out.write_text(token + "\n", encoding="utf-8")
+    return Result(
+        {"request_id": args.request_id, "grant_id": request.get("grant_id"), "token_file": str(out)},
+        text=f"grant {request.get('grant_id')} claimed; token written to {out}\n"
+        f"use it with: {GRANT_TOKEN_FILE_ENV}={out}",
+    )
+
+
+def _permissions_list(args: argparse.Namespace, client: ControlClient) -> Result:
+    grants = client.grants().get("grants", [])
+    text = "\n".join(
+        f"{grant['id']}\t{'valid' if grant.get('valid') else 'inactive'}\t{grant.get('label', '')}"
+        f"\t{','.join(grant.get('scopes', []))}"
+        + (f"\tapps={','.join(grant['applications'])}" if grant.get("applications") else "")
+        + (f"\tmax={grant['max_duration_s']}s" if grant.get("max_duration_s") else "")
+        for grant in grants
+    )
+    return Result({"grants": grants}, text=text)
+
+
+def _permissions_pending(args: argparse.Namespace, client: ControlClient) -> Result:
+    requests = client.grant_requests().get("requests", [])
+    text = "\n".join(
+        f"{item['id']}\t{item.get('client', '')}\t{','.join(item.get('scopes', []))}\t{item.get('reason', '')}"
+        for item in requests
+    )
+    return Result({"requests": requests}, text=text)
+
+
+def _permissions_revoke(args: argparse.Namespace, client: ControlClient) -> Result:
+    grant = client.revoke_grant(args.grant_id).get("grant", {})
+    return Result({"grant": grant}, text=f"revoked {grant.get('id')}")
+
+
+def _permissions_audit(args: argparse.Namespace, client: ControlClient) -> Result:
+    entries = client.audit(limit=args.limit).get("entries", [])
+    text = "\n".join(
+        f"{entry.get('time', '')}\t{entry.get('operation', '')}\t{entry.get('client', '')}"
+        f"\t{entry.get('result', '')}"
+        + (f"\t{entry['session_id']}" if entry.get("session_id") else "")
+        for entry in entries
+    )
+    return Result({"entries": entries}, text=text)
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -663,6 +783,7 @@ GLOBAL_DEFAULTS: dict[str, Any] = {
     "idempotency_key": None,
     "no_input": False,
     "endpoint_file": None,
+    "token_file": None,
 }
 
 
@@ -702,6 +823,12 @@ def _global_options() -> argparse.ArgumentParser:
         help="never read from stdin or prompt",
     )
     parser.add_argument("--endpoint-file", type=Path, default=suppress, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=suppress,
+        help=f"grant token file to act under (default: ${GRANT_TOKEN_FILE_ENV})",
+    )
     return parser
 
 
@@ -884,6 +1011,44 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("model")
     select.set_defaults(handler=_models_select, command="models.select")
 
+    permissions = group("permissions", "Ask for, claim, and inspect agent grants.")
+    leaf(permissions, "scopes", "List the scopes a grant can carry.").set_defaults(
+        handler=_permissions_scopes, command="permissions.scopes"
+    )
+    request = leaf(permissions, "request", "Ask the owner for a scoped grant.")
+    request.add_argument(
+        "--scope", dest="scopes", action="append", required=True, choices=GRANT_SCOPES,
+        help="scope to ask for; repeat for several",
+    )
+    request.add_argument(
+        "--app", dest="applications", action="append", default=[], metavar="BUNDLE_ID",
+        help="limit capture to this application; repeat for several",
+    )
+    request.add_argument("--max-minutes", type=int, default=None, help="longest recording to allow")
+    request.add_argument("--retain-audio", action="store_true", help="ask to keep audio files")
+    request.add_argument("--client", default="agent", help="who is asking, as shown to the owner")
+    request.add_argument("--reason", default="", help="why, as shown to the owner")
+    request.set_defaults(handler=_permissions_request, command="permissions.request")
+    claim = leaf(permissions, "claim", "Claim an approved request's token.")
+    claim.add_argument("request_id")
+    claim.add_argument("--claim-secret", required=True, help="secret returned by `permissions request`")
+    claim.add_argument("--out", required=True, help="file to write the token to (mode 0600)")
+    claim.add_argument("--wait", action="store_true", help="poll until the owner decides")
+    claim.add_argument("--wait-timeout", type=float, default=600.0, help="seconds to wait with --wait")
+    claim.set_defaults(handler=_permissions_claim, command="permissions.claim")
+    leaf(permissions, "list", "List issued grants (owner only).").set_defaults(
+        handler=_permissions_list, command="permissions.list"
+    )
+    leaf(permissions, "pending", "List requests awaiting approval (owner only).").set_defaults(
+        handler=_permissions_pending, command="permissions.pending"
+    )
+    revoke = leaf(permissions, "revoke", "Revoke a grant (owner only).")
+    revoke.add_argument("grant_id")
+    revoke.set_defaults(handler=_permissions_revoke, command="permissions.revoke")
+    audit = leaf(permissions, "audit", "Read the audit trail (owner only).")
+    audit.add_argument("--limit", type=int, default=100)
+    audit.set_defaults(handler=_permissions_audit, command="permissions.audit")
+
     vocabulary = group("vocabulary", "Read and replace custom terms and corrections.")
     leaf(vocabulary, "show", "Show the vocabulary file.").set_defaults(
         handler=_vocabulary_show, command="vocabulary.show"
@@ -941,7 +1106,9 @@ def main(
         idempotency_key=args.idempotency_key,
     )
     try:
-        client = ControlClient.connect(context, endpoint_path=args.endpoint_file)
+        client = ControlClient.connect(
+            context, endpoint_path=args.endpoint_file, token_file=args.token_file
+        )
         if getattr(args, "streaming", False):
             for result in args.handler(args, client):
                 _emit(command, result, args, out, err)

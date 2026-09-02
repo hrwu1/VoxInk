@@ -230,3 +230,43 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
 .dialog-check small { color: #777a71; font-size: 11px; line-height: 1.45; }
 .dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .dialog-actions button { padding: 11px; border-radius: 11px; cursor: pointer; }
+
+/* Agent access: requests, grants, audit. */
+.grants-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.grants-card { min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 22px 24px; border: 1px solid #d2d3ca; border-radius: 20px; background: var(--card); }
+.audit-card { grid-column: 1 / -1; }
+.panel-heading.compact { padding: 0 0 12px; }
+.grants-empty, .grants-message { margin: 0; color: #777a71; font-size: 12px; line-height: 1.55; }
+.grants-message { color: var(--orange-dark); }
+.grant-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: rgba(242,241,235,.58); }
+.grant-row.inactive { opacity: .55; }
+.grant-summary { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.grant-summary strong { font-size: 13px; }
+.grant-summary p { margin: 0; font-size: 12px; color: #55594f; }
+.grant-summary small { color: #777a71; font-size: 11px; }
+.grant-id { margin-left: 6px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-weight: 500; }
+.scope-list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 5px; }
+.scope-list li { padding: 3px 8px; border: 1px solid rgba(79,118,95,.32); border-radius: 99px; background: rgba(79,118,95,.09); color: #3f5f4c; font-size: 11px; font-weight: 620; }
+.grant-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 120px; }
+.grant-actions button { padding: 9px 12px; border-radius: 10px; cursor: pointer; font-size: 12px; }
+.grant-actions label small, .issue-form small { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+.grant-actions label { display: flex; flex-direction: column; gap: 4px; }
+.grant-actions input[type="number"], .issue-form input:not([type="checkbox"]) { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink); font: inherit; font-size: 12.5px; width: 100%; }
+.inline-check { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; }
+.token-reveal { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid rgba(238,93,50,.4); border-radius: 14px; background: rgba(238,93,50,.06); }
+.token-reveal code { padding: 8px 10px; border-radius: 8px; background: var(--paper); font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.token-reveal small { color: #777a71; font-size: 11px; line-height: 1.5; }
+.issue-form { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.issue-form > label { display: flex; flex-direction: column; gap: 4px; }
+.scope-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; }
+.issue-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+.issue-row label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.issue-row button { padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+.audit-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; font-size: 11.5px; }
+.audit-list li { display: grid; grid-template-columns: 150px 130px minmax(0, 1fr) 80px auto; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 8px; }
+.audit-list li:nth-child(odd) { background: rgba(242,241,235,.58); }
+.audit-list time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.audit-list em { font-style: normal; color: #55594f; overflow-wrap: anywhere; }
+.audit-list b.ok { color: #3f5f4c; } .audit-list b.warn { color: var(--orange-dark); }
+.audit-list small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+@media (max-width: 900px) { .grants-grid { grid-template-columns: 1fr; } .grant-row { grid-template-columns: 1fr; } }
