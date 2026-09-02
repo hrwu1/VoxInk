@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 
 final class MicrophoneCapture {
@@ -6,12 +7,14 @@ final class MicrophoneCapture {
     private let normalizer: PCMNormalizer
     private let sessionID: String
     private let queue: AudioFrameQueue
+    private let deviceUID: String?
     private let streamID = "microphone-1"
     private let lock = NSLock()
     private var sequence: UInt64 = 0
 
-    init(sessionID: String, sampleRate: Int, sink: AudioFrameSink) {
+    init(sessionID: String, sampleRate: Int, sink: AudioFrameSink, deviceUID: String? = nil) {
         self.sessionID = sessionID
+        self.deviceUID = deviceUID
         normalizer = PCMNormalizer(outputSampleRate: Double(sampleRate))
         queue = AudioFrameQueue(sink: sink, sessionID: sessionID, source: .microphone)
     }
@@ -31,6 +34,9 @@ final class MicrophoneCapture {
         guard granted else { throw CaptureError.microphonePermissionDenied }
 
         let input = engine.inputNode
+        if let deviceUID {
+            try Self.select(deviceUID: deviceUID, on: input)
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw CaptureError.audioFormatUnavailable("microphone returned \(format)")
@@ -46,6 +52,29 @@ final class MicrophoneCapture {
             input.removeTap(onBus: 0)
             await queue.finishAndDrain()
             throw error
+        }
+    }
+
+    /// Point the engine's input unit at one device. The engine otherwise
+    /// follows the system default input, which is what most people want and
+    /// exactly what someone with a USB microphone plugged in does not.
+    private static func select(deviceUID: String, on input: AVAudioInputNode) throws {
+        guard var device = CoreAudioSupport.deviceID(forUID: deviceUID) else {
+            throw CaptureError.microphoneDeviceUnavailable(deviceUID)
+        }
+        guard let unit = input.audioUnit else {
+            throw CaptureError.audioFormatUnavailable("microphone input unit is unavailable")
+        }
+        let status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &device,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            throw CaptureError.microphoneDeviceUnavailable("\(deviceUID) (status \(status))")
         }
     }
 

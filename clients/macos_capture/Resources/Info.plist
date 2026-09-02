@@ -22,6 +22,8 @@
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>VoxInk captures system and application audio on this Mac to transcribe it locally.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>VoxInk captures microphone audio for local transcription.</string>
     <key>NSScreenCaptureUsageDescription</key>

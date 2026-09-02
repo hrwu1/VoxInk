@@ -25,6 +25,14 @@ public enum CaptureApplicationCatalog {
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
+
+    /// Microphones the helper can open, default first.
+    public static func inputDevices() throws -> [InputDevice] {
+        try CoreAudioSupport.inputDevices().sorted { lhs, rhs in
+            if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
 }
 
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {

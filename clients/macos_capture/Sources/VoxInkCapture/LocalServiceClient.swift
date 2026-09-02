@@ -25,13 +25,45 @@ public struct TranscriptWireEvent: Codable, Sendable {
     public let startMilliseconds: Int64
     public let endMilliseconds: Int64
     public let isFinal: Bool
+    /// Bundle identifier of the application a system stream isolates, if any.
+    public let channel: String?
+    public let channelName: String?
+    /// On-device translation of `text` into the other language, when enabled.
+    public let translation: String?
+    public let translationLanguage: String?
+
+    public init(
+        segmentID: String,
+        source: AudioSource,
+        text: String,
+        startMilliseconds: Int64,
+        endMilliseconds: Int64,
+        isFinal: Bool,
+        channel: String? = nil,
+        channelName: String? = nil,
+        translation: String? = nil,
+        translationLanguage: String? = nil
+    ) {
+        self.segmentID = segmentID
+        self.source = source
+        self.text = text
+        self.startMilliseconds = startMilliseconds
+        self.endMilliseconds = endMilliseconds
+        self.isFinal = isFinal
+        self.channel = channel
+        self.channelName = channelName
+        self.translation = translation
+        self.translationLanguage = translationLanguage
+    }
 
     enum CodingKeys: String, CodingKey {
-        case text, source
+        case text, source, channel, translation
         case segmentID = "segment_id"
         case startMilliseconds = "start_ms"
         case endMilliseconds = "end_ms"
         case isFinal = "is_final"
+        case channelName = "channel_name"
+        case translationLanguage = "translation_language"
     }
 
     public var captionItem: CaptionItem {
@@ -41,8 +73,22 @@ public struct TranscriptWireEvent: Codable, Sendable {
             text: text,
             startMilliseconds: startMilliseconds,
             endMilliseconds: endMilliseconds,
-            isFinal: isFinal
+            isFinal: isFinal,
+            channelName: channelName ?? channel,
+            translation: translation
         )
+    }
+}
+
+/// A translation that arrived after its segment was already finalized.
+public struct TranslationWireEvent: Codable, Sendable {
+    public let segmentID: String
+    public let text: String
+    public let language: String?
+
+    enum CodingKeys: String, CodingKey {
+        case text, language
+        case segmentID = "segment_id"
     }
 }
 
@@ -51,15 +97,18 @@ public struct TranscriptWireEvent: Codable, Sendable {
 /// matches the Python service's schema-version-1 streaming contract.
 public actor WebSocketAudioFrameSink: AudioFrameSink {
     public typealias TranscriptHandler = @Sendable (TranscriptWireEvent) -> Void
+    public typealias TranslationHandler = @Sendable (TranslationWireEvent) -> Void
     public typealias StatusHandler = @Sendable (CaptureStatusEvent) -> Void
 
     private let endpoint: URL
     private let authToken: String?
     private let applications: [String]
     private let retainAudio: Bool
+    private let language: String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let transcriptHandler: TranscriptHandler?
+    private let translationHandler: TranslationHandler?
     private let statusHandler: StatusHandler?
     private var session: URLSession?
     private var sessionID: String?
@@ -79,7 +128,9 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         authToken: String? = nil,
         applications: [String] = [],
         retainAudio: Bool = false,
+        language: String? = nil,
         transcriptHandler: TranscriptHandler? = nil,
+        translationHandler: TranslationHandler? = nil,
         statusHandler: StatusHandler? = nil
     ) throws {
         try LocalEndpointPolicy.validate(endpoint)
@@ -87,7 +138,9 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         self.authToken = authToken
         self.applications = applications
         self.retainAudio = retainAudio
+        self.language = language
         self.transcriptHandler = transcriptHandler
+        self.translationHandler = translationHandler
         self.statusHandler = statusHandler
         encoder.outputFormatting = [.sortedKeys]
     }
@@ -240,7 +293,10 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
             // matter which stream opens first.
             applicationBundleIdentifiers: frame.applicationBundleIdentifiers
                 ?? (applications.isEmpty ? nil : applications),
-            retainAudio: retainAudio
+            retainAudio: retainAudio,
+            channel: frame.channel,
+            channelName: frame.channelName,
+            language: language
         )
         try await sendJSON(start, on: task)
         Task { [weak self, task] in await self?.receiveLoop(task: task, streamID: frame.streamID) }
@@ -256,6 +312,10 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                    ["transcript.partial", "transcript.final"].contains(response.type),
                    let event = response.event {
                     transcriptHandler?(event)
+                } else if let response = try? decoder.decode(TranslationResponse.self, from: data),
+                          response.type == "transcript.translation",
+                          let event = response.event {
+                    translationHandler?(event)
                 } else if let envelope = try? decoder.decode(TypeOnlyResponse.self, from: data),
                           envelope.type == "stream.stopped" {
                     completeStopAcknowledgement(streamID: streamID)
@@ -305,6 +365,9 @@ struct StreamStartEnvelope: Encodable {
     let vad = VADDescription()
     let applicationBundleIdentifiers: [String]?
     let retention: RetentionDescription
+    let channel: String?
+    let channelName: String?
+    let language: String?
 
     init(
         sessionID: String,
@@ -315,7 +378,10 @@ struct StreamStartEnvelope: Encodable {
         channels: Int,
         frameDurationMilliseconds: Double,
         applicationBundleIdentifiers: [String]?,
-        retainAudio: Bool
+        retainAudio: Bool,
+        channel: String? = nil,
+        channelName: String? = nil,
+        language: String? = nil
     ) {
         retention = RetentionDescription(audio: retainAudio, separate: true, combined: false)
         self.sessionID = sessionID
@@ -329,16 +395,20 @@ struct StreamStartEnvelope: Encodable {
             frameDurationMilliseconds: frameDurationMilliseconds
         )
         self.applicationBundleIdentifiers = applicationBundleIdentifiers
+        self.channel = channel
+        self.channelName = channelName
+        self.language = language
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, source, audio, client, vad, retention
+        case type, source, audio, client, vad, retention, channel, language
         case schemaVersion = "schema_version"
         case sessionID = "session_id"
         case streamID = "stream_id"
         case sessionSources = "session_sources"
         case streamMode = "stream_mode"
         case applicationBundleIdentifiers = "application_bundle_identifiers"
+        case channelName = "channel_name"
     }
 }
 
@@ -422,4 +492,5 @@ private struct StreamControlEnvelope: Encodable {
 
 private struct TypeOnlyResponse: Decodable { let type: String }
 private struct TranscriptResponse: Decodable { let type: String; let event: TranscriptWireEvent? }
+private struct TranslationResponse: Decodable { let type: String; let event: TranslationWireEvent? }
 private struct ErrorResponse: Decodable { let type: String; let code: String?; let message: String? }

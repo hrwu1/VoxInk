@@ -8,6 +8,10 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
     public let startMilliseconds: Int64
     public let endMilliseconds: Int64?
     public let isFinal: Bool
+    /// Application name for a per-application system stream, if any.
+    public let channelName: String?
+    /// On-device translation shown as a second line, if any.
+    public let translation: String?
 
     public init(
         id: String,
@@ -15,7 +19,9 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
         text: String,
         startMilliseconds: Int64,
         endMilliseconds: Int64? = nil,
-        isFinal: Bool
+        isFinal: Bool,
+        channelName: String? = nil,
+        translation: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -23,6 +29,16 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
         self.startMilliseconds = startMilliseconds
         self.endMilliseconds = endMilliseconds
         self.isFinal = isFinal
+        self.channelName = channelName
+        self.translation = translation
+    }
+
+    public func withTranslation(_ translation: String?) -> CaptionItem {
+        CaptionItem(
+            id: id, source: source, text: text, startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds, isFinal: isFinal, channelName: channelName,
+            translation: translation
+        )
     }
 }
 
@@ -58,6 +74,11 @@ public final class FloatingCaptionPanelController {
         }
     }
 
+    /// Attach a translation that arrived after its caption was shown.
+    public func attachTranslation(_ translation: String, to id: String) {
+        model.attachTranslation(translation, to: id)
+    }
+
     public func showWindow() {
         panel.orderFrontRegardless()
     }
@@ -79,9 +100,19 @@ public final class FloatingCaptionPanelController {
 private final class CaptionPanelModel: ObservableObject {
     @Published var items = [CaptionItem]()
 
+    func attachTranslation(_ translation: String, to id: String) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index] = items[index].withTranslation(translation)
+    }
+
     func upsert(_ item: CaptionItem) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {
-            items[index] = item
+            // A final that replaces a partial keeps a translation that already
+            // arrived for the same segment.
+            let existing = items[index]
+            items[index] = item.translation == nil && existing.translation != nil
+                ? item.withTranslation(existing.translation)
+                : item
         } else {
             items.append(item)
         }
@@ -100,18 +131,26 @@ private struct FloatingCaptionView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(model.items) { item in
                 HStack(alignment: .top, spacing: 10) {
-                    Text(item.source == .microphone ? "MIC" : "SYSTEM")
+                    Text(item.source == .microphone ? "MIC" : (item.channelName?.uppercased() ?? "SYSTEM"))
                         .font(.system(size: 10, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
                         .background(item.source == .microphone ? Color.blue : Color.purple, in: Capsule())
-                        .accessibilityLabel(item.source == .microphone ? "Microphone" : "System audio")
-                    Text(item.text)
-                        .font(.system(size: 18, weight: item.isFinal ? .regular : .light))
-                        .foregroundStyle(item.isFinal ? .white : .white.opacity(0.78))
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel(item.source == .microphone ? "Microphone" : (item.channelName ?? "System audio"))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.text)
+                            .font(.system(size: 18, weight: item.isFinal ? .regular : .light))
+                            .foregroundStyle(item.isFinal ? .white : .white.opacity(0.78))
+                            .lineLimit(2)
+                        if let translation = item.translation {
+                            Text(translation)
+                                .font(.system(size: 15, weight: .light))
+                                .foregroundStyle(.white.opacity(0.7))
+                                .lineLimit(2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }

@@ -1,5 +1,19 @@
 import Foundation
 
+/// One running system-audio source, whichever facility provides it.
+protocol SystemAudioSourceCapture: AnyObject {
+    var droppedFrameCount: Int { get }
+    func start() async throws
+    func pause() async
+    func resume()
+    func stop() async
+}
+
+extension SystemAudioCapture: SystemAudioSourceCapture {}
+
+@available(macOS 14.2, *)
+extension ProcessTapCapture: SystemAudioSourceCapture {}
+
 /// An actor so the signal handler that drives pause and resume cannot mutate
 /// this state concurrently with a stop arriving on another task.
 public actor CaptureCoordinator {
@@ -13,8 +27,9 @@ public actor CaptureCoordinator {
 
     private let configuration: CaptureConfiguration
     private let sink: AudioFrameSink
+    private let statusHandler: WebSocketAudioFrameSink.StatusHandler?
     private var microphone: MicrophoneCapture?
-    private var systemAudio: SystemAudioCapture?
+    private var systemSources = [SystemAudioSourceCapture]()
     private var state: State = .idle
     /// A resume that arrived while `pause()` was still draining.
     private var pendingResume = false
@@ -30,11 +45,13 @@ public actor CaptureCoordinator {
         }
         try LocalEndpointPolicy.validate(configuration.serviceURL)
         self.configuration = configuration
+        self.statusHandler = statusHandler
         self.sink = try sink ?? WebSocketAudioFrameSink(
             endpoint: configuration.serviceURL,
             authToken: configuration.authToken,
             applications: configuration.selectedApplications,
             retainAudio: configuration.retainAudio,
+            language: configuration.language,
             transcriptHandler: transcriptHandler,
             statusHandler: statusHandler
         )
@@ -44,7 +61,7 @@ public actor CaptureCoordinator {
 
     /// Frames discarded across all sources because transcription fell behind.
     public var droppedFrameCount: Int {
-        (microphone?.droppedFrameCount ?? 0) + (systemAudio?.droppedFrameCount ?? 0)
+        (microphone?.droppedFrameCount ?? 0) + systemSources.reduce(0) { $0 + $1.droppedFrameCount }
     }
 
     public func start() async throws {
@@ -58,29 +75,84 @@ public actor CaptureCoordinator {
                 let microphone = MicrophoneCapture(
                     sessionID: configuration.sessionID,
                     sampleRate: configuration.sampleRate,
-                    sink: sink
+                    sink: sink,
+                    deviceUID: configuration.microphoneDeviceUID
                 )
                 try await microphone.start()
                 self.microphone = microphone
             }
             if let selection = configuration.systemAudio {
-                let systemAudio = SystemAudioCapture(
-                    selection: selection,
-                    sessionID: configuration.sessionID,
-                    sampleRate: configuration.sampleRate,
-                    sink: sink
-                )
-                try await systemAudio.start()
-                self.systemAudio = systemAudio
+                systemSources = try await startSystemSources(selection)
             }
             state = .recording
         } catch {
             await microphone?.stop()
             microphone = nil
-            await systemAudio?.stop()
-            systemAudio = nil
+            for source in systemSources { await source.stop() }
+            systemSources = []
             await sink.disconnect(sessionID: configuration.sessionID, reason: "startup_failed")
             throw error
+        }
+    }
+
+    /// Open the system sources the configuration asks for.
+    ///
+    /// With the tap backend, selected applications become one stream each so
+    /// the transcript can say which application spoke. ScreenCaptureKit mixes
+    /// every selected application into one stream, as before.
+    private func startSystemSources(_ selection: SystemAudioSelection) async throws -> [SystemAudioSourceCapture] {
+        let wantsTap = configuration.backend != .screenCaptureKit
+        if wantsTap, #available(macOS 14.2, *) {
+            var started = [SystemAudioSourceCapture]()
+            do {
+                for channel in tapChannels(selection) {
+                    let tap = ProcessTapCapture(
+                        channel: channel,
+                        sessionID: configuration.sessionID,
+                        sampleRate: configuration.sampleRate,
+                        sink: sink
+                    )
+                    try await tap.start()
+                    started.append(tap)
+                }
+                return started
+            } catch {
+                for source in started { await source.stop() }
+                guard configuration.backend == .auto else { throw error }
+                statusHandler?(CaptureStatusEvent(
+                    sessionID: configuration.sessionID,
+                    source: .system,
+                    level: .warning,
+                    code: "tap_fallback",
+                    message: "Process tap unavailable (\(error.localizedDescription)); using ScreenCaptureKit."
+                ))
+            }
+        } else if configuration.backend == .tap {
+            throw CaptureError.tapUnavailable("process taps need macOS 14.2 or newer")
+        }
+        let capture = SystemAudioCapture(
+            selection: selection,
+            sessionID: configuration.sessionID,
+            sampleRate: configuration.sampleRate,
+            sink: sink
+        )
+        try await capture.start()
+        return [capture]
+    }
+
+    @available(macOS 14.2, *)
+    private func tapChannels(_ selection: SystemAudioSelection) -> [ProcessTapCapture.Channel] {
+        switch selection {
+        case .all:
+            return [ProcessTapCapture.Channel(bundleIdentifier: nil, name: nil, streamID: "system-1")]
+        case .applications(let identifiers):
+            return identifiers.sorted().map { bundle in
+                ProcessTapCapture.Channel(
+                    bundleIdentifier: bundle,
+                    name: configuration.applicationNames[bundle],
+                    streamID: "system-\(bundle)"
+                )
+            }
         }
     }
 
@@ -91,7 +163,7 @@ public actor CaptureCoordinator {
         guard state == .recording else { return }
         state = .pausing
         await microphone?.pause()
-        await systemAudio?.pause()
+        for source in systemSources { await source.pause() }
         await sink.pause(sessionID: configuration.sessionID)
         // A stop can land while the drain is in flight; it owns the state then.
         guard state == .pausing else { return }
@@ -114,7 +186,7 @@ public actor CaptureCoordinator {
         guard state == .paused else { return }
         await sink.resume(sessionID: configuration.sessionID)
         microphone?.resume()
-        systemAudio?.resume()
+        for source in systemSources { source.resume() }
         state = .recording
     }
 
@@ -123,8 +195,8 @@ public actor CaptureCoordinator {
         pendingResume = false
         await microphone?.stop()
         microphone = nil
-        await systemAudio?.stop()
-        systemAudio = nil
+        for source in systemSources { await source.stop() }
+        systemSources = []
         state = .idle
         await sink.disconnect(sessionID: configuration.sessionID, reason: "user_stopped")
     }

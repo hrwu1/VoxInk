@@ -10,6 +10,17 @@ public enum SystemAudioSelection: Equatable, Sendable {
     case applications(bundleIdentifiers: Set<String>)
 }
 
+/// Which macOS facility delivers system audio.
+public enum SystemAudioBackend: String, Sendable, CaseIterable {
+    /// Prefer a Core Audio process tap and fall back to ScreenCaptureKit.
+    case auto
+    /// Core Audio process taps (macOS 14.2+). Narrower permission, works
+    /// while output is muted, and can isolate one application per stream.
+    case tap
+    /// ScreenCaptureKit audio, mixed into one stream.
+    case screenCaptureKit = "screencapturekit"
+}
+
 public struct CaptureConfiguration: Sendable {
     public var sessionID: String
     public var microphoneEnabled: Bool
@@ -18,6 +29,15 @@ public struct CaptureConfiguration: Sendable {
     public var serviceURL: URL
     public var authToken: String?
     public var retainAudio: Bool
+    public var backend: SystemAudioBackend
+    /// Core Audio device UID of the microphone to open; nil means the default.
+    public var microphoneDeviceUID: String?
+    /// Manual language override handed to the service (for example "en" or
+    /// "zh"); nil lets the model detect it.
+    public var language: String?
+    /// Display names for selected applications, keyed by bundle identifier,
+    /// so a per-application stream can be labeled the way the user knows it.
+    public var applicationNames: [String: String]
 
     /// Bundle identifiers this session captures, empty for microphone-only or
     /// all-system capture. Every stream reports the same list so whichever one
@@ -34,13 +54,21 @@ public struct CaptureConfiguration: Sendable {
         sampleRate: Int = 16_000,
         serviceURL: URL? = nil,
         authToken: String? = ProcessInfo.processInfo.environment["VOXINK_AUTH_SECRET"],
-        retainAudio: Bool = false
+        retainAudio: Bool = false,
+        backend: SystemAudioBackend = .auto,
+        microphoneDeviceUID: String? = nil,
+        language: String? = nil,
+        applicationNames: [String: String] = [:]
     ) {
         self.sessionID = sessionID
         self.microphoneEnabled = microphoneEnabled
         self.systemAudio = systemAudio
         self.sampleRate = sampleRate
         self.retainAudio = retainAudio
+        self.backend = backend
+        self.microphoneDeviceUID = microphoneDeviceUID
+        self.language = language
+        self.applicationNames = applicationNames
         let safeSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
         self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8765/v1/sessions/\(safeSessionID)/stream")!
         self.authToken = authToken
@@ -57,6 +85,9 @@ public struct AudioFrame: Equatable, Sendable {
     public let channels: Int
     public let pcmS16LE: Data
     public let applicationBundleIdentifiers: [String]?
+    /// For a per-application system stream, the bundle identifier it isolates.
+    public let channel: String?
+    public let channelName: String?
 
     public init(
         sessionID: String,
@@ -67,7 +98,9 @@ public struct AudioFrame: Equatable, Sendable {
         sampleRate: Int,
         channels: Int = 1,
         pcmS16LE: Data,
-        applicationBundleIdentifiers: [String]? = nil
+        applicationBundleIdentifiers: [String]? = nil,
+        channel: String? = nil,
+        channelName: String? = nil
     ) {
         self.sessionID = sessionID
         self.streamID = streamID
@@ -78,6 +111,8 @@ public struct AudioFrame: Equatable, Sendable {
         self.channels = channels
         self.pcmS16LE = pcmS16LE
         self.applicationBundleIdentifiers = applicationBundleIdentifiers
+        self.channel = channel
+        self.channelName = channelName
     }
 }
 
@@ -111,11 +146,13 @@ public enum CaptureError: LocalizedError {
     case noCaptureSource
     case invalidServiceURL(URL)
     case microphonePermissionDenied
+    case microphoneDeviceUnavailable(String)
     case screenRecordingPermissionDenied
     case noDisplayAvailable
     case noSelectedApplications(Set<String>)
     case audioFormatUnavailable(String)
     case conversionFailed
+    case tapUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -125,6 +162,8 @@ public enum CaptureError: LocalizedError {
             return "The capture service must be a ws:// or wss:// loopback URL; received \(url.absoluteString)."
         case .microphonePermissionDenied:
             return "Microphone access was denied. Enable it in System Settings > Privacy & Security > Microphone."
+        case .microphoneDeviceUnavailable(let uid):
+            return "The selected microphone is not connected: \(uid)."
         case .screenRecordingPermissionDenied:
             return "Screen and system-audio capture access was denied. Enable it in System Settings > Privacy & Security > Screen & System Audio Recording."
         case .noDisplayAvailable:
@@ -135,6 +174,8 @@ public enum CaptureError: LocalizedError {
             return "The capture source exposed an unusable audio format: \(detail)."
         case .conversionFailed:
             return "AVAudioConverter could not normalize an audio frame."
+        case .tapUnavailable(let detail):
+            return "System audio could not be tapped: \(detail)"
         }
     }
 }

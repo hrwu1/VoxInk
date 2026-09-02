@@ -7,11 +7,15 @@ private struct Options {
     var allSystemAudio = false
     var applicationBundleIdentifiers = Set<String>()
     var listApplications = false
+    var listDevices = false
     var captions = true
     var clickThroughCaptions = false
     var retainAudio = false
     var endpoint: URL?
     var sessionID = SessionIdentifier.make()
+    var backend = SystemAudioBackend.auto
+    var microphoneDeviceUID: String?
+    var language: String?
 
     static func parse(_ arguments: [String]) throws -> Options {
         var options = Options()
@@ -21,18 +25,28 @@ private struct Options {
             case "--mic": options.microphone = true
             case "--system-all": options.allSystemAudio = true
             case "--list-apps": options.listApplications = true
+            case "--list-devices": options.listDevices = true
             case "--no-captions": options.captions = false
             case "--click-through": options.clickThroughCaptions = true
             case "--retain-audio": options.retainAudio = true
-            case "--app", "--endpoint", "--session-id":
+            case "--app", "--endpoint", "--session-id", "--backend", "--mic-device", "--language":
                 guard index + 1 < arguments.count else { throw CLIError("Missing value after \(arguments[index]).") }
                 let value = arguments[index + 1]
-                if arguments[index] == "--app" { options.applicationBundleIdentifiers.insert(value) }
-                if arguments[index] == "--endpoint" {
+                switch arguments[index] {
+                case "--app": options.applicationBundleIdentifiers.insert(value)
+                case "--endpoint":
                     guard let url = URL(string: value) else { throw CLIError("Invalid endpoint: \(value)") }
                     options.endpoint = url
+                case "--session-id": options.sessionID = value
+                case "--backend":
+                    guard let backend = SystemAudioBackend(rawValue: value) else {
+                        throw CLIError("Unknown backend: \(value). Use auto, tap, or screencapturekit.")
+                    }
+                    options.backend = backend
+                case "--mic-device": options.microphoneDeviceUID = value
+                case "--language": options.language = value
+                default: break
                 }
-                if arguments[index] == "--session-id" { options.sessionID = value }
                 index += 1
             case "--help", "-h": throw CLIError.usage
             default: throw CLIError("Unknown option: \(arguments[index])")
@@ -50,7 +64,9 @@ private struct CLIError: LocalizedError {
     static let usage = CLIError("""
     Usage:
       voxink-capture --list-apps
-      voxink-capture [--mic] [--system-all | --app BUNDLE_ID ...]
+      voxink-capture --list-devices
+      voxink-capture [--mic] [--mic-device UID] [--system-all | --app BUNDLE_ID ...]
+                      [--backend auto|tap|screencapturekit] [--language en|zh]
                       [--endpoint ws://127.0.0.1:8765/v1/sessions/SESSION_ID/stream]
                       [--session-id ID] [--no-captions | --click-through]
                       [--retain-audio]
@@ -80,12 +96,27 @@ private struct VoxInkCaptureCommand {
                 }
                 return
             }
+            if options.listDevices {
+                for device in try CaptureApplicationCatalog.inputDevices() {
+                    print("\(device.uid)\t\(device.name)\(device.isDefault ? "\tdefault" : "")")
+                }
+                return
+            }
 
             let systemAudio: SystemAudioSelection?
+            var applicationNames = [String: String]()
             if options.allSystemAudio {
                 systemAudio = .all
             } else if !options.applicationBundleIdentifiers.isEmpty {
                 systemAudio = .applications(bundleIdentifiers: options.applicationBundleIdentifiers)
+                // Names let a per-application stream be labeled "Zoom" rather
+                // than "us.zoom.xos". Best effort: an app that is not running
+                // yet is labeled by its bundle identifier until it is.
+                if let running = try? await CaptureApplicationCatalog.runningApplications() {
+                    for application in running where options.applicationBundleIdentifiers.contains(application.bundleIdentifier) {
+                        applicationNames[application.bundleIdentifier] = application.name
+                    }
+                }
             } else {
                 systemAudio = nil
             }
@@ -100,7 +131,11 @@ private struct VoxInkCaptureCommand {
                 microphoneEnabled: options.microphone,
                 systemAudio: systemAudio,
                 serviceURL: options.endpoint,
-                retainAudio: options.retainAudio
+                retainAudio: options.retainAudio,
+                backend: options.backend,
+                microphoneDeviceUID: options.microphoneDeviceUID,
+                language: options.language,
+                applicationNames: applicationNames
             )
             let captionPanel: FloatingCaptionPanelController? = if options.captions {
                 await MainActor.run {
@@ -118,7 +153,11 @@ private struct VoxInkCaptureCommand {
             let coordinator = try CaptureCoordinator(
                 configuration: configuration,
                 transcriptHandler: { event in
-                    print("[\(event.source.rawValue.uppercased())] \(event.text)")
+                    if event.isFinal {
+                        let label = event.channelName ?? event.source.rawValue.uppercased()
+                        print("[\(label)] \(event.text)")
+                        if let translation = event.translation { print("    \(translation)") }
+                    }
                     if let captionPanel {
                         Task { @MainActor in captionPanel.show(event.captionItem) }
                     }
