@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Caption, CaptureMode, Diarization, SpeakerSegment, useVoxInkRecorder } from './use-voxink-recorder';
+import { sourceLabel } from './caption-feed';
+import {
+  Caption, CaptionLanguage, CaptureMode, Diarization, SpeakerSegment, useVoxInkRecorder,
+} from './use-voxink-recorder';
 import { useVocabulary } from './use-vocabulary';
 import { VocabularyPanel } from './vocabulary-panel';
 
@@ -10,18 +13,20 @@ type Tab = 'record' | 'vocabulary';
 
 /** Render an anonymous session-local speaker id as something readable.
  *
- * `MIC_SPEAKER_00` becomes `Speaker 1`. The raw identifier is deliberately not
- * shown: it looks like a durable identity, and it is not one — the numbering
- * means nothing outside this session and is never matched to a person.
+ * `MIC_SPEAKER_00` becomes `Speaker 1`, unless the user named it or the local
+ * voice registry recognized it. The raw identifier is deliberately not shown:
+ * it looks like a durable identity, and it is not one.
  */
-function speakerName(speakerId: string): string {
+function speakerName(speakerId: string, names: Record<string, string>): string {
+  const named = names[speakerId];
+  if (named) return named;
   const index = Number(speakerId.slice(speakerId.lastIndexOf('_') + 1));
   return Number.isFinite(index) ? `Speaker ${index + 1}` : speakerId;
 }
 
 /** The diarization segment for one caption, if the job produced one. */
 function segmentFor(diarization: Diarization, caption: Caption): SpeakerSegment | null {
-  if (diarization.state !== 'ready' || caption.source === 'system') return null;
+  if (diarization.state !== 'ready' || caption.source === 'system' || caption.kind === 'mark') return null;
   const middle = caption.startMs + (caption.endMs - caption.startMs) / 2;
   return diarization.segments.find((item) => item.startMs === caption.startMs)
     ?? diarization.segments.find((item) => item.startMs <= middle && middle < item.endMs)
@@ -29,12 +34,12 @@ function segmentFor(diarization: Diarization, caption: Caption): SpeakerSegment 
 }
 
 /** The label for one caption, or null to leave the source tag in place. */
-function speakerFor(segment: SpeakerSegment | null): string | null {
+function speakerFor(segment: SpeakerSegment | null, names: Record<string, string>): string | null {
   if (!segment) return null;
   // A segment with no speaker is a deliberate outcome, not a gap: reconciliation
   // saw a tie or too little speech and refused to guess. Saying so is better
   // than showing a blank the reader has to interpret.
-  if (segment.speakerId) return speakerName(segment.speakerId);
+  if (segment.speakerId) return speakerName(segment.speakerId, names);
   return segment.pieces.length > 1 ? 'Several' : 'Unclear';
 }
 
@@ -43,7 +48,7 @@ function speakerFor(segment: SpeakerSegment | null): string | null {
  * Pieces are character ranges of the canonical block text, which is the
  * caption text trimmed; the ranges tile it, so nothing is dropped or invented.
  */
-function CaptionText({ caption, segment }: { caption: Caption; segment: SpeakerSegment | null }) {
+function CaptionText({ caption, segment, names }: { caption: Caption; segment: SpeakerSegment | null; names: Record<string, string> }) {
   const text = caption.text.trim();
   const pieces = segment?.pieces ?? [];
   if (pieces.length < 2 || pieces[pieces.length - 1].textEnd !== text.length) {
@@ -54,7 +59,7 @@ function CaptionText({ caption, segment }: { caption: Caption; segment: SpeakerS
       {pieces.map((piece) => (
         <p key={piece.textStart}>
           <span className="piece-speaker">
-            {piece.speakerId ? speakerName(piece.speakerId) : 'Unclear'}
+            {piece.speakerId ? speakerName(piece.speakerId, names) : 'Unclear'}
           </span>
           {text.slice(piece.textStart, piece.textEnd).trim()}
         </p>
@@ -88,34 +93,75 @@ function SpeakerChip({ diarization }: { diarization: Diarization }) {
   );
 }
 
+/** Rename a speaker for this session, optionally remembering the voice. */
+function SpeakerNameDialog({ speakerId, current, onClose, onSave }: {
+  speakerId: string; current: string; onClose: () => void;
+  onSave: (name: string, remember: boolean) => void;
+}) {
+  const [name, setName] = useState(current);
+  const [remember, setRemember] = useState(false);
+  return (
+    <div className="dialog-backdrop" role="presentation" onClick={onClose}>
+      <form
+        className="dialog"
+        role="dialog"
+        aria-label="Name this speaker"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={(event) => { event.preventDefault(); if (name.trim()) onSave(name.trim(), remember); }}
+      >
+        <p className="eyebrow">Name this speaker</p>
+        <input autoFocus aria-label="Speaker name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Wei" />
+        <label className="dialog-check">
+          <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
+          <span><strong>Remember this voice</strong><small>Stored only on this Mac, so later sessions can label {speakerId.startsWith('MIC') ? 'them' : 'this voice'} automatically</small></span>
+        </label>
+        <div className="dialog-actions">
+          <button type="button" className="secondary-control" onClick={onClose}>Cancel</button>
+          <button type="submit" className="record-control ready" disabled={!name.trim()}>Save</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function Home() {
   const recorder = useVoxInkRecorder();
   const vocabulary = useVocabulary(recorder.authorizedFetch, recorder.isLive);
   const [tab, setTab] = useState<Tab>('record');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [naming, setNaming] = useState<{ speakerId: string; current: string } | null>(null);
   const { state, elapsed, captions, message, isLive } = recorder;
   const choosingApplications = recorder.mode === 'applications' || recorder.mode === 'microphone_applications';
   const selectionLocked = recorder.modelSwitching || !['ready', 'failed'].includes(state);
   const selectedModel = recorder.models.find((model) => model.id === recorder.activeModel);
+  const usesMicrophone = recorder.mode.startsWith('microphone');
   const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Space belongs to whatever the vocabulary tab is being typed into.
-    if (tab !== 'record') return;
+    if (tab !== 'record' || naming) return;
     function handleShortcut(event: KeyboardEvent) {
-      if (event.code !== 'Space' || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement).tagName)) return;
-      event.preventDefault();
-      if (state === 'ready' || state === 'failed') void recorder.start();
-      else if (state === 'recording') recorder.pause();
-      else if (state === 'paused') recorder.resume();
+      const target = event.target as HTMLElement;
+      if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)) return;
+      if (event.code === 'Space') {
+        event.preventDefault();
+        if (state === 'ready' || state === 'failed') void recorder.start();
+        else if (state === 'recording') recorder.pause();
+        else if (state === 'paused') recorder.resume();
+      } else if (event.key === 'm' || event.key === 'M') {
+        if (state === 'recording' || state === 'paused') { event.preventDefault(); void recorder.mark(); }
+      }
     }
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [recorder, state, tab]);
+  }, [naming, recorder, state, tab]);
 
   useEffect(() => {
     const list = captionListRef.current;
     if (list) list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
   }, [captions]);
+
+  const languageLabel = { auto: 'Auto · EN / 中文', en: 'English', zh: '中文' }[recorder.language];
 
   return (
     <main className="app-shell">
@@ -125,7 +171,15 @@ export default function Home() {
           <span>VoxInk</span>
         </div>
         <div className="privacy-pill"><span /> {isLive ? 'Local helper' : 'UI preview'}</div>
-        <button className="icon-button" aria-label="Open settings">⌘</button>
+        <button
+          type="button"
+          className={settingsOpen ? 'icon-button active' : 'icon-button'}
+          aria-label="Open settings"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((open) => !open)}
+        >
+          ⌘
+        </button>
       </nav>
 
       <section className="workspace">
@@ -139,6 +193,66 @@ export default function Home() {
             {state === 'ready' ? (isLive ? 'Ready to record' : 'Preview ready') : state === 'paused' ? 'Session paused' : state === 'failed' ? 'Needs attention' : state === 'stopping' ? 'Finalizing' : state === 'starting' ? 'Starting' : 'Listening now'}
           </div>
         </header>
+
+        {settingsOpen && (
+          <section className="settings-panel" aria-label="Session settings">
+            <div className="settings-grid">
+              <label>
+                <small>Microphone</small>
+                <select
+                  aria-label="Microphone device"
+                  value={recorder.selectedDevice}
+                  disabled={selectionLocked || !usesMicrophone}
+                  onChange={(event) => recorder.setSelectedDevice(event.target.value)}
+                >
+                  <option value="">System default</option>
+                  {recorder.devices.map((device) => (
+                    <option key={device.uid} value={device.uid}>{device.name}{device.isDefault ? ' (default)' : ''}</option>
+                  ))}
+                </select>
+                <button type="button" className="link-button" disabled={selectionLocked} onClick={() => void recorder.refreshDevices()}>Refresh devices</button>
+              </label>
+              <label>
+                <small>Language</small>
+                <select
+                  aria-label="Caption language"
+                  value={recorder.language}
+                  disabled={selectionLocked}
+                  onChange={(event) => recorder.setLanguage(event.target.value as CaptionLanguage)}
+                >
+                  <option value="auto">Detect automatically</option>
+                  <option value="en">English</option>
+                  <option value="zh">中文 (Chinese)</option>
+                </select>
+                <em>Fixing the language helps when one speaker mixes both.</em>
+              </label>
+              <label className="settings-toggle">
+                <span>
+                  <strong>Translate captions</strong>
+                  <small>
+                    {recorder.translationAvailable
+                      ? 'Each finished sentence gets an on-device translation into the other language'
+                      : 'Install models/Qwen3-0.6B to translate on this Mac'}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={recorder.translate}
+                  disabled={selectionLocked || !recorder.translationAvailable}
+                  onChange={(event) => recorder.setTranslate(event.target.checked)}
+                />
+              </label>
+              <div className="settings-note">
+                <strong>Live words</strong>
+                <small>
+                  {recorder.partialCaptions
+                    ? 'Captions appear while you speak and settle when you pause.'
+                    : 'Partial captions are off for this helper; captions appear after each pause.'}
+                </small>
+              </div>
+            </div>
+          </section>
+        )}
 
         <div className="tab-strip" role="tablist" aria-label="Console sections">
           <button
@@ -258,6 +372,7 @@ export default function Home() {
                     </label>
                   )) : <p>Open the application you want to capture, then press Refresh.</p>}
                 </div>
+                <p className="picker-note">Each application becomes its own labelled channel in the transcript.</p>
               </div>
             )}
 
@@ -282,9 +397,16 @@ export default function Home() {
                 <span aria-hidden="true">{state === 'recording' ? 'Ⅱ' : '●'}</span>
                 {state === 'ready' || state === 'failed' ? 'Start recording' : state === 'paused' ? 'Resume' : state === 'starting' ? 'Connecting…' : state === 'stopping' ? 'Finalizing…' : 'Pause'}
               </button>
-              <button className="secondary-control" disabled>Mark</button>
+              <button
+                className="secondary-control"
+                disabled={state !== 'recording' && state !== 'paused'}
+                title="Drop a timestamped marker into the transcript (M)"
+                onClick={() => void recorder.mark()}
+              >
+                Mark
+              </button>
             </div>
-            <p className="shortcut-hint">Press <kbd>Space</kbd> to start or pause</p>
+            <p className="shortcut-hint">Press <kbd>Space</kbd> to start or pause, <kbd>M</kbd> to mark</p>
           </section>
 
           <aside className="session-card">
@@ -292,7 +414,8 @@ export default function Home() {
               <div><p className="eyebrow">Live transcript</p><h2>Captions</h2></div>
               <div className="panel-chips">
                 <SpeakerChip diarization={recorder.diarization} />
-                <span className="language-chip">Auto · EN / 中文</span>
+                {recorder.translate && recorder.translationAvailable && <span className="language-chip">Translating</span>}
+                <span className="language-chip">{languageLabel}</span>
               </div>
             </div>
             <div
@@ -303,16 +426,39 @@ export default function Home() {
               tabIndex={0}
             >
               {captions.length ? captions.map((caption) => {
+                if (caption.kind === 'mark') {
+                  return (
+                    <article className="caption-line mark" key={caption.id}>
+                      <time>{formatTime(caption.startMs)}</time>
+                      <div>
+                        <span className="speaker-label">◆ MARK</span>
+                        <p>{caption.text || 'Marked'}</p>
+                      </div>
+                    </article>
+                  );
+                }
                 const segment = segmentFor(recorder.diarization, caption);
+                const speaker = speakerFor(segment, recorder.diarization.names);
                 return (
-                  <article className="caption-line" key={caption.id}>
+                  <article className={caption.isFinal ? 'caption-line' : 'caption-line partial'} key={caption.id}>
                     <time>{formatTime(caption.startMs)}</time>
                     <div>
-                      <span className="speaker-label">
-                        {speakerFor(segment)
-                          ?? (caption.source === 'system' ? 'SYSTEM / APP' : 'MIC')}
-                      </span>
-                      <CaptionText caption={caption} segment={segment} />
+                      {speaker && segment?.speakerId ? (
+                        <button
+                          type="button"
+                          className="speaker-label speaker-button"
+                          title="Name this speaker"
+                          onClick={() => setNaming({ speakerId: segment.speakerId as string, current: recorder.diarization.names[segment.speakerId as string] ?? '' })}
+                        >
+                          {speaker}
+                        </button>
+                      ) : (
+                        <span className="speaker-label">{speaker ?? sourceLabel(caption)}</span>
+                      )}
+                      <CaptionText caption={caption} segment={segment} names={recorder.diarization.names} />
+                      {caption.translation && (
+                        <p className="translation" lang={caption.translationLanguage}>{caption.translation}</p>
+                      )}
                     </div>
                   </article>
                 );
@@ -332,10 +478,25 @@ export default function Home() {
         )}
 
         <footer className="recent-strip">
-          <div><p className="eyebrow">Last session</p><strong>Nothing recorded yet</strong></div>
+          <div>
+            <p className="eyebrow">Last session</p>
+            <strong>{recorder.lastSession ? recorder.lastSession.sessionId : 'Nothing recorded yet'}</strong>
+            {recorder.lastSession && (
+              <button type="button" className="link-button" onClick={() => void recorder.revealFolder()}>Open folder</button>
+            )}
+          </div>
           <div className="local-note"><span>⌁</span><p><strong>Private by design</strong><br />Audio never leaves this Mac.</p></div>
         </footer>
       </section>
+
+      {naming && (
+        <SpeakerNameDialog
+          speakerId={naming.speakerId}
+          current={naming.current}
+          onClose={() => setNaming(null)}
+          onSave={(name, remember) => { setNaming(null); void recorder.nameSpeaker(naming.speakerId, name, remember); }}
+        />
+      )}
     </main>
   );
 }

@@ -101,23 +101,45 @@ class ControlClient:
     # -- Capture lifecycle -------------------------------------------------
 
     def start_capture(
-        self, *, sources: list[str], applications: list[str], retain_audio: bool
+        self,
+        *,
+        sources: list[str],
+        applications: list[str],
+        retain_audio: bool,
+        microphone_device: str | None = None,
+        language: str | None = None,
+        translate: bool = False,
+        backend: str | None = None,
     ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/v1/ui/capture/start",
-            body={
-                "sources": sources,
-                "applications": applications,
-                "retain_audio": retain_audio,
-            },
-        )
+        body: dict[str, Any] = {
+            "sources": sources,
+            "applications": applications,
+            "retain_audio": retain_audio,
+            "translate": translate,
+        }
+        if microphone_device:
+            body["microphone_device"] = microphone_device
+        if language:
+            body["language"] = language
+        if backend:
+            body["backend"] = backend
+        return self._request("POST", "/v1/ui/capture/start", body=body)
 
     def capture_status(self, *, after: int = 0) -> dict[str, Any]:
         return self._request("GET", "/v1/ui/capture/status", query={"after": after})
 
     def control_capture(self, action: str) -> dict[str, Any]:
         return self._request("POST", f"/v1/ui/capture/{action}")
+
+    def mark_capture(self, label: str = "") -> dict[str, Any]:
+        return self._request("POST", "/v1/ui/capture/mark", body={"label": label})
+
+    def reveal(self, session_id: str | None = None) -> dict[str, Any]:
+        body = {"session_id": session_id} if session_id else {}
+        return self._request("POST", "/v1/ui/actions/reveal", body=body)
+
+    def translation_capability(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/translation")
 
     # -- Sessions and artifacts -------------------------------------------
 

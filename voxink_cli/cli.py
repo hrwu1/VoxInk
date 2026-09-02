@@ -72,6 +72,7 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
     capture = client.capture_capabilities()
     native = bool(capture.get("native_capture_available"))
     diarization = client.diarization_capability()
+    translation = bool(capture.get("translation_available"))
     data = {
         "protocol_version": health.get("protocol_version"),
         "schema_version": SCHEMA_VERSION,
@@ -96,6 +97,22 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
                 "supported": True,
                 "available": bool(diarization.get("available")),
                 "permitted": bool(diarization.get("enabled")),
+            },
+            "captions.partial": {
+                "supported": True,
+                "available": bool(capture.get("partial_captions", False)),
+                "permitted": True,
+            },
+            "captions.translation": {
+                "supported": True,
+                "available": translation,
+                "permitted": translation,
+            },
+            "capture.channels": {"supported": True, "available": native, "permitted": native},
+            "capture.echo_suppression": {
+                "supported": True,
+                "available": bool(capture.get("echo_suppression", False)),
+                "permitted": True,
             },
             "durable_session_registry": {
                 "supported": False,
@@ -222,18 +239,19 @@ def _check(name: str, ok: bool, detail: str, remedy: str) -> dict[str, Any]:
 
 
 def _devices_list(args: argparse.Namespace, client: ControlClient) -> Result:
-    devices = client.devices().get("devices", [])
+    response = client.devices()
+    devices = response.get("devices", [])
     warnings = (
         ()
         if devices
         else ("No input devices were reported; the local audio backend may be unavailable.",)
     )
     text = "\n".join(
-        f"{device['index']:>3}  {device['name']}"
+        f"{device.get('uid') or device.get('index', ''):<28}  {device['name']}"
         f"{'  (default)' if device.get('default') else ''}"
         for device in devices
     )
-    return Result({"devices": devices}, warnings, text)
+    return Result({"devices": devices, "source": response.get("source")}, warnings, text)
 
 
 def _applications_list(args: argparse.Namespace, client: ControlClient) -> Result:
@@ -268,6 +286,10 @@ def _capture_start(args: argparse.Namespace, client: ControlClient) -> Result:
         sources=["system" if source == "applications" else source for source in sources],
         applications=applications,
         retain_audio=args.retain_audio,
+        microphone_device=getattr(args, "device", None),
+        language=getattr(args, "language", None),
+        translate=bool(getattr(args, "translate", False)),
+        backend=getattr(args, "backend", None),
     )
     data = {
         "session_id": started.get("session_id"),
@@ -275,11 +297,24 @@ def _capture_start(args: argparse.Namespace, client: ControlClient) -> Result:
         "sources": sources,
         "applications": applications,
         "retain_audio": args.retain_audio,
+        "microphone_device": getattr(args, "device", None),
+        "language": getattr(args, "language", None),
+        "translate": bool(getattr(args, "translate", False)),
         "next_cursor": started.get("next_cursor", 0),
     }
     return Result(
         data,
         text=f"capture {data['state']} (session {data['session_id']})",
+    )
+
+
+def _capture_mark(args: argparse.Namespace, client: ControlClient) -> Result:
+    marked = client.mark_capture(args.label or "")
+    stamp = marked.get("at_ms", 0)
+    return Result(
+        marked,
+        text=f"marked at {stamp // 60000:02d}:{stamp % 60000 // 1000:02d}"
+        + (f": {marked['label']}" if marked.get("label") else ""),
     )
 
 
@@ -369,10 +404,16 @@ def _capture_watch(args: argparse.Namespace, client: ControlClient) -> Iterator[
 
 
 def _event_line(event: dict[str, Any]) -> str:
-    if event.get("type") != "transcript":
-        return f"[{event.get('type', 'event')}] {event.get('message', '')}".rstrip()
-    source = event.get("source", "")
-    return f"[{source}] {event.get('text', '')}".strip()
+    kind = event.get("type", "transcript")
+    if kind == "translation":
+        return f"    ({event.get('language', '')}) {event.get('text', '')}".rstrip()
+    if kind == "mark":
+        return f"[mark] {event.get('text', '')}".rstrip()
+    if kind != "transcript":
+        return f"[{kind}] {event.get('message', '')}".rstrip()
+    label = event.get("channel_name") or event.get("channel") or event.get("source", "")
+    suffix = "" if event.get("is_final", True) else " …"
+    return f"[{label}] {event.get('text', '')}{suffix}".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +567,11 @@ def _human_bytes(count: int) -> str:
 def _transcripts_show(args: argparse.Namespace, client: ControlClient) -> Result:
     transcript = client.transcript(args.session_id, part=args.part)
     return Result(transcript, text=transcript.get("text", ""))
+
+
+def _transcripts_open(args: argparse.Namespace, client: ControlClient) -> Result:
+    revealed = client.reveal(args.session_id)
+    return Result(revealed, text=f"opened {revealed.get('directory', '')}")
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +774,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="save captured audio beside the transcript (default: enabled)",
     )
+    start.add_argument(
+        "--device", default=None, metavar="UID", help="microphone device UID from `devices list`"
+    )
+    start.add_argument(
+        "--language", choices=("en", "zh"), default=None, help="fix the language instead of detecting it"
+    )
+    start.add_argument(
+        "--translate", action="store_true", help="translate each caption into the other language"
+    )
+    start.add_argument(
+        "--backend",
+        choices=("auto", "tap", "screencapturekit"),
+        default=None,
+        help="system audio backend (default: auto, which prefers the process tap)",
+    )
     start.set_defaults(handler=_capture_start, command="capture.start")
+
+    mark = leaf(capture, "mark", "Drop a timestamped marker into the transcript.")
+    mark.add_argument("label", nargs="?", default="", help="optional note for the marker")
+    mark.set_defaults(handler=_capture_mark, command="capture.mark")
 
     status = leaf(capture, "status", "Report capture state and buffered events.")
     status.add_argument("--after", type=int, default=0, help="resume from this event cursor")
@@ -780,6 +845,11 @@ def build_parser() -> argparse.ArgumentParser:
     transcript_show.add_argument("session_id")
     transcript_show.add_argument("--part", type=int, default=None, help="read one part only")
     transcript_show.set_defaults(handler=_transcripts_show, command="transcripts.show")
+    transcript_open = leaf(transcripts, "open", "Reveal a session's folder in Finder.")
+    transcript_open.add_argument(
+        "session_id", nargs="?", default=None, help="session to open (default: the last one)"
+    )
+    transcript_open.set_defaults(handler=_transcripts_open, command="transcripts.open")
 
     diarization = group("diarization", "Inspect and run local speaker diarization.")
     leaf(

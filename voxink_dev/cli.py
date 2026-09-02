@@ -87,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--session-id")
+    parser.add_argument(
+        "--translation-model",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="local instruct model for caption translation (default: models/Qwen3-0.6B)",
+    )
+    parser.add_argument(
+        "--partial-captions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show captions while a sentence is still being spoken (default: enabled)",
+    )
+    parser.add_argument(
+        "--echo-suppression",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="drop microphone audio that is the speakers' echo of a system stream (default: enabled)",
+    )
     interface = parser.add_mutually_exclusive_group()
     interface.add_argument(
         "--web",
@@ -147,6 +166,9 @@ def main(argv: list[str] | None = None) -> int:
             report.output_root,
             device=args.device,
             vocabulary_path=args.vocabulary,
+            translation_model_path=args.translation_model,
+            partial_captions=args.partial_captions,
+            echo_suppression=args.echo_suppression,
             native_capture_path=args.native_capture if args.web else None,
             # Publishing the endpoint is what lets `voxink` attach to this
             # helper; the launcher owns it because it owns the helper's life.

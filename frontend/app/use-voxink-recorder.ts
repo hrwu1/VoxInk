@@ -2,12 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { applyFeedEvents, type Caption, type FeedEvent } from './caption-feed';
 import { elapsedSeconds, freezeElapsed } from './elapsed-timer';
 
+export type { Caption } from './caption-feed';
 export type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping' | 'failed';
 export type CaptureMode = 'microphone' | 'system' | 'applications' | 'microphone_system' | 'microphone_applications';
-export type Caption = { id: string; source: string; text: string; startMs: number; endMs: number; isFinal: boolean };
+export type CaptionLanguage = 'auto' | 'en' | 'zh';
 export type CaptureApplication = { bundleId: string; name: string };
+export type InputDevice = { uid: string; name: string; isDefault: boolean };
+export type LastSession = { sessionId: string; directory: string; parts: string[] };
 export type LocalModel = {
   id: string;
   displayName: string;
@@ -21,11 +25,13 @@ type LaunchConfig = { origin: string; token: string; retainAudio: boolean };
 type NativeStatus = {
   state: 'ready' | 'recording' | 'paused' | 'stopping' | 'failed';
   session_id?: string | null;
-  events: Array<{ segment_id: string; source: string; text: string; start_ms: number; end_ms: number; is_final: boolean }>;
+  events: FeedEvent[];
   next_cursor: number;
   exit_code: number | null;
   error: string | null;
   retention?: { retaining: boolean; retained_bytes: number; stopped_reason: string | null };
+  last_session?: { session_id: string; directory: string; transcript_parts: string[] } | null;
+  translation?: { requested: boolean; available: boolean; error: string | null };
 };
 
 export type DiarizationState =
@@ -44,6 +50,8 @@ export type Diarization = {
   labeledSegments: number;
   totalSegments: number;
   segments: SpeakerSegment[];
+  /** Names the user gave, or the registry recognized, per anonymous id. */
+  names: Record<string, string>;
 };
 
 type DiarizationStatus = {
@@ -51,6 +59,7 @@ type DiarizationStatus = {
   speaker_count: number;
   labeled_segments: number;
   total_segments: number;
+  speakers?: Record<string, { name?: string | null; registry_id?: string | null }>;
   segments?: Array<{
     start_ms: number; end_ms: number; speaker_id: string | null; overlap_detected: boolean;
     pieces?: Array<{
@@ -60,10 +69,9 @@ type DiarizationStatus = {
 };
 
 const IDLE_DIARIZATION: Diarization = {
-  state: 'disabled', speakerCount: 0, labeledSegments: 0, totalSegments: 0, segments: [],
+  state: 'disabled', speakerCount: 0, labeledSegments: 0, totalSegments: 0, segments: [], names: {},
 };
 
-const MAX_VISIBLE_CAPTIONS = 250;
 // Diarization runs for minutes, not milliseconds, so it is polled far more
 // slowly than the caption feed. Nothing waits on it.
 const DIARIZATION_POLL_MS = 3000;
@@ -73,6 +81,28 @@ function captureSources(mode: CaptureMode): string[] {
   if (mode === 'microphone') return ['microphone'];
   if (mode.startsWith('microphone_')) return ['microphone', 'system'];
   return ['system'];
+}
+
+function parseDiarization(status: DiarizationStatus): Diarization {
+  const names: Record<string, string> = {};
+  for (const [speakerId, info] of Object.entries(status.speakers ?? {})) {
+    if (info?.name) names[speakerId] = info.name;
+  }
+  return {
+    state: status.state,
+    speakerCount: status.speaker_count ?? 0,
+    labeledSegments: status.labeled_segments ?? 0,
+    totalSegments: status.total_segments ?? 0,
+    names,
+    segments: (status.segments ?? []).map((item) => ({
+      startMs: item.start_ms, endMs: item.end_ms,
+      speakerId: item.speaker_id, overlapDetected: item.overlap_detected,
+      pieces: (item.pieces ?? []).map((piece) => ({
+        textStart: piece.text_start, textEnd: piece.text_end,
+        startMs: piece.start_ms, endMs: piece.end_ms, speakerId: piece.speaker_id,
+      })),
+    })),
+  };
 }
 
 export function useVoxInkRecorder() {
@@ -88,14 +118,22 @@ export function useVoxInkRecorder() {
   const [message, setMessage] = useState('Open through voxink-dev to connect');
   const [mode, setModeState] = useState<CaptureMode>('microphone');
   const [nativeAvailable, setNativeAvailable] = useState(false);
+  const [partialCaptions, setPartialCaptions] = useState(false);
+  const [translationAvailable, setTranslationAvailable] = useState(false);
+  const [translate, setTranslateState] = useState(false);
+  const [language, setLanguageState] = useState<CaptionLanguage>('auto');
+  const [devices, setDevices] = useState<InputDevice[]>([]);
+  const [selectedDevice, setSelectedDeviceState] = useState<string>('');
   const [applications, setApplications] = useState<CaptureApplication[]>([]);
   const [selectedApplications, setSelectedApplications] = useState<string[]>([]);
   const [models, setModels] = useState<LocalModel[]>([]);
   const [activeModel, setActiveModel] = useState('Qwen3-ASR-1.7B');
   const [modelSwitching, setModelSwitching] = useState(false);
+  const [lastSession, setLastSession] = useState<LastSession | null>(null);
   const [active, setActive] = useState(false);
   const nativeCursor = useRef(0);
   const retentionNotice = useRef<string | null>(null);
+  const translationNotice = useRef<string | null>(null);
   const completedElapsedMs = useRef(0);
   const runningSinceMs = useRef<number | null>(null);
 
@@ -169,13 +207,31 @@ export function useVoxInkRecorder() {
     }
   }, [authorizedFetch, launch]);
 
+  const refreshDevices = useCallback(async () => {
+    if (!launch) return;
+    try {
+      const response = await authorizedFetch('/v1/devices');
+      const catalog = await response.json() as { devices?: Array<{ uid?: string | null; name: string; default?: boolean }> };
+      setDevices((catalog.devices || [])
+        .filter((item): item is { uid: string; name: string; default?: boolean } => typeof item.uid === 'string' && item.uid.length > 0)
+        .map((item) => ({ uid: item.uid, name: item.name, isDefault: Boolean(item.default) })));
+    } catch {
+      setDevices([]);
+    }
+  }, [authorizedFetch, launch]);
+
   useEffect(() => {
     if (!launch) return;
     void authorizedFetch('/v1/ui/capture/capabilities')
       .then((response) => response.json())
       .then((payload) => {
-        const capabilities = payload as { native_capture_available?: boolean };
+        const capabilities = payload as {
+          native_capture_available?: boolean; partial_captions?: boolean; translation_available?: boolean;
+        };
         setNativeAvailable(Boolean(capabilities.native_capture_available));
+        setPartialCaptions(Boolean(capabilities.partial_captions));
+        setTranslationAvailable(Boolean(capabilities.translation_available));
+        if (capabilities.native_capture_available) void refreshDevices();
       })
       .catch(() => {
         // A stale token or a restarted helper would otherwise leave every native
@@ -183,7 +239,7 @@ export function useVoxInkRecorder() {
         setNativeAvailable(false);
         setMessage('Cannot read local capture capabilities; native modes are unavailable');
       });
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, launch, refreshDevices]);
 
   useEffect(() => {
     if (!launch) return;
@@ -233,16 +289,6 @@ export function useVoxInkRecorder() {
     return `${minutes}:${remainder}`;
   }, [seconds]);
 
-  const addCaption = useCallback((caption: Caption) => {
-    setCaptions((current) => {
-      const existing = current.findIndex((entry) => entry.id === caption.id);
-      if (existing < 0) return [...current, caption].sort((a, b) => a.startMs - b.startMs).slice(-MAX_VISIBLE_CAPTIONS);
-      const next = [...current];
-      next[existing] = caption;
-      return next;
-    });
-  }, []);
-
   const fail = useCallback((error: unknown) => {
     pauseElapsed();
     setActive(false); setState('failed');
@@ -250,11 +296,15 @@ export function useVoxInkRecorder() {
   }, [pauseElapsed]);
 
   const applyNativeStatus = useCallback((status: NativeStatus) => {
-    status.events.forEach((item) => addCaption({
-      id: item.segment_id, source: item.source, text: item.text,
-      startMs: item.start_ms, endMs: item.end_ms, isFinal: item.is_final,
-    }));
+    if (status.events.length) setCaptions((current) => applyFeedEvents(current, status.events));
     nativeCursor.current = status.next_cursor;
+    if (status.last_session) {
+      setLastSession({
+        sessionId: status.last_session.session_id,
+        directory: status.last_session.directory,
+        parts: status.last_session.transcript_parts,
+      });
+    }
     // Retention stopping does not stop the session: the transcript is still
     // being written, so this is a notice rather than a failure. Reported once,
     // because the status poll keeps returning the same reason afterwards.
@@ -267,6 +317,11 @@ export function useVoxInkRecorder() {
           : 'Audio retention limit reached. The transcript is still recording.',
       );
     }
+    const translationError = status.translation?.error ?? null;
+    if (translationError && translationError !== translationNotice.current) {
+      translationNotice.current = translationError;
+      setMessage(`Translation is failing: ${translationError}. Captions continue.`);
+    }
     if (status.state === 'failed') {
       pauseElapsed();
       setActive(false); setState('failed');
@@ -275,7 +330,7 @@ export function useVoxInkRecorder() {
       pauseElapsed();
       setActive(false); setState('ready'); setMessage('Transcript finalized and saved locally');
     }
-  }, [addCaption, pauseElapsed]);
+  }, [pauseElapsed]);
 
   useEffect(() => {
     if (!active || !launch) return;
@@ -310,6 +365,13 @@ export function useVoxInkRecorder() {
     return () => { cancelled = true; };
   }, [authorizedFetch, launch]);
 
+  const refreshDiarization = useCallback(async () => {
+    const sessionId = diarizedSessionId.current;
+    if (!launch || !sessionId) return;
+    const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
+    setDiarization(parseDiarization(await response.json() as DiarizationStatus));
+  }, [authorizedFetch, launch]);
+
   // Poll only after Stop, and only until the job settles. Nothing here blocks
   // the transcript, which is already complete and on screen.
   useEffect(() => {
@@ -320,23 +382,7 @@ export function useVoxInkRecorder() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
-        const status = await response.json() as DiarizationStatus;
-        if (cancelled) return;
-        setDiarization({
-          state: status.state,
-          speakerCount: status.speaker_count ?? 0,
-          labeledSegments: status.labeled_segments ?? 0,
-          totalSegments: status.total_segments ?? 0,
-          segments: (status.segments ?? []).map((item) => ({
-            startMs: item.start_ms, endMs: item.end_ms,
-            speakerId: item.speaker_id, overlapDetected: item.overlap_detected,
-            pieces: (item.pieces ?? []).map((piece) => ({
-              textStart: piece.text_start, textEnd: piece.text_end,
-              startMs: piece.start_ms, endMs: piece.end_ms, speakerId: piece.speaker_id,
-            })),
-          })),
-        });
+        if (!cancelled) await refreshDiarization();
       } catch {
         // A failed poll is not a failed job; the next tick tries again.
       }
@@ -344,12 +390,13 @@ export function useVoxInkRecorder() {
     const timer = window.setInterval(() => void poll(), DIARIZATION_POLL_MS);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [authorizedFetch, diarization.state, launch, state]);
+  }, [diarization.state, launch, refreshDiarization, state]);
 
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
     if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
     setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
+    translationNotice.current = null;
     // Speakers are only findable in audio that was kept, so the two travel
     // together. The control is disabled without retention, and this makes the
     // request agree with what the UI already shows.
@@ -364,6 +411,9 @@ export function useVoxInkRecorder() {
           applications: mode.endsWith('applications') ? selectedApplications : [],
           retain_audio: retainAudio,
           diarize: wantsSpeakers,
+          microphone_device: selectedDevice || null,
+          language: language === 'auto' ? null : language,
+          translate: translate && translationAvailable,
         }),
       });
       const status = await response.json() as NativeStatus;
@@ -373,9 +423,10 @@ export function useVoxInkRecorder() {
         ? { ...IDLE_DIARIZATION, state: 'waiting_for_stop' }
         : IDLE_DIARIZATION);
       beginElapsed();
-      setActive(true); setState('recording'); setMessage('Listening locally with macOS capture');
+      setActive(true); setState('recording');
+      setMessage(partialCaptions ? 'Listening locally — words appear as you speak' : 'Listening locally with macOS capture');
     } catch (error) { fail(error); }
-  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, launch, mode, modelSwitching, resetElapsed, retainAudio, selectedApplications]);
+  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, launch, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
 
   const control = useCallback(async (
     action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
@@ -397,6 +448,53 @@ export function useVoxInkRecorder() {
     () => control('resume', 'recording', 'Listening locally with macOS capture'), [control],
   );
   const stop = useCallback(() => control('stop', 'stopping', ''), [control]);
+
+  const mark = useCallback(async (label = '') => {
+    if (state !== 'recording' && state !== 'paused') return;
+    if (!launch) {
+      setCaptions((current) => applyFeedEvents(current, [{
+        type: 'mark', segment_id: `mark-${Date.now()}`, text: label, start_ms: seconds * 1000, end_ms: seconds * 1000,
+      }]));
+      return;
+    }
+    try {
+      const response = await authorizedFetch('/v1/ui/capture/mark', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }),
+      });
+      const marked = await response.json() as { at_ms: number };
+      const total = Math.floor(marked.at_ms / 1000);
+      setMessage(`Marked at ${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Cannot mark the transcript');
+    }
+  }, [authorizedFetch, launch, seconds, state]);
+
+  const revealFolder = useCallback(async () => {
+    if (!launch) { setMessage('Preview mode — nothing has been saved'); return; }
+    try {
+      await authorizedFetch('/v1/ui/actions/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(lastSession ? { session_id: lastSession.sessionId } : {}),
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Cannot open the transcript folder');
+    }
+  }, [authorizedFetch, lastSession, launch]);
+
+  const nameSpeaker = useCallback(async (speakerId: string, name: string, remember: boolean) => {
+    const sessionId = diarizedSessionId.current;
+    if (!launch || !sessionId) return;
+    try {
+      await authorizedFetch(`/v1/sessions/${sessionId}/speakers/${encodeURIComponent(speakerId)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, remember }),
+      });
+      await refreshDiarization();
+      setMessage(remember ? `${name} will be recognized in later sessions` : `Named ${name} for this session`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Cannot name the speaker');
+    }
+  }, [authorizedFetch, launch, refreshDiarization]);
 
   const setMode = useCallback((value: CaptureMode) => {
     if (state !== 'ready' && state !== 'failed') return;
@@ -430,6 +528,23 @@ export function useVoxInkRecorder() {
       : 'Speaker identification is off for the next session');
   }, [retainAudio, state]);
 
+  const setTranslate = useCallback((enabled: boolean) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    if (enabled && !translationAvailable) return;
+    setTranslateState(enabled);
+    setMessage(enabled ? 'Captions will be translated on this Mac' : 'Translation is off for the next session');
+  }, [state, translationAvailable]);
+
+  const setLanguage = useCallback((value: CaptionLanguage) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    setLanguageState(value);
+  }, [state]);
+
+  const setSelectedDevice = useCallback((uid: string) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    setSelectedDeviceState(uid);
+  }, [state]);
+
   const selectModel = useCallback(async (modelId: string) => {
     if (!launch || modelId === activeModel || modelSwitching) return;
     if (state !== 'ready' && state !== 'failed') return;
@@ -456,9 +571,12 @@ export function useVoxInkRecorder() {
   return {
     state, elapsed, captions, message, isLive: Boolean(launch), mode, setMode,
     retainAudio, setRetainAudio,
-    identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization,
+    identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization, nameSpeaker,
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
+    devices, selectedDevice, setSelectedDevice, refreshDevices,
+    language, setLanguage, translate, setTranslate, translationAvailable, partialCaptions,
     models, activeModel, selectModel, modelSwitching,
+    lastSession, revealFolder, mark,
     start, pause, resume, stop,
     // Other panels reach the helper through the same one-time launch credential.
     authorizedFetch,

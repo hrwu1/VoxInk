@@ -27,6 +27,24 @@ def main() -> None:
         default=None,
         help="custom vocabulary file (default: vocabulary.txt beside the transcripts)",
     )
+    parser.add_argument(
+        "--translation-model",
+        type=Path,
+        default=PROJECT_ROOT / "models" / "Qwen3-0.6B",
+        help="local instruct model used to translate captions (optional)",
+    )
+    parser.add_argument(
+        "--partial-captions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show captions while an utterance is still being spoken (default: on)",
+    )
+    parser.add_argument(
+        "--echo-suppression",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="drop microphone chunks that echo a system channel (default: on)",
+    )
     args = parser.parse_args()
     auth_secret = os.environ.get("VOXINK_AUTH_SECRET")
     if not auth_secret:
@@ -46,6 +64,9 @@ def main() -> None:
                 if (value := os.environ.get("VOXINK_NATIVE_CAPTURE"))
                 else None
             ),
+            translation_model_path=args.translation_model.expanduser().resolve(),
+            partial_captions=args.partial_captions,
+            echo_suppression=args.echo_suppression,
         )
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)

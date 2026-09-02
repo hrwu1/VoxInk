@@ -561,7 +561,7 @@ def create_app(
         if options.translate and not runtime.translation_available:
             raise HTTPException(
                 status_code=409,
-                detail="translation is unavailable; install the local translation model",
+                detail="translation is unavailable; the local translation package is not installed",
             )
         session_id = new_session_id()
         server = request.scope.get("server")

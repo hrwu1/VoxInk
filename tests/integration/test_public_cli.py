@@ -111,6 +111,9 @@ class PublicCommandLineTests(unittest.TestCase):
                 output_root=self.output_root,
                 auth_secret=AUTH_SECRET,
                 native_capture_path=self.native_capture,
+                # Whether a translation model happens to be downloaded on this
+                # machine must not change what these tests observe.
+                translation_model_path=None,
             ),
             provider=self.provider,
             provider_factory=lambda _: FakeProvider(),
@@ -469,3 +472,52 @@ class PublicCommandLineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveFeatureCommandTests(PublicCommandLineTests):
+    """Flags and commands added with partial captions, channels, and marks."""
+
+    def test_capture_start_passes_device_language_and_backend_to_the_helper(self) -> None:
+        process = self._fake_capture_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned:
+            started = self._ok(
+                "capture", "start", "--source", "microphone",
+                "--device", "BuiltInMicrophoneDevice", "--language", "zh", "--backend", "tap",
+            )["data"]
+            command = spawned.call_args.args[0]
+        self.assertEqual("BuiltInMicrophoneDevice", started["microphone_device"])
+        self.assertEqual("zh", started["language"])
+        self.assertIn("--mic-device", command)
+        self.assertIn("BuiltInMicrophoneDevice", command)
+        self.assertIn("--language", command)
+        self.assertIn("zh", command)
+        self.assertIn("--backend", command)
+        self.assertIn("tap", command)
+
+    def test_translate_is_refused_without_a_translation_model(self) -> None:
+        process = self._fake_capture_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process):
+            code, error = self._error("capture", "start", "--source", "microphone", "--translate")
+        self.assertEqual(EXIT_CONFLICT, code)
+        self.assertIn("translation", error["message"])
+
+    def test_mark_needs_a_running_capture(self) -> None:
+        code, error = self._error("capture", "mark", "decision")
+        self.assertEqual(EXIT_CONFLICT, code)
+        self.assertEqual(ErrorCode.INVALID_TRANSITION, error["code"])
+
+    def test_capabilities_report_the_live_caption_features(self) -> None:
+        features = self._ok("capabilities")["data"]["features"]
+        self.assertTrue(features["captions.partial"]["available"])
+        self.assertTrue(features["capture.echo_suppression"]["available"])
+        self.assertFalse(features["captions.translation"]["available"])
+
+    def test_transcripts_open_reveals_the_folder(self) -> None:
+        with patch("services.transcription.app.sys.platform", "darwin"), patch(
+            "services.transcription.app.subprocess.run"
+        ) as run:
+            session_dir = self.output_root / "opened-session"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            opened = self._ok("transcripts", "open", "opened-session")["data"]
+            self.assertEqual(run.call_args.args[0], ["open", str(session_dir)])
+        self.assertEqual(str(session_dir), opened["directory"])

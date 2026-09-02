@@ -17,10 +17,13 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 #: Returns `(tokenizer, model, device)`.
 ModelLoader = Callable[[Path, str], tuple[Any, Any, str]]
 
-_SYSTEM_PROMPT = (
-    "You are a professional interpreter. Translate the user's text from {source} "
-    "to {target}. Reply with the translation only: no notes, no quotes, no "
-    "explanations. Keep names, numbers, and code words as they are."
+#: One user turn, no system prompt. On the 0.6B checkpoint a system prompt
+#: describing the format was echoed back as the "translation" for some
+#: inputs; an instruction in the same turn as the text was followed every
+#: time in the comparison run.
+_PROMPT = (
+    "Translate the following {source} text into {target}. "
+    "Output only the {target} translation, nothing else.\n\n{text}"
 )
 
 
@@ -77,8 +80,7 @@ class QwenLocalTranslator:
         source = LANGUAGE_NAMES.get(source_language, source_language)
         target = LANGUAGE_NAMES.get(target_language, target_language)
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT.format(source=source, target=target)},
-            {"role": "user", "content": cleaned},
+            {"role": "user", "content": _PROMPT.format(source=source, target=target, text=cleaned)},
         ]
         with self._lock:
             tokenizer, model = self._tokenizer, self._model

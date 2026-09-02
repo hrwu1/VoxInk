@@ -41,6 +41,10 @@ class HelperConfig:
     vocabulary_path: Path | None = None
     # Where the public CLI looks for this helper; None keeps it undiscoverable.
     control_endpoint_path: Path | None = None
+    # Optional local translation model; None leaves the service default.
+    translation_model_path: Path | None = None
+    partial_captions: bool = True
+    echo_suppression: bool = True
 
 
 class HelperSupervisor:
@@ -96,6 +100,14 @@ class HelperSupervisor:
             command.extend(
                 ("--vocabulary", str(self.config.vocabulary_path.expanduser().resolve()))
             )
+        if self.config.translation_model_path is not None:
+            command.extend(
+                ("--translation-model", str(self.config.translation_model_path.expanduser().resolve()))
+            )
+        if not self.config.partial_captions:
+            command.append("--no-partial-captions")
+        if not self.config.echo_suppression:
+            command.append("--no-echo-suppression")
         self.process = self.process_factory(
             command,
             env=environment,
