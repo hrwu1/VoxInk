@@ -103,14 +103,22 @@ class PyannoteCommunityProvider:
         raw = _triples(getattr(output, "speaker_diarization", None))
         exclusive = _triples(getattr(output, "exclusive_speaker_diarization", None))
         raw_turns, exclusive_turns = normalize_turns(raw, exclusive, source=request.source)
+        mapping = speaker_mapping(raw, exclusive, source=request.source)
+        embeddings = _embeddings(output, mapping)
+        missing = [label for label in mapping if mapping[label] not in embeddings]
+        if missing:
+            # The pipeline's centroids are NaN whenever it skipped clustering
+            # (one speaker, or one cluster), so compute them ourselves from
+            # each speaker's own turns with the pipeline's embedding model.
+            embeddings.update(
+                _fallback_embeddings(pipeline, request.audio_path, exclusive, mapping, missing)
+            )
         return DiarizationResult(
             model=model.source_model_id,
             model_revision=model.revision,
             raw_turns=raw_turns,
             exclusive_turns=exclusive_turns,
-            embeddings=_embeddings(
-                output, speaker_mapping(raw, exclusive, source=request.source)
-            ),
+            embeddings=embeddings,
         )
 
     def _load(self, model: LocalDiarizationModel) -> Any:
@@ -230,6 +238,68 @@ def _embeddings(output: Any, mapping: dict[str, str]) -> dict[str, tuple[float, 
             continue
         embeddings[speaker_id] = tuple(row)
     return embeddings
+
+
+#: Audio per speaker fed to the embedding model in the fallback, in seconds.
+#: Enough for a stable voice print; bounded so a two-hour monologue does not
+#: cost minutes of inference for one vector.
+_EMBEDDING_BUDGET_S = 60.0
+_EMBEDDING_MIN_TURN_S = 0.5
+
+
+def _fallback_embeddings(
+    pipeline: Any,
+    audio_path: Path,
+    exclusive: Sequence[tuple[str, float, float]],
+    mapping: dict[str, str],
+    labels: Sequence[str],
+) -> dict[str, tuple[float, ...]]:
+    """One duration-weighted mean embedding per speaker from its own turns."""
+    embedder = getattr(pipeline, "_embedding", None)
+    if embedder is None:
+        return {}
+    try:
+        import numpy as np  # noqa: PLC0415
+        import torch  # noqa: PLC0415
+
+        with wave.open(str(audio_path), "rb") as reader:
+            rate = reader.getframerate()
+            frames = reader.readframes(reader.getnframes())
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    except Exception:  # noqa: BLE001 - embeddings are an extra, never a failure
+        return {}
+    result: dict[str, tuple[float, ...]] = {}
+    for label in labels:
+        turns = sorted(
+            ((end - start, start, end) for item, start, end in exclusive if item == label),
+            reverse=True,
+        )
+        vectors = []
+        weights = []
+        budget = _EMBEDDING_BUDGET_S
+        for duration, start, end in turns:
+            if duration < _EMBEDDING_MIN_TURN_S or budget <= 0.0:
+                continue
+            clip = samples[int(start * rate) : int(end * rate)]
+            if len(clip) < int(_EMBEDDING_MIN_TURN_S * rate):
+                continue
+            try:
+                waveform = torch.from_numpy(clip.copy())[None, None, :]
+                vector = np.asarray(embedder(waveform))[0]
+            except Exception:  # noqa: BLE001
+                continue
+            if not np.all(np.isfinite(vector)):
+                continue
+            vectors.append(vector)
+            weights.append(duration)
+            budget -= duration
+        if not vectors:
+            continue
+        mean = np.average(np.stack(vectors), axis=0, weights=np.asarray(weights))
+        speaker_id = mapping.get(str(label))
+        if speaker_id is not None and np.all(np.isfinite(mean)):
+            result[speaker_id] = tuple(float(value) for value in mean)
+    return result
 
 
 def _triples(annotation: Any) -> Sequence[tuple[str, float, float]]:
