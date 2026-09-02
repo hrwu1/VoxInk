@@ -29,6 +29,8 @@ type NativeStatus = {
   next_cursor: number;
   exit_code: number | null;
   error: string | null;
+  /** The capture helper's latest status line, `code: message`, while it runs. */
+  notice?: string | null;
   retention?: { retaining: boolean; retained_bytes: number; stopped_reason: string | null };
   last_session?: { session_id: string; directory: string; transcript_parts: string[] } | null;
   translation?: { requested: boolean; available: boolean; error: string | null };
@@ -134,6 +136,7 @@ export function useVoxInkRecorder() {
   const nativeCursor = useRef(0);
   const retentionNotice = useRef<string | null>(null);
   const translationNotice = useRef<string | null>(null);
+  const helperNotice = useRef<string | null>(null);
   const completedElapsedMs = useRef(0);
   const runningSinceMs = useRef<number | null>(null);
 
@@ -321,6 +324,13 @@ export function useVoxInkRecorder() {
     if (translationError && translationError !== translationNotice.current) {
       translationNotice.current = translationError;
       setMessage(`Translation is failing: ${translationError}. Captions continue.`);
+    }
+    // A reconnect or an abandoned stream is the helper's to report; the poll
+    // repeats the same line until the next one, so each is shown once.
+    const notice = status.notice ?? null;
+    if (notice && notice !== helperNotice.current) {
+      helperNotice.current = notice;
+      setMessage(notice.slice(notice.indexOf(': ') + 2) || notice);
     }
     if (status.state === 'failed') {
       pauseElapsed();
