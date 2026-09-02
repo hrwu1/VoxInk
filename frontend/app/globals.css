@@ -153,6 +153,8 @@ kbd { padding: 2px 6px; border: 1px solid #d3d4ca; border-bottom-width: 2px; bor
 .caption-line { display: grid; grid-template-columns: 44px 1fr; gap: 9px; padding: 18px 0; border-bottom: 1px solid #e4e3dc; }
 .caption-line time { color: #9a9c93; font-size: 10px; font-variant-numeric: tabular-nums; }
 .speaker-label { display: block; margin-bottom: 6px; color: var(--orange); font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.piece-speaker { display: inline-block; margin-right: 8px; color: var(--orange); font-size: 9px; font-weight: 800; letter-spacing: .12em; vertical-align: middle; }
+.caption-line p + p { margin-top: 6px; }
 .caption-line:last-child { border-bottom: 0; }
 .caption-line p { margin: 0; max-width: 40ch; overflow-wrap: anywhere; font-size: 15px; line-height: 1.48; }
 .empty-captions { height: 100%; min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }

@@ -30,8 +30,13 @@ type NativeStatus = {
 
 export type DiarizationState =
   | 'disabled' | 'waiting_for_stop' | 'processing' | 'ready' | 'failed' | 'stale';
+export type SpeakerPiece = {
+  textStart: number; textEnd: number; startMs: number; endMs: number; speakerId: string | null;
+};
 export type SpeakerSegment = {
   startMs: number; endMs: number; speakerId: string | null; overlapDetected: boolean;
+  /** Same-speaker character ranges of the caption, when it was split. */
+  pieces: SpeakerPiece[];
 };
 export type Diarization = {
   state: DiarizationState;
@@ -48,6 +53,9 @@ type DiarizationStatus = {
   total_segments: number;
   segments?: Array<{
     start_ms: number; end_ms: number; speaker_id: string | null; overlap_detected: boolean;
+    pieces?: Array<{
+      text_start: number; text_end: number; start_ms: number; end_ms: number; speaker_id: string | null;
+    }>;
   }>;
 };
 
@@ -323,6 +331,10 @@ export function useVoxInkRecorder() {
           segments: (status.segments ?? []).map((item) => ({
             startMs: item.start_ms, endMs: item.end_ms,
             speakerId: item.speaker_id, overlapDetected: item.overlap_detected,
+            pieces: (item.pieces ?? []).map((piece) => ({
+              textStart: piece.text_start, textEnd: piece.text_end,
+              startMs: piece.start_ms, endMs: piece.end_ms, speakerId: piece.speaker_id,
+            })),
           })),
         });
       } catch {

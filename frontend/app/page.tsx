@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Caption, CaptureMode, Diarization, useVoxInkRecorder } from './use-voxink-recorder';
+import { Caption, CaptureMode, Diarization, SpeakerSegment, useVoxInkRecorder } from './use-voxink-recorder';
 import { useVocabulary } from './use-vocabulary';
 import { VocabularyPanel } from './vocabulary-panel';
 
@@ -19,17 +19,48 @@ function speakerName(speakerId: string): string {
   return Number.isFinite(index) ? `Speaker ${index + 1}` : speakerId;
 }
 
-/** The label for one caption, or null to leave the source tag in place. */
-function speakerFor(diarization: Diarization, caption: Caption): string | null {
+/** The diarization segment for one caption, if the job produced one. */
+function segmentFor(diarization: Diarization, caption: Caption): SpeakerSegment | null {
   if (diarization.state !== 'ready' || caption.source === 'system') return null;
   const middle = caption.startMs + (caption.endMs - caption.startMs) / 2;
-  const segment = diarization.segments.find((item) => item.startMs === caption.startMs)
-    ?? diarization.segments.find((item) => item.startMs <= middle && middle < item.endMs);
+  return diarization.segments.find((item) => item.startMs === caption.startMs)
+    ?? diarization.segments.find((item) => item.startMs <= middle && middle < item.endMs)
+    ?? null;
+}
+
+/** The label for one caption, or null to leave the source tag in place. */
+function speakerFor(segment: SpeakerSegment | null): string | null {
   if (!segment) return null;
   // A segment with no speaker is a deliberate outcome, not a gap: reconciliation
   // saw a tie or too little speech and refused to guess. Saying so is better
   // than showing a blank the reader has to interpret.
-  return segment.speakerId ? speakerName(segment.speakerId) : 'Unclear';
+  if (segment.speakerId) return speakerName(segment.speakerId);
+  return segment.pieces.length > 1 ? 'Several' : 'Unclear';
+}
+
+/** A caption split where the speaker changed, one line per piece.
+ *
+ * Pieces are character ranges of the canonical block text, which is the
+ * caption text trimmed; the ranges tile it, so nothing is dropped or invented.
+ */
+function CaptionText({ caption, segment }: { caption: Caption; segment: SpeakerSegment | null }) {
+  const text = caption.text.trim();
+  const pieces = segment?.pieces ?? [];
+  if (pieces.length < 2 || pieces[pieces.length - 1].textEnd !== text.length) {
+    return <p>{caption.text}</p>;
+  }
+  return (
+    <>
+      {pieces.map((piece) => (
+        <p key={piece.textStart}>
+          <span className="piece-speaker">
+            {piece.speakerId ? speakerName(piece.speakerId) : 'Unclear'}
+          </span>
+          {text.slice(piece.textStart, piece.textEnd).trim()}
+        </p>
+      ))}
+    </>
+  );
 }
 
 function SpeakerChip({ diarization }: { diarization: Diarization }) {
@@ -271,18 +302,21 @@ export default function Home() {
               aria-live="polite"
               tabIndex={0}
             >
-              {captions.length ? captions.map((caption) => (
-                <article className="caption-line" key={caption.id}>
-                  <time>{formatTime(caption.startMs)}</time>
-                  <div>
-                    <span className="speaker-label">
-                      {speakerFor(recorder.diarization, caption)
-                        ?? (caption.source === 'system' ? 'SYSTEM / APP' : 'MIC')}
-                    </span>
-                    <p>{caption.text}</p>
-                  </div>
-                </article>
-              )) : (
+              {captions.length ? captions.map((caption) => {
+                const segment = segmentFor(recorder.diarization, caption);
+                return (
+                  <article className="caption-line" key={caption.id}>
+                    <time>{formatTime(caption.startMs)}</time>
+                    <div>
+                      <span className="speaker-label">
+                        {speakerFor(segment)
+                          ?? (caption.source === 'system' ? 'SYSTEM / APP' : 'MIC')}
+                      </span>
+                      <CaptionText caption={caption} segment={segment} />
+                    </div>
+                  </article>
+                );
+              }) : (
                 <div className="empty-captions">
                   <span className="listening-orbit"><i /></span>
                   <strong>{state === 'recording' ? 'Listening…' : state === 'paused' ? 'Paused' : state === 'failed' ? 'Connection failed' : 'Your captions will appear here'}</strong>
