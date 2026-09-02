@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import unittest
 from collections import deque
 from dataclasses import replace
@@ -1189,6 +1190,171 @@ class StreamSessionErrorTests(unittest.TestCase):
         self.assertEqual("error", message["type"])
         self.assertEqual("session_unavailable", message["code"])
         self.assertIn("system", message["message"])
+
+
+class StreamDisconnectTests(unittest.TestCase):
+    """A dropped socket is not a Stop.
+
+    The capture helper's websocket can die under it -- a keepalive timeout, a
+    stalled event loop -- and its next frame reopens the same stream id. The
+    session must survive that, the reconnected stream must not be released by
+    the old connection's cleanup, and a session that really has stopped must
+    refuse audio rather than retain it silently.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.output_root = Path(self.temporary.name) / "outputs"
+        self.provider = FakeProvider()
+        self.grace = 0.4
+        self.app = create_app(
+            ServiceSettings(output_root=self.output_root, stream_grace_seconds=self.grace),
+            provider=self.provider,
+        )
+        self.client = TestClient(self.app)
+        self.runtime = self.app.state.runtime
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.temporary.cleanup()
+
+    def _state(self, session_id: str) -> str:
+        return self.client.get(f"/v1/sessions/{session_id}").json()["state"]
+
+    def _start(self, websocket, session_id: str, *, retain: bool = False) -> dict:
+        message = _start_message(session_id, "microphone")
+        if retain:
+            message["retention"] = {"audio": True, "separate": True, "combined": False}
+        websocket.send_json(message)
+        return websocket.receive_json()
+
+    def _transcript(self, session_id: str) -> str:
+        parts = sorted((self.output_root / session_id).glob("transcript-part-*.md"))
+        return "".join(part.read_text(encoding="utf-8") for part in parts)
+
+    def _wait_until_stopped(self, session_id: str) -> None:
+        deadline = time.monotonic() + self.grace * 10
+        while self._state(session_id) != "stopped" and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def test_a_dropped_connection_holds_the_session_for_the_grace_period(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/dropped/stream") as websocket:
+            self.assertEqual("stream.ready", self._start(websocket, "dropped")["type"])
+            _utterance(websocket, "microphone", 0)
+        # The socket closed without a stream.stop: the session is held open.
+        self.assertEqual("running", self._state("dropped"))
+        self.assertIn("dropped", self.runtime.stream_grace_timers)
+        self._wait_until_stopped("dropped")
+        self.assertEqual("stopped", self._state("dropped"))
+        self.assertNotIn("dropped", self.runtime.stream_grace_timers)
+        self.assertIn("voxink-part-status: complete", self._transcript("dropped"))
+
+    def test_a_rejoining_stream_keeps_the_session_and_its_transcript(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/rejoin/stream") as first:
+            self.assertEqual("stream.ready", self._start(first, "rejoin")["type"])
+            _utterance(first, "microphone", 0)
+        self.assertEqual("running", self._state("rejoin"))
+        with self.client.websocket_connect("/v1/sessions/rejoin/stream") as second:
+            self.assertEqual("stream.ready", self._start(second, "rejoin")["type"])
+            self.assertNotIn("rejoin", self.runtime.stream_grace_timers)
+            responses = _utterance(second, "microphone", 2000)
+            self.assertIn("transcript.final", [item["type"] for item in responses])
+            second.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 2060})
+            self.assertEqual("stream.stopped", second.receive_json()["type"])
+        self.assertEqual("stopped", self._state("rejoin"))
+        transcript = self._transcript("rejoin")
+        self.assertEqual(2, transcript.count("[MIC]"), transcript)
+        self.assertEqual(1, transcript.count("voxink-part-status: complete"))
+
+    def test_a_stale_connection_cannot_release_a_reconnected_stream(self) -> None:
+        # The helper noticed the drop before the service did: its new connection
+        # registers microphone-1 while the old handler is still alive.
+        first = self.client.websocket_connect("/v1/sessions/race/stream")
+        first.__enter__()
+        self.assertEqual("stream.ready", self._start(first, "race")["type"])
+        with self.client.websocket_connect("/v1/sessions/race/stream") as second:
+            self.assertEqual("stream.ready", self._start(second, "race")["type"])
+            first.__exit__(None, None, None)
+            time.sleep(0.05)
+            self.assertEqual("running", self._state("race"))
+            self.assertNotIn("race", self.runtime.stream_grace_timers)
+            self.assertIn("microphone-1", self.runtime.active_streams["race"])
+            responses = _utterance(second, "microphone", 1000)
+            self.assertIn("transcript.final", [item["type"] for item in responses])
+            second.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 1060})
+            self.assertEqual("stream.stopped", second.receive_json()["type"])
+        self.assertEqual("stopped", self._state("race"))
+
+    def test_stream_stop_still_finalizes_without_waiting(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/prompt/stream") as websocket:
+            self.assertEqual("stream.ready", self._start(websocket, "prompt")["type"])
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 20})
+            self.assertEqual("stream.stopped", websocket.receive_json()["type"])
+            self.assertEqual("stopped", self._state("prompt"))
+        self.assertNotIn("prompt", self.runtime.stream_grace_timers)
+
+    def test_an_http_stop_cancels_the_grace_period(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/http/stream") as websocket:
+            self.assertEqual("stream.ready", self._start(websocket, "http")["type"])
+        self.assertIn("http", self.runtime.stream_grace_timers)
+        self.assertEqual(200, self.client.post("/v1/sessions/http/stop").status_code)
+        self.assertNotIn("http", self.runtime.stream_grace_timers)
+        self.assertEqual("stopped", self._state("http"))
+
+    def test_audio_for_a_stopped_session_is_refused_not_retained(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/refused/stream") as websocket:
+            self.assertEqual("stream.ready", self._start(websocket, "refused", retain=True)["type"])
+            _utterance(websocket, "microphone", 0)
+            self.assertEqual(200, self.client.post("/v1/sessions/refused/stop").status_code)
+            directory = self.output_root / "refused"
+            sizes = {path.name: path.stat().st_size for path in directory.glob("*.wav")}
+            self.assertTrue(sizes)
+            transcript = self._transcript("refused")
+            websocket.send_json(
+                {
+                    "type": "audio.frame",
+                    "sequence": 3,
+                    "stream_id": "microphone-1",
+                    "start_ms": 60,
+                    "duration_ms": 20,
+                    "byte_length": len(VOICED),
+                }
+            )
+            websocket.send_bytes(VOICED)
+            message = websocket.receive_json()
+            self.assertEqual("error", message["type"])
+            self.assertEqual("session_unavailable", message["code"])
+            self.assertIn("stopped", message["message"])
+            with self.assertRaises(WebSocketDisconnect):
+                websocket.receive_json()
+        self.assertEqual(
+            sizes, {path.name: path.stat().st_size for path in directory.glob("*.wav")}
+        )
+        self.assertNotIn("refused", self.runtime.audio_writers)
+        self.assertEqual(transcript, self._transcript("refused"))
+
+    def test_helper_status_lines_are_exposed_as_a_notice_while_it_runs(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('service_reconnecting: Reconnecting stream "
+                "microphone-1 (attempt 1 of 3)\\nTraceback (most recent call last):\\n')",
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _start_native_stderr_reader(self.runtime, process)
+        process.wait(timeout=10)
+        self.runtime.native_stderr_reader.join(timeout=5)
+        self.assertEqual(
+            "service_reconnecting: Reconnecting stream microphone-1 (attempt 1 of 3)",
+            self.runtime.native_notice,
+        )
+        self.runtime.native_process = process
+        self.assertEqual(
+            self.runtime.native_notice, _native_capture_view(self.runtime, after=0)["notice"]
+        )
 
 
 class StreamDeclaredSessionTests(unittest.TestCase):

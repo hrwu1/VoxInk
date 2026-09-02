@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import re
 import threading
 import time
 import wave
@@ -84,6 +85,10 @@ _FINALIZED_MEMORY = 64
 SYSTEM_AUDIO_BACKENDS = ("auto", "tap", "screencapturekit")
 
 
+# A capture-helper status line: `code: message`.
+_NOTICE_LINE = re.compile(r"^[a-z][a-z0-9_]*: ")
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
     model_path: Path = PROJECT_ROOT / "models" / "Qwen3-ASR-1.7B"
@@ -115,6 +120,10 @@ class ServiceSettings:
     partial_interval_ms: int = 1000
     # Drop a microphone chunk that is the room's echo of a system channel.
     echo_suppression: bool = True
+    # How long a session stays open after its last stream disconnects without
+    # a stream.stop, so a helper whose socket dropped can rejoin. A recording
+    # must not be finalized, and diarized, over a transient socket failure.
+    stream_grace_seconds: float = 15.0
     # Local instruct model used to translate finalized segments. Optional:
     # absent, translation is reported unavailable and never requested.
     translation_model_path: Path | None = PROJECT_ROOT / "models" / "Qwen3-0.6B"
@@ -308,8 +317,14 @@ class ServiceRuntime:
         self.partial_error: str | None = None
         self.echo = EchoDetector()
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
-        self.active_streams: dict[str, set[str]] = {}
+        # Stream id to the connection that owns it. A reconnecting helper reuses
+        # its stream id, and only the connection that registered it last may
+        # release it; the registry, grace timers, and session stop share a lock
+        # because the timers expire on their own thread.
+        self.active_streams: dict[str, dict[str, object]] = {}
         self.paused_streams: dict[str, set[str]] = {}
+        self.stream_grace_timers: dict[str, threading.Timer] = {}
+        self.stream_lock = threading.Lock()
         self.dedup = OverlapDeduplicator()
         self.stream_ends: dict[tuple[str, str], int] = {}
         # Monotonic clock reading when each session started running, so a
@@ -324,6 +339,8 @@ class ServiceRuntime:
         self.native_session_id: str | None = None
         self.native_capture_state = "ready"
         self.native_error: str | None = None
+        # The helper's latest status line while it runs, for the UI to show.
+        self.native_notice: str | None = None
         self.native_stderr: deque[str] = deque(maxlen=200)
         self.native_stderr_reader: threading.Thread | None = None
         self.shutting_down = False
@@ -760,6 +777,7 @@ def create_app(
             runtime.translate_sessions.add(session_id)
         runtime.native_capture_state = "recording"
         runtime.native_error = None
+        runtime.native_notice = None
         runtime.native_stderr.clear()
         _start_native_stderr_reader(runtime, process)
         # Only one native session is watched at a time; drop the last one's feed.
@@ -1220,8 +1238,10 @@ def create_app(
         if action == "start":
             runtime.session_started_at[session_id] = time.monotonic()
         if action == "stop":
-            runtime.active_streams.pop(session_id, None)
-            runtime.paused_streams.pop(session_id, None)
+            with runtime.stream_lock:
+                _cancel_stream_grace(runtime, session_id)
+                runtime.active_streams.pop(session_id, None)
+                runtime.paused_streams.pop(session_id, None)
             _finalize_audio(runtime, session)
         return _session_view(session)
 
@@ -1329,9 +1349,9 @@ def create_app(
                             )
                             context.cancel_partial()
                             await _drain_background(websocket, runtime, context)
-                            _release_stream(runtime, session_id, context.stream_id)
-                            runtime.dedup.reset(context.session_id, context.stream_id)
-                            runtime.stream_ends.pop((context.session_id, context.stream_id), None)
+                            if _release_stream(runtime, session_id, context, graceful=False):
+                                runtime.dedup.reset(context.session_id, context.stream_id)
+                                runtime.stream_ends.pop((context.session_id, context.stream_id), None)
                             context = None
                         await websocket.send_json({"type": "stream.stopped", "session_id": session_id})
                         await websocket.close(code=1000)
@@ -1409,9 +1429,13 @@ def create_app(
         finally:
             if context is not None:
                 context.cancel_partial()
-                _release_stream(runtime, session_id, context.stream_id)
-                runtime.dedup.reset(context.session_id, context.stream_id)
-                runtime.stream_ends.pop((context.session_id, context.stream_id), None)
+                # The connection went away without a stream.stop. That is not
+                # a Stop: the session is held for a grace period so the helper
+                # can rejoin, and the deduplicator state stays with the stream
+                # only if this connection still owned it.
+                if _release_stream(runtime, session_id, context, graceful=True):
+                    runtime.dedup.reset(context.session_id, context.stream_id)
+                    runtime.stream_ends.pop((context.session_id, context.stream_id), None)
 
     ui_root = PROJECT_ROOT / "frontend" / "static-dist"
     if (ui_root / "index.html").is_file():
@@ -1674,26 +1698,19 @@ def _websocket_auth_protocol(header: str | None, secret: str | None) -> str | No
 def _open_stream(
     runtime: ServiceRuntime, session_id: str, control: dict[str, Any]
 ) -> _StreamContext:
-    """Register one source stream and start (or join) its session."""
+    """Register one source stream and start (or join) its session.
+
+    Under the stream lock end to end: a session whose last stream dropped is
+    waiting on a grace timer, and that timer must not fire between the session
+    check and this stream's registration.
+    """
     source = Source(control.get("source", "microphone"))
     declared_sources = tuple(
         Source(item) for item in control.get("session_sources", [source.value])
     )
-    _ensure_started_session(
-        runtime,
-        session_id,
-        source,
-        sources=declared_sources,
-        applications=_stream_applications(control),
-        retention=_stream_retention(control),
-    )
     stream_id = str(control["stream_id"])
-    runtime.active_streams.setdefault(session_id, set()).add(stream_id)
-    runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
-    runtime.dedup.reset(session_id, stream_id)
-    runtime.stream_ends.pop((session_id, stream_id), None)
     channel, channel_name = _stream_channel(control)
-    return _StreamContext(
+    context = _StreamContext(
         session_id=session_id,
         start=control,
         stream_id=stream_id,
@@ -1704,13 +1721,28 @@ def _open_stream(
         channel_name=channel_name if source is Source.SYSTEM else None,
         partial_interval_s=runtime.settings.partial_interval_ms / 1000.0,
     )
+    with runtime.stream_lock:
+        _ensure_started_session(
+            runtime,
+            session_id,
+            source,
+            sources=declared_sources,
+            applications=_stream_applications(control),
+            retention=_stream_retention(control),
+        )
+        _cancel_stream_grace(runtime, session_id)
+        runtime.active_streams.setdefault(session_id, {})[stream_id] = context
+        runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
+        runtime.dedup.reset(session_id, stream_id)
+        runtime.stream_ends.pop((session_id, stream_id), None)
+    return context
 
 
 def _pause_stream(runtime: ServiceRuntime, session_id: str, stream_id: str) -> None:
     """Pause the shared session only once every active stream has paused."""
     paused = runtime.paused_streams.setdefault(session_id, set())
     paused.add(stream_id)
-    active = runtime.active_streams.get(session_id, set())
+    active = set(runtime.active_streams.get(session_id, {}))
     if active and not active - paused:
         _control_if_possible(runtime, session_id, "pause")
 
@@ -1782,10 +1814,12 @@ async def _publish_event(
     if not event.text.strip():
         # The chunk repeated its predecessor's overlap and carried nothing new.
         return None
+    _require_open_session(runtime, event.session_id)
     try:
         runtime.sessions.append(event)
     except (InvalidSessionTransition, KeyError, ValueError) as exc:
-        # Never drop the connection over session state: report and keep capturing.
+        # A paused or otherwise unwritable session is reported without dropping
+        # the connection; a stopped one was refused above.
         await websocket.send_json(
             {"type": "error", "code": "transcript_not_stored", "message": str(exc)}
         )
@@ -1978,6 +2012,9 @@ async def _run_translation(
 def _shutdown(runtime: ServiceRuntime) -> None:
     """Close every open session so no transcript part is left unterminated."""
     runtime.shutting_down = True
+    with runtime.stream_lock:
+        for session_id in list(runtime.stream_grace_timers):
+            _cancel_stream_grace(runtime, session_id)
     try:
         _stop_native_capture(runtime)
     except Exception:
@@ -2033,6 +2070,7 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         "next_cursor": total,
         "exit_code": exit_code,
         "error": runtime.native_error,
+        "notice": runtime.native_notice,
         "retention": _retention_view(runtime, session_id),
         "last_session": _last_session_view(runtime),
         "translation": {
@@ -2118,7 +2156,12 @@ def _start_native_stderr_reader(
     def drain() -> None:
         try:
             for line in stream:
-                runtime.native_stderr.append(line.rstrip("\n"))
+                line = line.rstrip("\n")
+                runtime.native_stderr.append(line)
+                # Status lines are `code: message`; anything else is a crash
+                # trace the exit path reports instead.
+                if _NOTICE_LINE.match(line):
+                    runtime.native_notice = line
         except (OSError, ValueError):
             return
 
@@ -2158,7 +2201,7 @@ def _record_audio(
     header: dict[str, Any],
     pcm: bytes,
 ) -> None:
-    session = runtime.sessions.get(session_id)
+    session = _require_open_session(runtime, session_id)
     if not session.config.audio_saved:
         return
     start = context.start
@@ -2265,21 +2308,70 @@ def _session_directory(runtime: ServiceRuntime, session_id: str) -> Path:
 
 
 def _release_stream(
-    runtime: ServiceRuntime, session_id: str, stream_id: str | None
+    runtime: ServiceRuntime,
+    session_id: str,
+    context: "_StreamContext | None",
+    *,
+    graceful: bool,
+) -> bool:
+    """Forget one stream; return whether this connection still owned it.
+
+    A stream id belongs to the connection that registered it last. A helper
+    whose socket dropped reopens the same id on a new connection, and the old
+    handler's cleanup then runs against a stream that is no longer its own;
+    releasing it would stop the session under the live connection.
+
+    With the last stream gone, `stream.stop` finalizes the session now. A bare
+    disconnect only starts a grace timer: a socket lost to a keepalive timeout
+    is not a Stop, and the helper's next frame is expected to rejoin.
+    """
+    if context is None:
+        return False
+    with runtime.stream_lock:
+        streams = runtime.active_streams.get(session_id)
+        if streams is None or streams.get(context.stream_id) is not context:
+            return False
+        del streams[context.stream_id]
+        paused = runtime.paused_streams.get(session_id)
+        if paused is not None:
+            paused.discard(context.stream_id)
+        if streams:
+            return True
+        runtime.active_streams.pop(session_id, None)
+        runtime.paused_streams.pop(session_id, None)
+        _cancel_stream_grace(runtime, session_id)
+        if not graceful or runtime.settings.stream_grace_seconds <= 0:
+            _stop_abandoned_session(runtime, session_id)
+            return True
+        timer = threading.Timer(runtime.settings.stream_grace_seconds, _expire_stream_grace)
+        timer.args = (runtime, session_id, timer)
+        timer.daemon = True
+        runtime.stream_grace_timers[session_id] = timer
+        timer.start()
+        return True
+
+
+def _expire_stream_grace(
+    runtime: ServiceRuntime, session_id: str, timer: threading.Timer
 ) -> None:
-    if stream_id is None:
-        return
-    paused = runtime.paused_streams.get(session_id)
-    if paused is not None:
-        paused.discard(stream_id)
-    streams = runtime.active_streams.get(session_id)
-    if streams is None:
-        return
-    streams.discard(stream_id)
-    if streams:
-        return
-    runtime.active_streams.pop(session_id, None)
-    runtime.paused_streams.pop(session_id, None)
+    """Finalize a session no stream rejoined within the grace period."""
+    with runtime.stream_lock:
+        if runtime.stream_grace_timers.get(session_id) is not timer:
+            return
+        del runtime.stream_grace_timers[session_id]
+        if runtime.active_streams.get(session_id):
+            return
+        _stop_abandoned_session(runtime, session_id)
+
+
+def _cancel_stream_grace(runtime: ServiceRuntime, session_id: str) -> None:
+    """Callers hold the stream lock."""
+    timer = runtime.stream_grace_timers.pop(session_id, None)
+    if timer is not None:
+        timer.cancel()
+
+
+def _stop_abandoned_session(runtime: ServiceRuntime, session_id: str) -> None:
     try:
         session = runtime.sessions.get(session_id)
     except KeyError:
@@ -2287,6 +2379,21 @@ def _release_stream(
     if session.state in {SessionState.RUNNING, SessionState.PAUSED}:
         runtime.sessions.stop(session_id)
         _finalize_audio(runtime, session)
+
+
+def _require_open_session(runtime: ServiceRuntime, session_id: str):
+    """The session a live stream feeds; a stopped one refuses further audio.
+
+    Once a session has stopped, its transcript is complete and may already have
+    been diarized. Audio arriving after that must not be retained into it, and
+    its captions must not be shown as though they were being kept.
+    """
+    session = runtime.sessions.get(session_id)
+    if session.state is SessionState.STOPPED:
+        raise HTTPException(
+            status_code=409, detail="session is stopped; audio after Stop is not recorded"
+        )
+    return session
 
 
 def _stream_chunker(start: dict[str, Any]) -> EnergyVadChunker:
