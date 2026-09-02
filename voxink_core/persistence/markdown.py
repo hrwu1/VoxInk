@@ -91,6 +91,48 @@ class MarkdownTranscriptWriter:
         self._part_has_events = True
         return self._path
 
+    def append_mark(self, at_ms: int, label: str = "") -> Path | None:
+        """Write a user marker at a session-relative time.
+
+        A marker is not speech: it gets its own header so a reader can find it
+        and the diarization parser can skip it.
+        """
+        if at_ms < 0:
+            raise ValueError("at_ms must be non-negative")
+        text = " ".join(label.split())
+        block = f"**[{format_timestamp(at_ms)}] [MARK]**\n{text}\n\n" if text else (
+            f"**[{format_timestamp(at_ms)}] [MARK]**\n\n"
+        )
+        return self._append_block(block)
+
+    def append_translation(self, event: TranscriptEvent, language: str, text: str) -> Path | None:
+        """Quote a translation under the transcript, keyed by the block's time.
+
+        Translation arrives after the block it belongs to was already written,
+        so the quote names the block's start time rather than assuming it is
+        the last thing on the page.
+        """
+        if event.session_id != self.config.session_id:
+            raise ValueError("event belongs to a different session")
+        cleaned = " ".join(text.split())
+        if not cleaned:
+            return None
+        block = f"> [{format_timestamp(event.start_ms)} · {language}] {cleaned}\n\n"
+        return self._append_block(block)
+
+    def _append_block(self, block: str) -> Path:
+        if self._handle is None:
+            self.open()
+        encoded_size = len(block.encode("utf-8"))
+        if self._should_rotate(encoded_size):
+            self._finish_part(COMPLETE_MARKER)
+            self._open_next_part()
+        assert self._handle is not None and self._path is not None
+        self._handle.write(block)
+        self._flush()
+        self._part_has_events = True
+        return self._path
+
     def close(self) -> None:
         self._finish_part(COMPLETE_MARKER)
 
@@ -193,6 +235,11 @@ def _front_matter(
 
 def _event_block(event: TranscriptEvent) -> str:
     source = "MIC" if event.source.value == "microphone" else "SYSTEM"
+    # A per-application stream names its application inside the source tag,
+    # so the tag stays one bracket and the speaker bracket keeps its place.
+    channel = event.channel_name or event.channel
+    if channel and event.source.value == "system":
+        source = f"{source}: {' '.join(channel.replace(']', ' ').split())}"
     speaker = f" [{event.speaker}]" if event.speaker else ""
     return (
         f"**[{format_timestamp(event.start_ms)}-{format_timestamp(event.end_ms)}] "

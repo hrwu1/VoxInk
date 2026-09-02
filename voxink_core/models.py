@@ -44,6 +44,15 @@ class TranscriptEvent:
     language_confidence: float | None = None
     speaker: str | None = None
     words: tuple[WordTimestamp, ...] | None = None
+    # For a per-application system stream: the bundle identifier the stream
+    # isolates and the name the user knows it by. None for the microphone and
+    # for mixed system audio.
+    channel: str | None = None
+    channel_name: str | None = None
+    # On-device translation of `text` into `translation_language`, attached
+    # after finalization when translation is enabled for the session.
+    translation: str | None = None
+    translation_language: str | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:

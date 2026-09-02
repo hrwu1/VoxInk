@@ -53,6 +53,18 @@ class Session:
         self._require(SessionState.RUNNING, action="append transcript to")
         return self.writer.append(event)
 
+    def mark(self, at_ms: int, label: str = "") -> Path | None:
+        """Write a user marker; allowed while paused, since a pause is a moment too."""
+        if self.state not in {SessionState.RUNNING, SessionState.PAUSED}:
+            raise InvalidSessionTransition(f"cannot mark a {self.state.value} session")
+        return self.writer.append_mark(at_ms, label)
+
+    def translate(self, event: TranscriptEvent, language: str, text: str) -> Path | None:
+        """Attach a translation to a block that was already written."""
+        if self.state not in {SessionState.RUNNING, SessionState.PAUSED}:
+            raise InvalidSessionTransition(f"cannot annotate a {self.state.value} session")
+        return self.writer.append_translation(event, language, text)
+
     def _require(self, required: SessionState, *, action: str) -> None:
         if self.state is not required:
             raise InvalidSessionTransition(
@@ -116,3 +128,11 @@ class SessionManager:
     def append(self, event: TranscriptEvent) -> Path | None:
         with self._lock:
             return self.get(event.session_id).append(event)
+
+    def mark(self, session_id: str, at_ms: int, label: str = "") -> Path | None:
+        with self._lock:
+            return self.get(session_id).mark(at_ms, label)
+
+    def translate(self, event: TranscriptEvent, language: str, text: str) -> Path | None:
+        with self._lock:
+            return self.get(event.session_id).translate(event, language, text)

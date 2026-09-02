@@ -31,9 +31,15 @@ _TAG_BY_SOURCE = {source: tag for tag, source in _SOURCE_BY_TAG.items()}
 #: parsing.
 _HEADER = re.compile(
     r"^\*\*\[(?P<start>\d{2,}:\d{2}:\d{2}\.\d{3})-(?P<end>\d{2,}:\d{2}:\d{2}\.\d{3})\] "
-    r"\[(?P<source>MIC|SYSTEM)\](?: \[(?P<speaker>[^\]]+)\])?\*\*$",
+    r"\[(?P<source>MIC|SYSTEM)(?:: (?P<channel>[^\]]+))?\](?: \[(?P<speaker>[^\]]+)\])?\*\*$",
     re.MULTILINE,
 )
+
+#: Annotations the writer appends beside blocks and that are not transcript
+#: text: a user's marker (its own header, with a label line under it) and a
+#: translation quoted under the block it belongs to.
+_MARK_HEADER = re.compile(r"^\*\*\[\d{2,}:\d{2}:\d{2}\.\d{3}\] \[MARK\]\*\*$", re.MULTILINE)
+_ANNOTATION_LINE = re.compile(r"^> .*$", re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +148,12 @@ def _blocks(part_name: str, text: str) -> Iterator[TranscriptBlock]:
         body = text[match.end() : body_end]
         for marker in (COMPLETE_MARKER, RECOVERED_MARKER):
             body = body.replace(marker, "")
+        # A marker and everything under it belongs to the user, not to the
+        # block; a quoted line under a block is its translation, not speech.
+        mark = _MARK_HEADER.search(body)
+        if mark:
+            body = body[: mark.start()]
+        body = _ANNOTATION_LINE.sub("", body)
         canonical = f"{match.group(0)}\n{body.strip()}"
         yield TranscriptBlock(
             part=part_name,

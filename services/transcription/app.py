@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -15,7 +16,7 @@ import wave
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
 from voxink_core.diarization.jobs import DiarizationJobManager
+from voxink_core.echo import EchoDetector
 from voxink_core.models import SessionConfig, Source, TranscriptEvent, TranscriptionOptions
 from voxink_core.local_models import (
     LocalModelPackage,
@@ -46,6 +48,7 @@ from voxink_core.sessions import (
     SessionState,
 )
 from voxink_core.transcripts import OverlapDeduplicator
+from voxink_core.translation import QwenLocalTranslator, TranslationProvider, other_language
 from voxink_core.vocabulary import MAX_FILE_BYTES, Vocabulary, VocabularyFile
 
 
@@ -57,10 +60,16 @@ _LAG_WINDOW_MS = 5_000.0
 PROTOCOL_VERSION = 1
 # Cap on the live caption feed the UI polls; it only renders the recent tail.
 UI_EVENT_BUFFER = 500
-SERVICE_VERSION = "0.2.0"
+SERVICE_VERSION = "0.3.0"
 # Custom terms live beside the transcripts by default, where a user editing
 # their own words is already looking.
 VOCABULARY_FILENAME = "vocabulary.txt"
+# A partial is only worth showing once there is this much of an utterance.
+_MIN_PARTIAL_MS = 600
+# Segment ids a stream remembers as finalized, so a late partial for one of
+# them is dropped instead of overwriting the final caption.
+_FINALIZED_MEMORY = 64
+SYSTEM_AUDIO_BACKENDS = ("auto", "tap", "screencapturekit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +97,15 @@ class ServiceSettings:
     diarization_aligner_path: Path | None = (
         PROJECT_ROOT / "models" / "Qwen3-ForcedAligner-0.6B"
     )
+    # Live partial captions: re-transcribe the open utterance at most this
+    # often. The interval stretches itself when inference is slower than it.
+    partial_captions: bool = True
+    partial_interval_ms: int = 1000
+    # Drop a microphone chunk that is the room's echo of a system channel.
+    echo_suppression: bool = True
+    # Local instruct model used to translate finalized segments. Optional:
+    # absent, translation is reported unavailable and never requested.
+    translation_model_path: Path | None = PROJECT_ROOT / "models" / "Qwen3-0.6B"
 
 
 class SessionCreateRequest(BaseModel):
@@ -127,6 +145,25 @@ class NativeCaptureRequest(BaseModel):
     applications: list[str] = Field(default_factory=list)
     retain_audio: bool = False
     diarize: bool = False
+    # Core Audio device UID from /v1/devices; None keeps the system default.
+    microphone_device: str | None = None
+    # Manual language override ("en" or "zh"); None lets the model detect it.
+    language: str | None = None
+    # Translate each finalized segment into the other language, on device.
+    translate: bool = False
+    backend: str | None = None
+
+
+class MarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = ""
+
+
+class RevealRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str | None = None
 
 
 class ModelSelectionRequest(BaseModel):
@@ -152,6 +189,7 @@ class ServiceRuntime:
         provider: TranscriptionProvider | None = None,
         provider_factory: ProviderFactory | None = None,
         sessions: SessionManager | None = None,
+        translator: TranslationProvider | None = None,
     ) -> None:
         self.settings = settings
         self.provider_factory = provider_factory or (
@@ -188,11 +226,22 @@ class ServiceRuntime:
             aligner_path=settings.diarization_aligner_path,
             enabled=settings.diarization_enabled,
         )
+        self.translator = translator or _default_translator(settings)
+        # Serializes translation across streams; the model is not re-entrant.
+        self.translation_lock = threading.Lock()
+        self.translation_error: str | None = None
+        # Why the last partial caption failed, if it did; a diagnostic only.
+        self.partial_error: str | None = None
+        self.echo = EchoDetector()
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         self.active_streams: dict[str, set[str]] = {}
         self.paused_streams: dict[str, set[str]] = {}
         self.dedup = OverlapDeduplicator()
         self.stream_ends: dict[tuple[str, str], int] = {}
+        # Monotonic clock reading when each session started running, so a
+        # marker can be placed on the session timeline without an audio frame.
+        self.session_started_at: dict[str, float] = {}
+        self.last_session_id: str | None = None
         self.ui_bootstrap_secret = settings.ui_bootstrap_secret
         # Bounded: only the session the UI is watching is recorded.
         self.ui_events: dict[str, deque[dict[str, Any]]] = {}
@@ -204,11 +253,31 @@ class ServiceRuntime:
         self.native_stderr: deque[str] = deque(maxlen=200)
         self.native_stderr_reader: threading.Thread | None = None
         self.shutting_down = False
-        # Sessions the UI asked to diarize. The capture helper builds the
-        # session from its own stream message and knows nothing about speakers,
-        # so the request is remembered here and applied when that session is
-        # created, rather than widening the native capture protocol.
+        # Sessions the UI asked to diarize or translate. The capture helper
+        # builds the session from its own stream message and knows nothing
+        # about either, so the request is remembered here and applied when
+        # that session is created, rather than widening the native protocol.
         self.pending_diarization: set[str] = set()
+        self.translate_sessions: set[str] = set()
+
+    @property
+    def translation_available(self) -> bool:
+        return self.translator is not None
+
+    def translate_text(self, text: str, source_language: str, target_language: str) -> str:
+        """Translate one segment on the calling thread; serialized per model."""
+        translator = self.translator
+        if translator is None:
+            raise RuntimeError("translation is unavailable")
+        with self.translation_lock:
+            return translator.translate(text, source_language, target_language)
+
+
+def _default_translator(settings: ServiceSettings) -> TranslationProvider | None:
+    path = settings.translation_model_path
+    if path is None or not (Path(path).expanduser() / "config.json").is_file():
+        return None
+    return QwenLocalTranslator(path, device=settings.device)
 
 
 @dataclass
@@ -221,9 +290,22 @@ class _StreamContext:
     source: Source
     chunker: EnergyVadChunker
     sample_rate: int
+    channel: str | None = None
+    channel_name: str | None = None
     anchor_ms: float = 0.0
     window_audio_ms: float = 0.0
     window_compute_ms: float = 0.0
+    # Partial captions for the utterance in progress.
+    partial_segment_id: str | None = None
+    partial_task: asyncio.Task[None] | None = None
+    last_partial_at: float = 0.0
+    partial_interval_s: float = 1.0
+    finalized_partials: deque[str] = field(default_factory=lambda: deque(maxlen=_FINALIZED_MEMORY))
+    # Messages produced off the receive loop and sent by it, so nothing writes
+    # to the socket concurrently.
+    outbox: list[dict[str, Any]] = field(default_factory=list)
+    background: set[asyncio.Task[None]] = field(default_factory=set)
+    echo_suppressed: int = 0
 
     def anchor_to(self, header: dict[str, Any]) -> None:
         """Align the VAD sample clock with the capture time a client reports.
@@ -240,6 +322,11 @@ class _StreamContext:
         end = max(start, self.anchor_ms + chunk.end_ms(self.sample_rate))
         return round(start), round(end)
 
+    def sample_bounds(self, start_sample: int, end_sample: int) -> tuple[int, int]:
+        start = max(0.0, self.anchor_ms + start_sample * 1000.0 / self.sample_rate)
+        end = max(start, self.anchor_ms + end_sample * 1000.0 / self.sample_rate)
+        return round(start), round(end)
+
     def record_work(self, audio_ms: float, compute_ms: float) -> float | None:
         """Accumulate a window of work, returning its real-time factor when lagging."""
         self.window_audio_ms += audio_ms
@@ -251,6 +338,20 @@ class _StreamContext:
         self.window_compute_ms = 0.0
         return factor if factor > 1.0 else None
 
+    def keep(self, task: asyncio.Task[None]) -> None:
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+
+    def cancel_partial(self) -> None:
+        """Forget the open utterance's partial; its final is on its way or gone."""
+        if self.partial_segment_id is not None:
+            self.finalized_partials.append(self.partial_segment_id)
+        self.partial_segment_id = None
+        task = self.partial_task
+        self.partial_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
 
 def create_app(
     settings: ServiceSettings | None = None,
@@ -258,12 +359,14 @@ def create_app(
     provider: TranscriptionProvider | None = None,
     provider_factory: ProviderFactory | None = None,
     sessions: SessionManager | None = None,
+    translator: TranslationProvider | None = None,
 ) -> FastAPI:
     runtime = ServiceRuntime(
         settings or ServiceSettings(),
         provider=provider,
         provider_factory=provider_factory,
         sessions=sessions,
+        translator=translator,
     )
 
     @asynccontextmanager
@@ -296,7 +399,13 @@ def create_app(
             "model_loaded": runtime.provider.is_loaded,
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,
-            "capabilities": {"partial_results": False, "streaming_audio": True},
+            "capabilities": {
+                "partial_results": runtime.settings.partial_captions,
+                "streaming_audio": True,
+                "translation": runtime.translation_available,
+                "echo_suppression": runtime.settings.echo_suppression,
+                "channels": True,
+            },
             "ui_available": (PROJECT_ROOT / "frontend" / "static-dist" / "index.html").is_file(),
         }
 
@@ -383,6 +492,18 @@ def create_app(
             ) from exc
         return _vocabulary_view(runtime)
 
+    @app.get("/v1/translation")
+    async def translation_capability() -> dict[str, Any]:
+        translator = runtime.translator
+        return {
+            "available": translator is not None,
+            "provider": translator.name if translator else None,
+            "model_path": str(runtime.settings.translation_model_path or ""),
+            "loaded": bool(translator and translator.is_loaded),
+            "languages": ["en", "zh"],
+            "error": runtime.translation_error,
+        }
+
     @app.get("/v1/ui/capture/capabilities")
     async def capture_capabilities() -> dict[str, Any]:
         native = runtime.settings.native_capture_path
@@ -394,28 +515,20 @@ def create_app(
                 if available
                 else []
             ),
+            "backends": list(SYSTEM_AUDIO_BACKENDS),
+            "partial_captions": runtime.settings.partial_captions,
+            "echo_suppression": runtime.settings.echo_suppression,
+            "translation_available": runtime.translation_available,
+            "languages": ["auto", "en", "zh"],
         }
 
     @app.get("/v1/ui/capture/applications")
     async def capture_applications() -> dict[str, Any]:
         executable = _native_capture_executable(runtime)
-        try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                [str(executable), "--list-apps"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HTTPException(status_code=503, detail=f"cannot list applications: {exc}") from exc
-        if completed.returncode != 0:
-            detail = completed.stderr.strip() or "native capture helper failed"
-            raise HTTPException(status_code=503, detail=detail)
+        lines = await _run_native_listing(executable, "--list-apps")
         applications = []
         seen_bundle_ids: set[str] = set()
-        for line in completed.stdout.splitlines():
+        for line in lines:
             parts = line.split("\t")
             if len(parts) < 2 or not parts[0] or not parts[1] or parts[0] in seen_bundle_ids:
                 continue
@@ -440,6 +553,16 @@ def create_app(
             )
         if options.applications and not applications:
             raise HTTPException(status_code=422, detail="selected-application capture needs an application")
+        if options.backend is not None and options.backend not in SYSTEM_AUDIO_BACKENDS:
+            raise HTTPException(status_code=422, detail="unknown system audio backend")
+        language = (options.language or "").strip().lower() or None
+        if language is not None and language not in {"en", "zh"}:
+            raise HTTPException(status_code=422, detail="language must be en or zh")
+        if options.translate and not runtime.translation_available:
+            raise HTTPException(
+                status_code=409,
+                detail="translation is unavailable; install the local translation model",
+            )
         session_id = new_session_id()
         server = request.scope.get("server")
         port = request.url.port or (int(server[1]) if server else None)
@@ -451,6 +574,12 @@ def create_app(
         ]
         if options.retain_audio:
             command.append("--retain-audio")
+        if options.microphone_device and options.microphone_device.strip():
+            command.extend(("--mic-device", options.microphone_device.strip()))
+        if language is not None:
+            command.extend(("--language", language))
+        if options.backend is not None:
+            command.extend(("--backend", options.backend))
         if Source.MICROPHONE in sources:
             command.append("--mic")
         if Source.SYSTEM in sources:
@@ -475,11 +604,14 @@ def create_app(
         runtime.native_process = process
         runtime.native_session_id = session_id
         runtime.pending_diarization.discard(session_id)
+        runtime.translate_sessions.discard(session_id)
         if options.diarize and options.retain_audio and Source.MICROPHONE in sources:
             # Silently ignored without retained microphone audio: the UI already
             # prevents that combination, and refusing the whole capture over an
             # optional post-processing step would be a poor trade.
             runtime.pending_diarization.add(session_id)
+        if options.translate:
+            runtime.translate_sessions.add(session_id)
         runtime.native_capture_state = "recording"
         runtime.native_error = None
         runtime.native_stderr.clear()
@@ -494,6 +626,36 @@ def create_app(
     @app.get("/v1/ui/capture/status")
     async def native_capture_status(after: int = 0) -> dict[str, Any]:
         return _native_capture_view(runtime, after=max(0, after))
+
+    @app.post("/v1/ui/capture/mark")
+    async def mark_native_capture(body: MarkRequest | None = None) -> dict[str, Any]:
+        """Drop a timestamped marker into the transcript being written."""
+        process = runtime.native_process
+        session_id = runtime.native_session_id
+        if process is None or process.poll() is not None or session_id is None:
+            raise HTTPException(status_code=409, detail="no native capture session is running")
+        label = (body or MarkRequest()).label
+        at_ms = _session_elapsed_ms(runtime, session_id)
+        try:
+            await asyncio.to_thread(runtime.sessions.mark, session_id, at_ms, label)
+        except KeyError as exc:
+            # The helper has not opened its first stream yet, so there is no
+            # transcript to mark. Asking again a moment later works.
+            raise HTTPException(status_code=409, detail="the transcript is not open yet") from exc
+        except InvalidSessionTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        entry = {
+            "type": "mark",
+            "session_id": session_id,
+            "segment_id": f"mark-{uuid4().hex[:12]}",
+            "source": None,
+            "start_ms": at_ms,
+            "end_ms": at_ms,
+            "text": " ".join(label.split()),
+            "is_final": True,
+        }
+        _record_ui_event(runtime, session_id, entry)
+        return {"session_id": session_id, "at_ms": at_ms, "label": entry["text"]}
 
     @app.post("/v1/ui/capture/{action}")
     async def control_native_capture(action: str) -> dict[str, Any]:
@@ -513,6 +675,23 @@ def create_app(
         else:
             raise HTTPException(status_code=404, detail="unknown native capture action")
         return _native_capture_view(runtime, after=0)
+
+    @app.post("/v1/ui/actions/reveal")
+    async def reveal_session(body: RevealRequest | None = None) -> dict[str, Any]:
+        """Open a session's folder in Finder, or the output root with no session."""
+        session_id = (body or RevealRequest()).session_id or runtime.last_session_id
+        directory = (
+            _session_directory(runtime, session_id) if session_id else runtime.settings.output_root
+        )
+        if not directory.is_dir():
+            raise HTTPException(status_code=404, detail="that session has no folder yet")
+        if sys.platform != "darwin":
+            raise HTTPException(status_code=501, detail="revealing folders needs macOS")
+        try:
+            await asyncio.to_thread(subprocess.run, ["open", str(directory)], check=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=500, detail=f"cannot open the folder: {exc}") from exc
+        return {"session_id": session_id, "directory": str(directory)}
 
     @app.post("/v1/sessions", response_model=SessionView, status_code=201)
     async def create_session(request: SessionCreateRequest) -> SessionView:
@@ -585,7 +764,27 @@ def create_app(
     @app.get("/v1/devices")
     async def devices() -> dict[str, Any]:
         """List microphone devices the local capture clients can open."""
-        return {"devices": await asyncio.to_thread(_input_devices)}
+        native = runtime.settings.native_capture_path
+        if native is not None and native.is_file() and os.access(native, os.X_OK):
+            try:
+                lines = await _run_native_listing(native, "--list-devices")
+            except HTTPException:
+                lines = []
+            found = []
+            for line in lines:
+                parts = line.split("\t")
+                if len(parts) < 2 or not parts[0]:
+                    continue
+                found.append(
+                    {
+                        "uid": parts[0],
+                        "name": parts[1],
+                        "default": len(parts) > 2 and parts[2] == "default",
+                    }
+                )
+            if found:
+                return {"devices": found, "source": "native"}
+        return {"devices": await asyncio.to_thread(_input_devices), "source": "python"}
 
     @app.get("/v1/transcripts")
     async def transcripts() -> dict[str, Any]:
@@ -645,6 +844,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="session not found") from exc
         except (InvalidSessionTransition, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if action == "start":
+            runtime.session_started_at[session_id] = time.monotonic()
         if action == "stop":
             runtime.active_streams.pop(session_id, None)
             runtime.paused_streams.pop(session_id, None)
@@ -707,6 +908,10 @@ def create_app(
         try:
             while True:
                 message = await websocket.receive()
+                if context is not None:
+                    # Partials and translations computed while this loop was
+                    # waiting leave now, on the loop's own turn at the socket.
+                    await _flush_outbox(websocket, runtime, context)
                 if message.get("text") is not None:
                     control = _parse_control(message["text"])
                     message_type = control.get("type")
@@ -717,6 +922,7 @@ def create_app(
                                 "type": "stream.ready",
                                 "schema_version": PROTOCOL_VERSION,
                                 "session_id": session_id,
+                                "partial_results": runtime.settings.partial_captions,
                             }
                         )
                     elif message_type in {"audio.frame", "audio.chunk"}:
@@ -728,6 +934,7 @@ def create_app(
                             await _send_chunks(
                                 websocket, runtime, context, context.chunker.flush("pause")
                             )
+                            context.cancel_partial()
                             context.chunker.reset()
                             _pause_stream(runtime, session_id, context.stream_id)
                             await websocket.send_json(
@@ -747,6 +954,8 @@ def create_app(
                             await _send_chunks(
                                 websocket, runtime, context, context.chunker.flush("stop")
                             )
+                            context.cancel_partial()
+                            await _drain_background(websocket, runtime, context)
                             _release_stream(runtime, session_id, context.stream_id)
                             runtime.dedup.reset(context.session_id, context.stream_id)
                             runtime.stream_ends.pop((context.session_id, context.stream_id), None)
@@ -767,6 +976,7 @@ def create_app(
                         # A paused session captures nothing. Dropping the buffered
                         # audio keeps pre-pause speech out of the next utterance.
                         context.chunker.reset()
+                        context.cancel_partial()
                         await websocket.send_json(
                             {
                                 "type": "audio.ignored",
@@ -776,13 +986,21 @@ def create_app(
                         )
                         pending_header = None
                         continue
-                    _record_audio(runtime, session_id, context.start, pending_header, pcm)
+                    _record_audio(runtime, session_id, context, pending_header, pcm)
                     if pending_header["type"] == "audio.frame":
                         context.anchor_to(pending_header)
+                        if context.source is Source.SYSTEM and runtime.settings.echo_suppression:
+                            runtime.echo.observe(
+                                session_id,
+                                context.stream_id,
+                                round(float(pending_header.get("start_ms", context.anchor_ms + context.chunker.next_sample_ms))),
+                                pcm,
+                            )
                         published = await _send_chunks(
                             websocket, runtime, context, context.chunker.feed(pcm)
                         )
                         if not published:
+                            _maybe_schedule_partial(runtime, context)
                             await websocket.send_json(
                                 {
                                     "type": "audio.accepted",
@@ -791,9 +1009,11 @@ def create_app(
                             )
                     else:
                         event, elapsed_ms = await _timed_transcription(
-                            runtime, session_id, context.start, pending_header, pcm
+                            runtime, session_id, context, pending_header, pcm
                         )
-                        await _publish_event(websocket, runtime, event)
+                        published = await _publish_event(websocket, runtime, event)
+                        if published is not None:
+                            _maybe_schedule_translation(runtime, context, published)
                         await _report_lag(
                             websocket, context, event.end_ms - event.start_ms, elapsed_ms
                         )
@@ -815,6 +1035,7 @@ def create_app(
             await websocket.close(code=1003)
         finally:
             if context is not None:
+                context.cancel_partial()
                 _release_stream(runtime, session_id, context.stream_id)
                 runtime.dedup.reset(context.session_id, context.stream_id)
                 runtime.stream_ends.pop((context.session_id, context.stream_id), None)
@@ -837,6 +1058,25 @@ def _authorized(header: str | None, secret: str | None) -> bool:
     return bool(supplied) and secrets.compare_digest(supplied, secret)
 
 
+async def _run_native_listing(executable: Path, flag: str) -> list[str]:
+    """Run one of the helper's listing modes and return its stdout lines."""
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            [str(executable), flag],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(status_code=503, detail=f"cannot run the capture helper: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "native capture helper failed"
+        raise HTTPException(status_code=503, detail=detail)
+    return completed.stdout.splitlines()
+
+
 def _input_devices() -> list[dict[str, Any]]:
     """Report input devices, or an empty list where the audio backend is absent.
 
@@ -855,6 +1095,7 @@ def _input_devices() -> list[dict[str, Any]]:
     return [
         {
             "index": index,
+            "uid": None,
             "name": device.get("name", ""),
             "channels": device.get("max_input_channels", 0),
             "sample_rate": device.get("default_samplerate"),
@@ -937,6 +1178,7 @@ def _open_stream(
     runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
     runtime.dedup.reset(session_id, stream_id)
     runtime.stream_ends.pop((session_id, stream_id), None)
+    channel, channel_name = _stream_channel(control)
     return _StreamContext(
         session_id=session_id,
         start=control,
@@ -944,6 +1186,9 @@ def _open_stream(
         source=source,
         chunker=_stream_chunker(control),
         sample_rate=int(control.get("audio", {}).get("sample_rate_hz", 16000)),
+        channel=channel if source is Source.SYSTEM else None,
+        channel_name=channel_name if source is Source.SYSTEM else None,
+        partial_interval_s=runtime.settings.partial_interval_ms / 1000.0,
     )
 
 
@@ -988,14 +1233,28 @@ def _correct(vocabulary: Vocabulary, event: TranscriptEvent) -> TranscriptEvent:
     return event if corrected == event.text else replace(event, text=corrected)
 
 
+def _record_ui_event(runtime: ServiceRuntime, session_id: str, entry: dict[str, Any]) -> None:
+    """Append to the UI feed, if this session is the one the UI is watching.
+
+    Sessions the UI never polls would otherwise accumulate forever.
+    """
+    watched = runtime.ui_events.get(session_id)
+    if watched is None:
+        return
+    watched.append(entry)
+    runtime.ui_events_total[session_id] += 1
+
+
 async def _publish_event(
     websocket: WebSocket, runtime: ServiceRuntime, event: TranscriptEvent
-) -> bool:
+) -> TranscriptEvent | None:
     """Correct, deduplicate, persist, and publish one finalized transcript event.
 
     Corrections run before deduplication so the tail the deduplicator remembers
     is the same text the transcript, the UI, and the next chunk's comparison all
     see; correcting afterwards would leave those four out of step.
+
+    Returns the event as published, or None when nothing was published.
     """
     event = _correct(runtime.vocabulary.current(), event)
     key = (event.session_id, event.stream_id)
@@ -1008,7 +1267,7 @@ async def _publish_event(
     event = runtime.dedup.deduplicate(event)
     if not event.text.strip():
         # The chunk repeated its predecessor's overlap and carried nothing new.
-        return False
+        return None
     try:
         runtime.sessions.append(event)
     except (InvalidSessionTransition, KeyError, ValueError) as exc:
@@ -1016,15 +1275,11 @@ async def _publish_event(
         await websocket.send_json(
             {"type": "error", "code": "transcript_not_stored", "message": str(exc)}
         )
-        return True
+        return event
     runtime.stream_ends[key] = max(previous_end or 0, event.end_ms)
-    watched = runtime.ui_events.get(event.session_id)
-    if watched is not None:
-        # Sessions the UI never polls would otherwise accumulate forever.
-        watched.append(event.to_dict())
-        runtime.ui_events_total[event.session_id] += 1
+    _record_ui_event(runtime, event.session_id, {**event.to_dict(), "type": "transcript"})
     await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
-    return True
+    return event
 
 
 async def _report_lag(
@@ -1039,6 +1294,169 @@ async def _report_lag(
             "stream_id": context.stream_id,
             "real_time_factor": round(factor, 2),
             "message": "Transcription is slower than capture.",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Partial captions
+# ---------------------------------------------------------------------------
+
+
+def _maybe_schedule_partial(runtime: ServiceRuntime, context: _StreamContext) -> None:
+    """Re-transcribe the open utterance if it is time to, without blocking.
+
+    One partial at a time per stream, never more often than the interval, and
+    the interval grows to fit inference that turns out slower than it: on a
+    CPU that takes three seconds per pass, asking every second would queue
+    work the final then has to wait behind.
+    """
+    if not runtime.settings.partial_captions:
+        return
+    task = context.partial_task
+    if task is not None and not task.done():
+        return
+    now = time.monotonic()
+    if now - context.last_partial_at < context.partial_interval_s:
+        return
+    active = context.chunker.active_audio()
+    if active is None:
+        return
+    pcm, start_sample, end_sample = active
+    if len(pcm) < context.sample_rate * 2 * _MIN_PARTIAL_MS // 1000:
+        return
+    start_ms, end_ms = context.sample_bounds(start_sample, end_sample)
+    if (
+        context.source is Source.MICROPHONE
+        and runtime.settings.echo_suppression
+        and runtime.echo.has_reference(context.session_id)
+        and runtime.echo.judge(context.session_id, start_ms, end_ms, pcm).echo
+    ):
+        # What is being heard is the speakers. The final will be dropped, so
+        # do not flash its text on screen first.
+        return
+    if context.partial_segment_id is None:
+        context.partial_segment_id = _segment_id()
+    context.last_partial_at = now
+    context.partial_task = asyncio.create_task(
+        _run_partial(runtime, context, pcm, start_ms, end_ms, context.partial_segment_id)
+    )
+
+
+async def _run_partial(
+    runtime: ServiceRuntime,
+    context: _StreamContext,
+    pcm: bytes,
+    start_ms: int,
+    end_ms: int,
+    segment_id: str,
+) -> None:
+    began = time.monotonic()
+    try:
+        event = await _transcribe_pcm_chunk(
+            runtime,
+            context.session_id,
+            context,
+            {"type": "audio.chunk", "start_ms": start_ms, "end_ms": end_ms},
+            pcm,
+            segment_id=segment_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a partial is disposable; the final still comes
+        runtime.partial_error = f"{type(exc).__name__}: {exc}"[:200]
+        return
+    runtime.partial_error = None
+    elapsed = time.monotonic() - began
+    base = runtime.settings.partial_interval_ms / 1000.0
+    context.partial_interval_s = max(base, elapsed * 1.5)
+    if segment_id in context.finalized_partials or context.partial_segment_id != segment_id:
+        return
+    event = _correct(runtime.vocabulary.current(), replace(event, is_final=False))
+    if not event.text.strip():
+        return
+    payload = event.to_dict()
+    _record_ui_event(runtime, context.session_id, {**payload, "type": "transcript"})
+    context.outbox.append({"type": "transcript.partial", "event": payload})
+
+
+async def _flush_outbox(websocket: WebSocket, runtime: ServiceRuntime, context: _StreamContext) -> None:
+    if not context.outbox:
+        return
+    pending, context.outbox = context.outbox, []
+    for message in pending:
+        event = message.get("event") or {}
+        if (
+            message.get("type") == "transcript.partial"
+            and event.get("segment_id") in context.finalized_partials
+        ):
+            # Its final already went out; a stale partial must not replace it.
+            continue
+        await websocket.send_json(message)
+
+
+async def _drain_background(websocket: WebSocket, runtime: ServiceRuntime, context: _StreamContext) -> None:
+    """Let in-flight translations finish before the socket closes.
+
+    Bounded: a translation that has not returned in a few seconds is written
+    to the transcript when it does, but the client stops waiting for it.
+    """
+    tasks = [task for task in context.background if not task.done()]
+    if tasks:
+        await asyncio.wait(tasks, timeout=5.0)
+    await _flush_outbox(websocket, runtime, context)
+
+
+# ---------------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------------
+
+
+def _maybe_schedule_translation(
+    runtime: ServiceRuntime, context: _StreamContext, event: TranscriptEvent
+) -> None:
+    if event.session_id not in runtime.translate_sessions or runtime.translator is None:
+        return
+    if not event.text.strip():
+        return
+    context.keep(asyncio.create_task(_run_translation(runtime, context, event)))
+
+
+async def _run_translation(
+    runtime: ServiceRuntime, context: _StreamContext, event: TranscriptEvent
+) -> None:
+    source, target = other_language(event.language, event.text)
+    try:
+        text = await asyncio.to_thread(runtime.translate_text, event.text, source, target)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - translation is optional; the transcript is not
+        runtime.translation_error = f"{type(exc).__name__}: {exc}"[:200]
+        return
+    if not text.strip():
+        return
+    runtime.translation_error = None
+    try:
+        await asyncio.to_thread(runtime.sessions.translate, event, target, text)
+    except (InvalidSessionTransition, KeyError, ValueError, OSError):
+        # The session closed in the meantime; the caption still gets it.
+        pass
+    entry = {
+        "type": "translation",
+        "session_id": event.session_id,
+        "segment_id": event.segment_id,
+        "source": event.source.value,
+        "start_ms": event.start_ms,
+        "end_ms": event.end_ms,
+        "language": target,
+        "text": text,
+        "is_final": True,
+    }
+    _record_ui_event(runtime, event.session_id, entry)
+    context.outbox.append(
+        {
+            "type": "transcript.translation",
+            "event": {"segment_id": event.segment_id, "text": text, "language": target},
         }
     )
 
@@ -1063,6 +1481,12 @@ def _shutdown(runtime: ServiceRuntime) -> None:
     # Give any job already running a moment to finish and clear its scratch
     # directory, rather than abandoning it at process exit.
     runtime.diarization.shutdown()
+    translator = runtime.translator
+    if translator is not None and translator.is_loaded:
+        try:
+            translator.unload()
+        except Exception:  # noqa: BLE001 - exiting anyway
+            pass
 
 
 def _native_capture_executable(runtime: ServiceRuntime) -> Path:
@@ -1096,6 +1520,26 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         "exit_code": exit_code,
         "error": runtime.native_error,
         "retention": _retention_view(runtime, session_id),
+        "last_session": _last_session_view(runtime),
+        "translation": {
+            "requested": bool(session_id and session_id in runtime.translate_sessions),
+            "available": runtime.translation_available,
+            "error": runtime.translation_error,
+        },
+    }
+
+
+def _last_session_view(runtime: ServiceRuntime) -> dict[str, Any] | None:
+    session_id = runtime.last_session_id
+    if session_id is None:
+        return None
+    directory = _session_directory(runtime, session_id)
+    return {
+        "session_id": session_id,
+        "directory": str(directory),
+        "transcript_parts": sorted(
+            path.name for path in directory.glob("transcript-part-[0-9][0-9][0-9].md")
+        ) if directory.is_dir() else [],
     }
 
 
@@ -1114,6 +1558,14 @@ def _retention_view(runtime: ServiceRuntime, session_id: str | None) -> dict[str
         "retained_bytes": writer.retained_bytes,
         "stopped_reason": writer.stopped_reason,
     }
+
+
+def _session_elapsed_ms(runtime: ServiceRuntime, session_id: str) -> int:
+    """Where "now" falls on the session timeline, for events without audio."""
+    started = runtime.session_started_at.get(session_id)
+    if started is None:
+        return 0
+    return max(0, round((time.monotonic() - started) * 1000.0))
 
 
 def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None:
@@ -1188,13 +1640,14 @@ def _read_native_error(runtime: ServiceRuntime, process: subprocess.Popen[str]) 
 def _record_audio(
     runtime: ServiceRuntime,
     session_id: str,
-    start: dict[str, Any],
+    context: _StreamContext,
     header: dict[str, Any],
     pcm: bytes,
 ) -> None:
     session = runtime.sessions.get(session_id)
     if not session.config.audio_saved:
         return
+    start = context.start
     source = Source(header.get("source", start.get("source", "microphone")))
     writer = runtime.audio_writers.get(session_id)
     if writer is None:
@@ -1213,11 +1666,16 @@ def _record_audio(
         source,
         pcm,
         start_ms=round(float(header.get("start_ms", 0))),
+        channel=context.channel,
     )
 
 
 def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
-    writer = runtime.audio_writers.pop(session.config.session_id, None)
+    session_id = session.config.session_id
+    runtime.last_session_id = session_id
+    runtime.session_started_at.pop(session_id, None)
+    runtime.echo.forget(session_id)
+    writer = runtime.audio_writers.pop(session_id, None)
     if writer is not None:
         writer.close()
         if session.config.save_combined_audio:
@@ -1229,8 +1687,9 @@ def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
                 pass
         if not session.config.save_separate_audio:
             for source in Source:
-                for path in writer.session_dir.glob(f"{source.value}-part-*.wav"):
-                    path.unlink()
+                for pattern in (f"{source.value}-part-*.wav", f"{source.value}-*-part-*.wav"):
+                    for path in writer.session_dir.glob(pattern):
+                        path.unlink()
     # Dispatch even when no writer was ever created. A session that asked for
     # diarization and captured no audio should say so as a typed failure, not
     # silently report that diarization was never requested.
@@ -1348,6 +1807,33 @@ async def _send_chunks(
     published = 0
     for chunk in chunks:
         chunk_start, chunk_end = context.chunk_bounds(chunk)
+        # The final takes over the id its partials were shown under, so the
+        # caption is replaced in place rather than duplicated beneath itself.
+        segment_id = context.partial_segment_id or _segment_id()
+        context.cancel_partial()
+        context.finalized_partials.append(segment_id)
+        if (
+            context.source is Source.MICROPHONE
+            and runtime.settings.echo_suppression
+            and runtime.echo.has_reference(context.session_id)
+        ):
+            verdict = await asyncio.to_thread(
+                runtime.echo.judge, context.session_id, chunk_start, chunk_end, chunk.pcm
+            )
+            if verdict.echo:
+                context.echo_suppressed += 1
+                await websocket.send_json(
+                    {
+                        "type": "audio.echo_suppressed",
+                        "stream_id": context.stream_id,
+                        "segment_id": segment_id,
+                        "start_ms": chunk_start,
+                        "end_ms": chunk_end,
+                        **verdict.to_dict(),
+                    }
+                )
+                published += 1
+                continue
         header = {
             "type": "audio.chunk",
             "start_ms": chunk_start,
@@ -1355,9 +1841,12 @@ async def _send_chunks(
             "finalization_reason": chunk.reason,
         }
         event, elapsed_ms = await _timed_transcription(
-            runtime, context.session_id, context.start, header, chunk.pcm
+            runtime, context.session_id, context, header, chunk.pcm, segment_id=segment_id
         )
-        published += await _publish_event(websocket, runtime, event)
+        result = await _publish_event(websocket, runtime, event)
+        if result is not None:
+            published += 1
+            _maybe_schedule_translation(runtime, context, result)
         await _report_lag(websocket, context, chunk_end - chunk_start, elapsed_ms)
     return published
 
@@ -1365,22 +1854,29 @@ async def _send_chunks(
 async def _timed_transcription(
     runtime: ServiceRuntime,
     session_id: str,
-    start: dict[str, Any],
+    context: _StreamContext,
     header: dict[str, Any],
     pcm: bytes,
+    *,
+    segment_id: str | None = None,
 ) -> tuple[TranscriptEvent, float]:
     began = time.monotonic()
-    event = await _transcribe_pcm_chunk(runtime, session_id, start, header, pcm)
+    event = await _transcribe_pcm_chunk(
+        runtime, session_id, context, header, pcm, segment_id=segment_id
+    )
     return event, (time.monotonic() - began) * 1000.0
 
 
 async def _transcribe_pcm_chunk(
     runtime: ServiceRuntime,
     session_id: str,
-    start: dict[str, Any],
+    context: _StreamContext,
     header: dict[str, Any],
     pcm: bytes,
+    *,
+    segment_id: str | None = None,
 ):
+    start = context.start
     audio = start.get("audio", {})
     sample_rate = int(audio.get("sample_rate_hz", 16000))
     channels = int(audio.get("channels", 1))
@@ -1395,11 +1891,11 @@ async def _transcribe_pcm_chunk(
             wav_file.setsampwidth(2)
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(pcm)
-        return await runtime.provider.transcribe_file(
+        event = await runtime.provider.transcribe_file(
             temporary.name,
             TranscriptionOptions(
                 session_id=session_id,
-                segment_id=_segment_id(),
+                segment_id=segment_id or _segment_id(),
                 stream_id=str(start.get("stream_id", f"{source.value}-1")),
                 source=source,
                 start_ms=start_ms,
@@ -1408,6 +1904,9 @@ async def _transcribe_pcm_chunk(
                 context=runtime.vocabulary.current().context,
             ),
         )
+    if context.channel and (event.channel != context.channel or event.channel_name != context.channel_name):
+        event = replace(event, channel=context.channel, channel_name=context.channel_name)
+    return event
 
 
 def _stream_applications(start: dict[str, Any]) -> tuple[str, ...]:
@@ -1429,6 +1928,19 @@ def _stream_applications(start: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(identifiers))
 
 
+def _stream_channel(start: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Read the per-application channel a system stream isolates, if any."""
+    channel = start.get("channel")
+    name = start.get("channel_name")
+    if channel is not None and (not isinstance(channel, str) or not channel.strip()):
+        raise ValueError("channel must be a non-empty string")
+    if name is not None and not isinstance(name, str):
+        raise ValueError("channel_name must be a string")
+    channel = channel.strip() if isinstance(channel, str) else None
+    name = " ".join(name.split()) if isinstance(name, str) and name.strip() else None
+    return channel, (name if channel else None)
+
+
 def _stream_retention(start: dict[str, Any]) -> dict[str, bool]:
     """Read the optional audio-retention request from a stream.start message.
 
@@ -1446,11 +1958,11 @@ def _stream_retention(start: dict[str, Any]) -> dict[str, bool]:
     if unknown:
         raise ValueError(f"unsupported retention fields: {', '.join(sorted(unknown))}")
     values = {}
-    for name, field in names.items():
+    for name, field_name in names.items():
         if name in requested:
             if not isinstance(requested[name], bool):
                 raise ValueError(f"retention.{name} must be true or false")
-            values[field] = requested[name]
+            values[field_name] = requested[name]
     return values
 
 
@@ -1507,6 +2019,7 @@ def _ensure_started_session(
         )
     if session.state is SessionState.CREATED:
         runtime.sessions.start(session_id)
+        runtime.session_started_at[session_id] = time.monotonic()
         session = runtime.sessions.get(session_id)
     if session.state is not SessionState.RUNNING:
         raise HTTPException(status_code=409, detail=f"session is {session.state.value}")

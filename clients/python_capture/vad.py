@@ -153,6 +153,20 @@ class EnergyVadChunker:
     def active(self) -> bool:
         return bool(self._active)
 
+    def active_audio(self) -> tuple[bytes, int, int] | None:
+        """The utterance in progress so far, as `(pcm, start_sample, end_sample)`.
+
+        Read by the partial-caption path, which transcribes what has been
+        heard so far without finalizing anything. None when no utterance is
+        open. The buffer is copied, so the caller can hand it to a thread
+        while frames keep arriving.
+        """
+        if not self._active:
+            return None
+        start = self._active[0][0]
+        end = self._active[-1][0] + self.config.samples_per_frame
+        return b"".join(frame for _, frame in self._active), start, end
+
     @property
     def noise_floor_rms(self) -> float | None:
         """Current background estimate, or None while it is not yet trustworthy.

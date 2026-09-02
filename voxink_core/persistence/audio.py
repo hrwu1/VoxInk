@@ -37,6 +37,8 @@ def _free_bytes(path: Path) -> int:
 @dataclass
 class _Track:
     source: Source
+    #: File-name stem: the source, or `system-<channel>` for one application.
+    name: str
     part: int
     path: Path
     handle: BinaryIO
@@ -89,7 +91,7 @@ class AudioRetentionWriter:
             raise ValueError("rotation limits must accommodate at least one PCM frame")
         self.max_data_bytes = self.frames_per_part * self.frame_bytes
         self.durable_flush = durable_flush
-        self._tracks: dict[Source, _Track] = {}
+        self._tracks: dict[str, _Track] = {}
         # Part numbers stay time-aligned within one run so microphone and system
         # parts of the same number always cover the same audio. A run that finds
         # a previous run's parts in the directory numbers its own above them, and
@@ -128,14 +130,18 @@ class AudioRetentionWriter:
         pcm_s16le: bytes,
         *,
         start_ms: int,
+        channel: str | None = None,
     ) -> tuple[Path, ...]:
         """Append PCM at a session-relative time, returning all touched parts.
 
         Forward gaps are filled with digital silence. If a chunk overlaps audio
-        already written to that source, the overlapping prefix is discarded.
-        Chunks must arrive chronologically per source.
+        already written to that track, the overlapping prefix is discarded.
+        Chunks must arrive chronologically per track. A `channel` names one
+        application's system stream, which gets its own track so two
+        applications playing at once are not written over each other.
         """
         source = Source(source)
+        name = track_name(source, channel)
         if start_ms < 0:
             raise ValueError("start_ms must be non-negative")
         if not isinstance(pcm_s16le, bytes):
@@ -153,9 +159,9 @@ class AudioRetentionWriter:
                 return ()
             start_frame = start_ms * self.sample_rate // 1000
             chunk_frames = len(pcm_s16le) // self.frame_bytes
-            track = self._tracks.get(source)
+            track = self._tracks.get(name)
             if track is None:
-                track = self._recover_or_open(source, start_frame, chunk_frames)
+                track = self._recover_or_open(source, name, start_frame, chunk_frames)
 
             overlap = max(0, track.written_until_frame - start_frame)
             if overlap >= chunk_frames:
@@ -172,8 +178,8 @@ class AudioRetentionWriter:
                 part = self._part_for(cursor)
                 if track.part != part:
                     self._close_track(track)
-                    track = self._open_track(source, part)
-                    self._tracks[source] = track
+                    track = self._open_track(source, name, part)
+                    self._tracks[name] = track
                 part_start = self._part_start(part)
                 position = cursor - part_start
                 existing_frames = track.data_bytes // self.frame_bytes
@@ -218,12 +224,11 @@ class AudioRetentionWriter:
             raise ValueError("chunk_frames must be positive")
         with self._lock:
             self.close()
-            parts = sorted(set(self._part_numbers(Source.MICROPHONE)) | set(self._part_numbers(Source.SYSTEM)))
+            names = self._track_names()
+            parts = sorted({part for name in names for part in self._part_numbers(name)})
             outputs: list[Path] = []
             for part in parts:
-                mic_path = self._path(Source.MICROPHONE, part)
-                system_path = self._path(Source.SYSTEM, part)
-                inputs = [path for path in (mic_path, system_path) if path.is_file()]
+                inputs = [path for path in (self._path(name, part) for name in names) if path.is_file()]
                 if not inputs:
                     continue
                 output = self.session_dir / f"combined-part-{part:03d}.wav"
@@ -254,7 +259,7 @@ class AudioRetentionWriter:
         return (part - 1 - self._part_base) * self.frames_per_part
 
     def _recover_or_open(
-        self, source: Source, requested_start: int, chunk_frames: int
+        self, source: Source, name: str, requested_start: int, chunk_frames: int
     ) -> _Track:
         """Resume the previous writer's last part, or roll past a finished run.
 
@@ -273,14 +278,14 @@ class AudioRetentionWriter:
         previous run still loses that much to overlap trimming, which is the
         most these two cases can be told apart from the audio alone.
         """
-        parts = self._part_numbers(source)
+        parts = self._part_numbers(name)
         if not self._part_base_resolved:
             # The first source to write decides, for the whole run, whether this
             # continues the stored parts or numbers above them. Deciding per
             # source instead would let whichever source happens to arrive first
             # sit below the other's offset, and generate_combined would pair this
             # run's audio with a previous run's.
-            committed = self._committed_end(source, parts[-1]) if parts else None
+            committed = self._committed_end(name, parts[-1]) if parts else None
             self._resuming = (
                 committed is not None and requested_start + chunk_frames > committed
             )
@@ -289,16 +294,16 @@ class AudioRetentionWriter:
             self._part_base_resolved = True
         if self._resuming and parts:
             # _committed_end reads _part_base, which is untouched on this path.
-            committed = self._committed_end(source, parts[-1])
+            committed = self._committed_end(name, parts[-1])
             if committed is not None and requested_start + chunk_frames > committed:
-                track = self._open_existing_track(source, parts[-1])
-                self._tracks[source] = track
+                track = self._open_existing_track(source, name, parts[-1])
+                self._tracks[name] = track
                 return track
-        track = self._open_track(source, self._part_for(requested_start))
-        self._tracks[source] = track
+        track = self._open_track(source, name, self._part_for(requested_start))
+        self._tracks[name] = track
         return track
 
-    def _committed_end(self, source: Source, part: int) -> int | None:
+    def _committed_end(self, name: str, part: int) -> int | None:
         """Frame index one past the last sample committed to a part's header.
 
         `None` means the part cannot be read, and therefore cannot prove that
@@ -306,7 +311,7 @@ class AudioRetentionWriter:
         than resuming a corrupt file and discarding live audio into it.
         """
         try:
-            with self._path(source, part).open("rb") as handle:
+            with self._path(name, part).open("rb") as handle:
                 _, _, data_bytes = _read_header(handle)
         except (OSError, ValueError):
             return None
@@ -314,20 +319,32 @@ class AudioRetentionWriter:
 
     def _highest_part(self) -> int:
         return max(
-            (numbers[-1] for numbers in map(self._part_numbers, Source) if numbers),
+            (numbers[-1] for numbers in map(self._part_numbers, self._track_names()) if numbers),
             default=0,
         )
 
-    def _open_track(self, source: Source, part: int) -> _Track:
-        path = self._path(source, part)
+    def _track_names(self) -> tuple[str, ...]:
+        """Every source or channel track present on disk or open in this writer."""
+        names = {track.name for track in self._tracks.values()}
+        for path in self.session_dir.glob("*-part-[0-9][0-9][0-9].wav"):
+            stem = path.stem[: -len("-part-000")]
+            if stem == "combined":
+                continue
+            if stem in {source.value for source in Source} or stem.startswith("system-"):
+                names.add(stem)
+        return tuple(sorted(names))
+
+    def _open_track(self, source: Source, name: str, part: int) -> _Track:
+        path = self._path(name, part)
         try:
             handle = path.open("x+b")
         except FileExistsError:
-            return self._open_existing_track(source, part)
+            return self._open_existing_track(source, name, part)
         handle.write(_wav_header(self.sample_rate, self.channels, 0))
         handle.flush()
         return _Track(
             source=source,
+            name=name,
             part=part,
             path=path,
             handle=handle,
@@ -335,8 +352,8 @@ class AudioRetentionWriter:
             written_until_frame=self._part_start(part),
         )
 
-    def _open_existing_track(self, source: Source, part: int) -> _Track:
-        path = self._path(source, part)
+    def _open_existing_track(self, source: Source, name: str, part: int) -> _Track:
+        path = self._path(name, part)
         handle = path.open("r+b")
         try:
             rate, channels, data_bytes = _read_header(handle)
@@ -353,7 +370,7 @@ class AudioRetentionWriter:
             handle.close()
             raise
         return _Track(
-            source, part, path, handle, data_bytes,
+            source, name, part, path, handle, data_bytes,
             self._part_start(part) + data_bytes // self.frame_bytes,
         )
 
@@ -409,15 +426,16 @@ class AudioRetentionWriter:
         self._flush_track(track)
         track.handle.close()
 
-    def _part_numbers(self, source: Source) -> list[int]:
-        prefix = f"{source.value}-part-"
+    def _part_numbers(self, name: Source | str) -> list[int]:
+        prefix = f"{name.value if isinstance(name, Source) else name}-part-"
         return sorted(
             int(path.stem.removeprefix(prefix))
             for path in self.session_dir.glob(f"{prefix}[0-9][0-9][0-9].wav")
         )
 
-    def _path(self, source: Source, part: int) -> Path:
-        return self.session_dir / f"{source.value}-part-{part:03d}.wav"
+    def _path(self, name: Source | str, part: int) -> Path:
+        stem = name.value if isinstance(name, Source) else name
+        return self.session_dir / f"{stem}-part-{part:03d}.wav"
 
     def _mix_part(self, inputs: Iterable[Path], output: Path, chunk_frames: int) -> None:
         readers = [wave.open(str(path), "rb") for path in inputs]
@@ -456,6 +474,20 @@ class AudioRetentionWriter:
         finally:
             for reader in readers:
                 reader.close()
+
+
+def track_name(source: Source | str, channel: str | None = None) -> str:
+    """File-name stem for a source, or for one application's system stream.
+
+    Channel names come from bundle identifiers, which are already file-safe,
+    but anything else is reduced to a safe alphabet so a name can never escape
+    the session directory or collide with the part suffix.
+    """
+    source = Source(source)
+    if not channel:
+        return source.value
+    safe = "".join(char if char.isalnum() or char in "._" else "_" for char in channel).strip("._")
+    return f"{source.value}-{safe or 'channel'}"
 
 
 def _wav_header(sample_rate: int, channels: int, data_bytes: int) -> bytes:
