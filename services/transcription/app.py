@@ -118,8 +118,10 @@ class ServiceSettings:
     # Local instruct model used to translate finalized segments. Optional:
     # absent, translation is reported unavailable and never requested.
     translation_model_path: Path | None = PROJECT_ROOT / "models" / "Qwen3-0.6B"
-    # Owner-only state: agent grants and the audit trail live here.
+    # Owner-only state: agent grants, the audit trail, and remembered voices.
     state_root: Path = Path.home() / "Library" / "Application Support" / "VoxInk"
+    # Cosine similarity a session speaker must reach to be called a known voice.
+    speaker_threshold: float = 0.62
 
 
 class GrantIssueRequest(BaseModel):
@@ -288,7 +290,9 @@ class ServiceRuntime:
         )
         self.sessions = sessions or SessionManager(settings.output_root)
         # Voices the user asked to remember. Opt-in per voice, local only.
-        self.speakers = SpeakerRegistry(settings.state_root / SPEAKERS_FILENAME)
+        self.speakers = SpeakerRegistry(
+            settings.state_root / SPEAKERS_FILENAME, threshold=settings.speaker_threshold
+        )
         self.diarization = DiarizationJobManager(
             model_path=settings.diarization_model_path,
             device=settings.diarization_device,

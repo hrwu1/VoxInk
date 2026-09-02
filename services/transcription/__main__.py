@@ -45,6 +45,12 @@ def main() -> None:
         default=True,
         help="drop microphone chunks that echo a system channel (default: on)",
     )
+    parser.add_argument(
+        "--speaker-threshold",
+        type=float,
+        default=0.62,
+        help="cosine similarity needed to recognize a remembered voice (default: 0.62)",
+    )
     args = parser.parse_args()
     auth_secret = os.environ.get("VOXINK_AUTH_SECRET")
     if not auth_secret:
@@ -67,6 +73,7 @@ def main() -> None:
             translation_model_path=args.translation_model.expanduser().resolve(),
             partial_captions=args.partial_captions,
             echo_suppression=args.echo_suppression,
+            speaker_threshold=args.speaker_threshold,
         )
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)

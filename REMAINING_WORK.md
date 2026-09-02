@@ -1,20 +1,21 @@
 # VoxInk Remaining Work
 
-Status: Active roadmap. Last verified against the tree on 2026-08-31.
+Status: Active roadmap. Last verified against the tree on 2026-09-02.
 
 ## Purpose
 
-This is the maintained list of work that remains after the developer workflow
-and native capture integration. Completed implementation plans are removed once
-their durable requirements are reflected here, in `README.md`, or in tests; the
-Git history keeps their detail.
+This is the maintained list of work that remains after the developer workflow,
+native capture integration, and the 2026-09-02 feature push. Completed
+implementation plans are removed once their durable requirements are reflected
+here, in `README.md`, or in tests; the Git history keeps their detail.
 
 `PROJECT_SPEC.md` remains the architecture and data-format reference.
 `SHIP_SPEC.md` remains the specification for a signed production release.
+`.claude/plans/feature-push.md` records the 2026-09-02 push.
 
 ## How this list is ordered
 
-The project is six days old and has one user. Order follows evidence, not the
+The project is nine days old and has one user. Order follows evidence, not the
 shape of the specification:
 
 1. Defects that degrade every session run today.
@@ -24,267 +25,139 @@ shape of the specification:
 4. Convenience and completeness.
 
 Work with no observed problem behind it belongs in `Deferred` at the end, not
-in a priority tier. Two P0 items is a priority; five is a wish list.
+in a priority tier.
 
 ## Verified state
 
-The following was confirmed by reading the tree and running the checks, not
-from memory of earlier work:
+Confirmed by reading the tree and running the checks on 2026-09-02:
 
-- A one-command browser workflow through `./scripts/voxink-dev`, on the
-  preferred loopback port `8765` with an automatic fallback.
-- A public `./scripts/voxink` command for scripts and agents, speaking a
-  versioned JSON envelope over the helper's local control API.
-- One capture path: every browser and CLI mode records through the native
-  helper. No `getUserMedia`, `AudioContext`, or client-side resampling remains
-  in `frontend/app`. `clients/python_capture` is kept as an independent
-  diagnostic client, though the service applies its VAD module to every session.
-- A speech gate derived from a running noise floor rather than a fixed level,
-  owned by the service. No client sends an absolute threshold. Measured on the
-  recording that exposed the defect: speech-frame recall rose from 83.2% to
-  100%, and silence and room tone from -70 to -35 dBFS still produce nothing.
-- Local-only Qwen transcription over authenticated loopback HTTP/WebSocket
-  APIs, with model listing and selection in the browser.
-- Microphone, all-system, selected-application, and combined capture modes,
-  with start, pause, resume, and stop from both the browser and the CLI.
-- Source-labelled live captions, rotating Markdown transcripts, and rotating
-  WAV retention enabled by default with an explicit opt-out.
-- Bounded native audio queues, UI event history, and helper diagnostics.
-- Bounded audio retention: a free-space reserve and an optional per-session
-  ceiling, enforced in the writer. Reaching either stops the recording, not the
-  session, and is reported in the browser, on `voxink capture status`, and as
-  retained bytes per session on `voxink transcripts list`. Nothing is pruned
-  automatically; see `.claude/plans/bounded-local-storage.md`.
-- Recovery of interrupted transcript parts without overwriting earlier output.
+- A one-command browser workflow through `./scripts/voxink-dev`, a menu-bar
+  application through `--menubar`, and a public `./scripts/voxink` command.
+- System audio through Core Audio process taps, with ScreenCaptureKit as the
+  fallback. Verified on the target Mac against a muted local player: 837
+  frames, 99% nonzero bytes, a finalized transcript. The same run through
+  ScreenCaptureKit failed for want of a display to anchor the filter.
+- Partial captions while an utterance is open, replaced in place by the
+  final; never written to Markdown.
+- One labelled channel per selected application, one WAV track per channel,
+  and suppression of the microphone's echo of a system channel.
+- Timestamped markers, microphone selection, a language override, a Finder
+  reveal action, and settings in the browser.
+- On-device translation of finalized captions with a local Qwen3 instruct
+  model, shown as a second line and quoted in Markdown.
+- Speaker diarization after Stop with forced-alignment splitting; per-speaker
+  embeddings; an opt-in local registry that names remembered voices.
+- Agent access under grants: scopes, application allow-lists, maximum
+  duration with auto-stop, retention permission, expiry, single use, an
+  approval flow with claim secrets, revocation that stops capture, and an
+  audit trail. An MCP server over the shared client.
+- Bounded audio retention, recovery of interrupted transcript parts, and the
+  level-adaptive speech gate, as before.
 
-Checks, with their results on 2026-08-31:
+Checks, with their results on 2026-09-02:
 
-- `.venv/bin/python -m unittest discover -s tests` — 304 tests, all passing.
+- `.venv/bin/python -m unittest discover -s tests` — 603 tests, all passing.
 - `swift test` in `clients/macos_capture` — 15 tests, all passing.
-- `npm run test:timer` in `frontend` — 2 tests, passing. The frontend runs
-  Node's built-in test runner under `--experimental-strip-types`, added with
-  the session-timer fix. It covers the extracted `elapsed-timer.ts` helper
-  only, and its script names that one file rather than discovering tests.
-  Everything else in the frontend still rests on ESLint, TypeScript checking,
-  a production build, and manual browser interaction.
+- `npm test` in `frontend` — 6 tests, passing; `npm run build:local` builds.
 
-Real system-audio delivery still requires acceptance on the target Mac: the
-last manual check received zero-filled ScreenCaptureKit buffers despite
-successful permission and stream setup.
+## P0: Target-Mac acceptance of the new capture paths
 
-## P0: Target-Mac capture acceptance
+The tap backend delivered real audio from a muted player. What has not been
+run on the target Mac, because it needs a person at the keyboard:
 
-An advertised capture mode returns silence. Either it works, or the interface
-should stop offering it.
+- [ ] Per-application taps against a real application (Zoom, Safari): one
+      channel per application, reconnection after the application restarts,
+      and the `[SYSTEM: Name]` label in the transcript.
+- [ ] Microphone plus system with the speakers on, to observe echo
+      suppression on real room echo rather than the synthetic test. Tune
+      `EchoPolicy.min_correlation` if it fires on the user's own speech.
+- [ ] The floating captions and push to talk from the menu-bar application,
+      including the Accessibility prompt for pasting.
+- [ ] Partial captions with the 1.7B model on MPS: confirm the interval
+      stretches rather than queueing work ahead of the final.
 
-- [ ] Repeat the native system-audio test with known audible applications.
-- [ ] Confirm microphone, all-system, selected-application, and combined
-      sessions.
-- [ ] Record permission state, audio delivery, source labels, and saved output.
-- [ ] If ScreenCaptureKit still supplies silence, isolate the OS/framework
-      cause or add a replaceable capture backend without weakening local-only
-      behavior.
+Complete when each mode above has been exercised once on the target Mac and
+any defect found has a test.
 
-Microphone capture is confirmed working end to end through the native helper,
-so it is the control case: a failure that affects both sources is not
-ScreenCaptureKit-specific. The VAD work this was sequenced behind is done, so
-dropped words can no longer be mistaken for a delivery failure.
+## P1: Speaker recognition quality
 
-Complete when every capture mode delivers real audio end to end on a supported
-Mac, or a documented platform limitation has a tested fallback.
+The registry, matching, and naming are tested end to end with synthetic
+embeddings; real recognition is not. On the one far-field session available,
+the dominant speaker's embeddings from separate clips scored cosine 0.27,
+under the 0.62 threshold, so recognition may never fire there.
+
+- [ ] Record two short clean sessions of the same person and measure the
+      similarity the fallback embedding path produces; set the default
+      threshold from that, not from the literature.
+- [ ] Prefer the pipeline's own centroid when it is finite and fall back per
+      speaker, which is what happens now; check the two agree on a
+      multi-speaker session (0.86 on one speaker so far, 0.14 on a speaker
+      with short turns).
+- [ ] Decide whether system-channel speakers get their own namespace in the
+      registry, or stay session-local.
+
+## P1: Translation quality
+
+The 0.6B model translates in about 0.2 s per sentence and follows the prompt,
+but it drops clauses and mistranslates jargon ("churn"). Before this is
+shown to anyone else:
+
+- [ ] Compare Qwen3-1.7B as the translator on the same sentences; the Mac
+      has the memory for it beside the 1.7B ASR model.
+- [ ] Carry the vocabulary terms into the translation prompt so names and
+      product words survive.
 
 ## P1: Cover the code that changes most
 
-The recorder hook owns the entire capture lifecycle for every surface. That is
-the highest-churn, least-tested code in the repository. The session-timer fix
-established the runner and showed the shape that works: extract the logic into
-a pure module and test it directly. The remaining lifecycle logic still lives
-inside the hook, untested. The heavier reliability infrastructure is deferred;
-see the end of this file.
-
-- [ ] Give the runner a discovery script. `test:timer` names a single file, so
-      a second test file runs only if someone remembers to add another script.
-- [ ] Cover the recorder hook: mode selection, the start/pause/resume/stop
-      lifecycle, and error and readiness states. Extract what has to be
-      extracted to make it testable, as the timer fix did.
-- [ ] Add a focused failure test for the helper dying mid-session. The disk
-      filling mid-session is covered by the retention bounds.
-- [ ] Exercise malformed traffic and model corruption at the service boundary.
-
-Complete when the capture lifecycle has automated coverage that runs without
-being named file by file, and a helper crash or a full disk is a tested path
-rather than an assumption.
-
-## P1: Prepare the pyannote Community-1 environment
-
-Goal: make the existing project Python environment capable of running the
-local Community-1 diarization pipeline without implementing or advertising
-speaker diarization yet.
-
-The approved architecture, contracts, milestones, and acceptance gates are in
-`DIARIZATION_IMPLEMENTATION_GUIDE.md`.
-
-- [x] Add pinned pyannote, torchaudio, and TorchCodec dependencies in a clearly
-      labelled section of `requirements.txt` while retaining the existing Qwen
-      and service pins.
-- [x] Install the added packages into the existing `.venv` and install FFmpeg
-      for TorchCodec audio decoding.
-- [x] Verify package versions, dependency consistency, FFmpeg discovery, and a
-      basic pyannote import without downloading gated model weights.
-- [x] Run the existing Python test suite to detect regressions in the Qwen and
-      service environment.
-
-Complete when one `.venv` imports both the existing Qwen stack and
-`pyannote.audio`, `pip check` reports no conflicts, FFmpeg is available, and
-the existing Python tests still pass. Model download, model execution, speaker
-alignment, APIs, and UI work remain separate approval-gated implementation.
-
-Verified on 2026-08-31 with PyTorch 2.13.0, pyannote.audio 4.0.7,
-TorchAudio 2.11.0, TorchCodec 0.16.0, and FFmpeg 9.0.1. `pip check` reported no
-conflicts, both Qwen and pyannote imports succeeded, TorchCodec decoded a local
-16 kHz WAV through pyannote, and all 304 existing Python tests passed.
-
-## P1: Complete developer controls
-
-Partly done. The browser shows model identity and offers model selection
-(`frontend/app/page.tsx:114`). What remains:
-
-- [ ] Add microphone-device selection. `/v1/devices` lists input devices
-      (`services/transcription/app.py:501`), but `/v1/ui/capture/start` accepts
-      only sources, applications, and retention — there is no device parameter
-      to pass one through, in either the browser or the CLI. This also
-      interacts with the VAD work: different microphones are exactly the
-      varying input levels a fixed threshold cannot serve.
-- [ ] Add open-transcript, open-folder, and quit actions.
-- [ ] Wire or remove the two inert browser controls: the settings button
-      (`page.tsx:48`) has no handler, and `Mark` (`page.tsx:186`) is
-      permanently disabled.
-- [ ] Improve queue, device, permission, and recovery messages.
-- [ ] Show inference lag in the browser status surface.
-
-Complete when the full session lifecycle and its common recovery actions are
-available without direct API or Terminal coordination, and no control in the
-interface does nothing.
+- [ ] The recorder hook still owns the capture lifecycle and is untested;
+      the caption feed merge was extracted and tested, the rest was not.
+- [ ] A focused failure test for the helper dying mid-session.
+- [ ] Malformed traffic and model corruption at the service boundary.
 
 ## P1: Durable session discovery and recovery
 
-Demoted from P0. The artifacts that matter — transcript parts and audio —
-already land on disk and survive interruption, with tests. What is missing is
-listing and metadata, and with one user and a flat output directory, `ls` still
-answers the question. `_sessions_list` in `voxink_cli/cli.py:373` returns a
-hardcoded `"durable_registry": False` and warns that only sessions the running
-helper holds open are listable.
-
-Raise this again when session count, multiple machines, or agent use makes
-directory listing genuinely insufficient.
-
-- [ ] Add a versioned session manifest or small local registry.
-- [ ] Back `voxink sessions list` with it so completed and interrupted sessions
-      are listable, and add the revision and `--dry-run` behavior that depends
-      on it.
-- [ ] Persist lifecycle state, enabled sources, model and protocol versions,
-      and part inventory without secrets or transcript text.
-- [ ] Discover interrupted sessions without scanning Markdown contents.
-- [ ] Add transcript and transcript-folder actions.
-- [ ] Extract a domain capture route. `capture start` still reaches the control
-      plane through `/v1/ui/capture/*`, a UI-namespaced route, deferred here on
-      purpose.
-
-Complete when interrupted and completed sessions can be found, resumed safely,
-and opened without overwriting prior transcript or audio parts.
-
-## P1: Responsive partial captions and performance
-
-Not started. `services/transcription/app.py:262` advertises
-`"partial_results": False`, and no revision plumbing exists. A genuine
-improvement, not a necessity: finalized-only text works. Keep it behind the
-capture work.
-
-- [ ] Extend the level fixtures in `tests/fixtures/audio.py` into a
-      reproducible English, Mandarin, and code-switching evaluation set.
-- [ ] Consider a gain stage in the native helper. Deferred from the VAD work
-      deliberately: it changes the audio the model receives and the audio
-      retained on disk, which belongs with measuring transcript quality rather
-      than with fixing a gate. `PCMNormalizer` converts format, not level.
-- [ ] Measure first-visible-text, silence-to-final latency, real-time factor,
-      memory, and transcript quality.
-- [ ] Evaluate rolling inference and Apple Silicon acceleration behind the
-      existing provider interface.
-- [ ] Emit revision-safe partial events while keeping partial text out of
-      Markdown.
-
-Complete when revisions replace one another without reordering or duplication,
-and the selected local runtime meets a documented target on supported hardware.
+Unchanged from 2026-08-31: `sessions list` reports only sessions the running
+helper holds open, and `last_session` in the capture view is the only pointer
+to what just finished. Promote when session count or agent use makes
+directory listing insufficient.
 
 ## P2: Local macOS application
 
-Not started. The Swift sources build a capture CLI only; there is no
-`NSStatusItem` or `MenuBarExtra` anywhere in the tree. Plausibly the highest
-day-to-day value item here once capture is trustworthy, and deliberately
-behind it: a menu-bar app over a VAD that drops words just makes the defect
-easier to reach.
-
-- [ ] Add a Finder-launchable menu-bar application that reuses the existing
-      capture, service, caption, and session interfaces.
-- [ ] Include source selection, permissions, settings, diagnostics, and
-      transcript actions.
-- [ ] Assemble and ad-hoc sign the local development app.
-
-Complete when the local app can finish all supported capture modes without a
-Terminal. Developer ID signing, notarization, installation, and updates remain
-production work governed by `SHIP_SPEC.md`.
+The development menu-bar app exists and drives the helper through the
+control API. What remains is production work governed by `SHIP_SPEC.md`:
+owning the helper's lifecycle, permissions, Developer ID signing,
+notarization, installation, and updates.
 
 ## Deferred
 
-Not scheduled. Each of these is real work with no observed problem behind it
-yet; the trigger that should promote it is named.
+**Long-run and replay infrastructure.** Unchanged.
 
-**Long-run and replay infrastructure.** Accelerated one-hour replay, synthetic
-24-hour soak, and deterministic replay capture. Queues, event history, and
-temporary storage are already bounded by construction and covered by tests, so
-this would verify a design rather than chase a symptom. Promote on the first
-evidence of a leak, or when sessions routinely run for hours.
+**Remaining public CLI surface.** The `audio`, `config`, and `diagnostics`
+command groups, transcript search and export, and derived agent artifacts.
 
-**Remaining public CLI surface.** The `audio`, `config`, `diagnostics`, and
-`permissions` command groups from `PROJECT_SPEC.md` section 14.3, plus
-transcript search and export and derived agent artifacts. The first command
-slice has one user. Promote when something concrete needs a command that is
-missing, rather than to complete the section. `README.md` documents the
-accepted deviations, and `.claude/plans/public-cli.md` records the review.
+**Owner credential isolation.** A process running as the user can read
+`control-endpoint.json` and therefore hold the owner credential. Grants are
+enforced for grant tokens; keeping the owner credential out of reach is
+signed-application work.
 
-**Scoped grants.** Unenforced by design in this edition: possession of the
-loopback credential authorizes every scope, and `capabilities` says so. Real
-grants are signed-application work governed by `SHIP_SPEC.md`. No CLI flag may
-bypass that gate.
-
-**Offline network assertion.** Verifying no unexpected outbound traffic is a
-release gate, cheap to run once the failure tests above exist, and pointless to
-build separately before then.
+**Offline network assertion.** Unchanged.
 
 ## Developer-edition gates
-
-These describe the finished developer edition. They are a definition of done,
-not a work order — the sections above decide sequencing.
 
 1. One command reaches a ready state without manual port or helper management.
 2. All advertised capture modes pass target-Mac acceptance.
 3. Capture preserves quiet speech across microphones and input gains, and
-   silence produces no text. Met for the gate, which is now derived from the
-   input and covered by level fixtures; unverified on real hardware until the
-   acceptance run above.
+   silence produces no text.
 4. Local IPC remains authenticated, versioned, and loopback-only.
 5. Finalized transcripts survive interruption and recovery without overwrite.
 6. Slow inference, long sessions, and a full disk keep memory and storage
-   bounded and never cost finalized text. The full-disk half is met and
-   covered; slow inference and long sessions are not yet exercised.
+   bounded and never cost finalized text.
 7. Offline tests detect no unexpected network access.
 8. Model, permission, device, helper, and disk failures have useful recovery
    actions.
 9. Python, Swift, frontend, real-model smoke, replay, and soak checks pass in
    the supported development environment.
 
-Met: 1, 4, and 5 — gate 5 for transcript parts, on the strength of its tests
-rather than a fresh manual interruption. Gate 3 is met in the code and in
-fixtures but not yet on hardware. Open: 2, 6, 7, 8, and 9. Gate 9 now has a
-frontend runner, but it covers one helper and must be pointed at each file by
-hand.
+Met: 1, 4, 5, and 9 for the Python, Swift, and frontend suites. Gate 2 is met
+for all-system capture on the target Mac and open for per-application and
+combined modes. Gate 3 is met in code and fixtures. Open: 6, 7, and 8.

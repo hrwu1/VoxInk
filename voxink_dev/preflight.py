@@ -25,6 +25,16 @@ DEFAULT_NATIVE_CAPTURE = (
     / "MacOS"
     / "voxink-capture"
 )
+DEFAULT_MENUBAR_APP = (
+    PROJECT_ROOT
+    / "clients"
+    / "macos_capture"
+    / ".build"
+    / "VoxInkMenuBarDev.app"
+    / "Contents"
+    / "MacOS"
+    / "voxink-menubar"
+)
 DEFAULT_OUTPUT_ROOT = Path.home() / "Documents" / "VoxInk"
 DEFAULT_STATE_ROOT = Path.home() / "Library" / "Application Support" / "VoxInk"
 MIN_FREE_BYTES = 512 * 1024 * 1024

@@ -11,11 +11,37 @@ service owns those concerns.
 
 ## Requirements
 
-- macOS 13 or newer
+- macOS 13 or newer; macOS 14.2 or newer for the process-tap backend
 - Xcode/Swift 6 toolchain (the package uses Swift 5 language mode for macOS 13 compatibility)
 - Microphone permission when `--mic` is used
-- Screen & System Audio Recording permission when system audio is used
+- System Audio Recording permission for the tap backend, or Screen & System
+  Audio Recording permission for the ScreenCaptureKit backend
 - A local service listening at the configured WebSocket endpoint
+
+## System audio backends
+
+`--backend auto` (the default) opens a Core Audio process tap and falls back
+to ScreenCaptureKit if the tap cannot be created; `--backend tap` and
+`--backend screencapturekit` force one. Taps intercept a process's audio
+before the output device, so they deliver while the speakers are muted, need
+only the narrower System Audio Recording permission
+(`NSAudioCaptureUsageDescription`), and can isolate one application. With the
+tap backend, every `--app` becomes its own stream (`system-<bundle-id>`) whose
+`stream.start` carries `channel` and `channel_name`; ScreenCaptureKit mixes
+the selected applications into one `system-1` stream.
+
+Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
+`--language en|zh` fixes the language the service transcribes in.
+
+## Menu-bar application
+
+`voxink-menubar` (built by `scripts/build-macos-menubar`) is a control
+surface over the helper's HTTP API, launched by `voxink-dev --menubar` with
+`VOXINK_SERVICE_URL`, `VOXINK_AUTH_SECRET`, and `VOXINK_OUTPUT_ROOT` in its
+environment. It starts, pauses, marks, and stops capture, shows the floating
+captions, opens the transcript folder, and offers push to talk on ⌃⌥Space
+(hold to speak; the finalized text is pasted into the front application when
+Accessibility access is granted, else copied). It captures no audio itself.
 
 Build and test:
 

@@ -651,3 +651,62 @@ This interface design is ready for implementation planning when:
    than CLI-only filesystem scanning.
 6. Canonical transcripts remain immutable to agents; agent output is stored as
    provenance-labelled derived artifacts.
+
+## 15. Implemented Extensions (2026-09-02)
+
+Additive notes for behaviour the sections above left as extension points.
+Each keeps the guarantees of sections 7.2 and 13.
+
+### 15.1 System audio backends and channels
+
+`clients/macos_capture` selects a system-audio backend: Core Audio process
+taps (macOS 14.2+, the default) or ScreenCaptureKit (fallback). With taps,
+selected-application capture opens one stream per application. Such a stream
+carries `channel` (bundle identifier) and `channel_name` in `stream.start`,
+its transcript events carry the same fields, the Markdown source tag becomes
+`[SYSTEM: Name]`, and retention writes `system-<bundle>-part-NNN.wav`.
+
+### 15.2 Partial captions
+
+While an utterance is open the service may emit `transcript.partial` events
+with `is_final: false` under one segment id; the final for that utterance uses
+the same id. Partials are never persisted. `/health` reports
+`capabilities.partial_results`.
+
+### 15.3 Echo suppression
+
+When a session has both microphone and system streams, a microphone chunk
+whose normalized cross-correlation with a system channel's recent audio (lags
+up to 300 ms) exceeds a threshold is dropped and reported as
+`audio.echo_suppressed`. The system audio is never transcribed twice.
+
+### 15.4 Annotations
+
+Two non-transcript blocks may appear in canonical parts: a marker,
+`**[HH:MM:SS.mmm] [MARK]**` followed by an optional label line, and a quoted
+translation, `> [HH:MM:SS.mmm · lang] text`. Readers of canonical parts
+(`voxink_core.diarization.transcript`) skip both.
+
+### 15.5 Translation
+
+`TranslationProvider` (`voxink_core.translation`) translates finalized text on
+device. The service publishes `transcript.translation` events and a
+`translation` feed entry; the canonical block is unchanged.
+
+### 15.6 Grants and audit (section 14.5, implemented)
+
+`voxink_core.grants.GrantStore` holds grants (scopes, application allow-list,
+`max_duration_s`, `retain_audio`, expiry, single use) and pending requests
+with claim secrets. Grant tokens (`vxg_…`) authenticate the control API; the
+owner credential remains unrestricted. Missing scope returns HTTP 403 with
+`{"code": "approval_required", "request_id": …, "claim_secret": …}`. Every
+control mutation is appended to `audit.jsonl`. `voxink_mcp` is the agent
+adapter over the shared client.
+
+### 15.7 Speaker identity
+
+`DiarizationResult.embeddings` carries one voice embedding per anonymous
+speaker; `speaker-turns.json` stores them under `speakers`, with optional
+`name`, `registry_id`, and `similarity`. `voxink_core.speakers.SpeakerRegistry`
+(state directory, 0600, opt-in) matches later sessions by cosine similarity.
+Names are rendered in the derived Markdown view only.

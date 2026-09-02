@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import webbrowser
 
 from .preflight import (
+    DEFAULT_MENUBAR_APP,
     DEFAULT_MODEL_PATH,
     DEFAULT_NATIVE_CAPTURE,
     DEFAULT_OUTPUT_ROOT,
@@ -119,7 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="use the interactive Terminal microphone controls",
     )
-    parser.set_defaults(web=True)
+    interface.add_argument(
+        "--menubar",
+        dest="menubar",
+        action="store_true",
+        help="run the menu-bar application with floating captions and push to talk",
+    )
+    parser.add_argument("--menubar-app", type=Path, default=DEFAULT_MENUBAR_APP, help=argparse.SUPPRESS)
+    parser.set_defaults(web=True, menubar=False)
     return parser
 
 
@@ -127,6 +135,19 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.list_apps:
         return _list_applications(args.native_capture)
+    if args.menubar:
+        # The menu-bar app is a control surface over the helper, like the
+        # browser: it needs the native helper for capture, not Python capture.
+        args.web = True
+        menubar = args.menubar_app.expanduser().resolve()
+        if not menubar.is_file() or not menubar.stat().st_mode & 0o111:
+            print(
+                "VoxInk cannot start:\n"
+                f"- The menu-bar application is not built: {menubar}\n"
+                "  Build it with: ./scripts/build-macos-menubar",
+                file=sys.stderr,
+            )
+            return 2
     try:
         capture_plan = _build_capture_plan(args.sources, args.applications)
     except ValueError as exc:
@@ -182,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
             f"Helper ready on a private loopback port "
             f"(protocol {health['protocol_version']}, provider {health['provider']})."
         )
+        if args.menubar:
+            return _run_menubar(
+                supervisor, diagnostics, report.output_root, args.menubar_app.expanduser().resolve()
+            )
         if args.web and not capture_plan.uses_native_capture:
             return _run_web_ui(
                 supervisor, health, diagnostics, report.output_root, args.retain_audio
@@ -323,6 +348,40 @@ def _run_capture_process(
     else:
         print("Session stopped before any transcript text was finalized.")
     return int(capture.returncode or 0)
+
+
+def _run_menubar(
+    supervisor: HelperSupervisor,
+    diagnostics: DiagnosticLog,
+    output_root: Path,
+    executable: Path,
+) -> int:
+    """Run the menu-bar application until it quits; it drives the helper itself."""
+    environment = supervisor.capture_environment()
+    environment["VOXINK_SERVICE_URL"] = supervisor.base_url
+    environment["VOXINK_OUTPUT_ROOT"] = str(output_root)
+    application = subprocess.Popen([str(executable)], env=environment)
+    diagnostics.emit("menubar.started", component="menubar", pid=application.pid)
+    print("VoxInk is in the menu bar. Quit it from the menu, or press Ctrl-C here.")
+    try:
+        try:
+            while application.poll() is None:
+                helper = supervisor.process
+                if helper is None or helper.poll() is not None:
+                    raise SupervisorError("transcription helper exited unexpectedly")
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            application.terminate()
+            application.wait(timeout=10)
+    finally:
+        if application.poll() is None:
+            application.kill()
+            application.wait(timeout=5)
+        diagnostics.emit(
+            "menubar.stopped", component="menubar", pid=application.pid,
+            return_code=application.returncode,
+        )
+    return int(application.returncode or 0)
 
 
 def _run_web_ui(

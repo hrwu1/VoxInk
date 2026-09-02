@@ -560,3 +560,23 @@ provenance, anonymous-label default, or immutable canonical transcript.
 - `voxink_core/models.py`
 - `voxink_core/persistence/audio.py`
 - `voxink_core/persistence/markdown.py`
+
+## 16. Speaker identity (implemented 2026-09-02)
+
+Version one's "no voiceprints, no cross-session identity" boundary was lifted
+deliberately and narrowly:
+
+- The worker returns pyannote's per-speaker centroid embeddings, re-keyed to
+  the anonymous ids. When the pipeline skipped clustering (one speaker) its
+  centroids are NaN, and the adapter embeds the speaker's longest exclusive
+  turns (up to 60 s) with the pipeline's embedding model instead.
+- `speaker-turns.json` gains a `speakers` section with the embedding and an
+  optional name, registry id, and similarity. Embeddings never leave the
+  session directory unless the user remembers a voice.
+- The registry (`speakers.json` in the state directory, 0600) is opt-in per
+  voice through "Remember this voice". Matching is cosine similarity above a
+  strict threshold; one remembered voice claims at most one session speaker.
+- Naming re-renders `transcript-with-speakers.md` from the canonical blocks.
+  Canonical parts are still never written.
+- System-channel speakers keep the session-local `SYSTEM_SPEAKER_nn` space
+  and are not matched against the registry.

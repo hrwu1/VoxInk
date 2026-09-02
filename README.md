@@ -25,9 +25,23 @@ and Transformers offline modes and loads the model exclusively from the local
 - Minimal always-on-top, click-through-capable macOS caption panel.
 - Custom vocabulary that biases recognition and corrects finalized text,
   editable from a browser tab or as a plain file.
+- System audio through Core Audio process taps (macOS 14.2+), which work
+  while the speakers are muted and need only the System Audio Recording
+  permission; ScreenCaptureKit remains the fallback.
+- Partial captions while a sentence is still being spoken, replaced in
+  place by the final.
+- One labelled channel per selected application, and suppression of the
+  microphone's echo of what the system just played.
+- On-device English/Chinese translation of each finalized caption.
+- Timestamped markers, a microphone picker, a language override, and an
+  "open folder" action in the browser; a menu-bar app with push to talk.
+- Speaker diarization after Stop, with forced-alignment splitting, and a
+  local registry that recognizes voices you chose to remember.
+- Consent-gated agent access: scoped grants, an audit trail, and an MCP
+  server.
 
-Speaker diarization, forced-alignment timestamps, online providers, and polished
-UI controls remain extension points rather than completed features.
+Online providers, Windows and Linux capture, and a signed release remain
+extension points rather than completed features.
 
 ## One-command developer workflow
 
@@ -191,6 +205,106 @@ Private operational diagnostics are stored under
 `~/Library/Application Support/VoxInk/logs/`. They contain process state and
 protocol metadata, never transcript text, raw audio, or the launch credential.
 
+### Live captions, translation, markers, and settings
+
+Captions appear while you are still speaking: the helper re-transcribes the
+open utterance about once a second (less often when inference is slower than
+that) and sends a `transcript.partial` under a stable segment id; the final
+replaces it in place. Partial text never reaches Markdown. Turn it off with
+`--no-partial-captions`.
+
+The **Settings** button (⌘ in the top bar) chooses the microphone, fixes the
+language to English or Chinese instead of detecting it, and turns on
+translation. With `models/Qwen3-0.6B` installed (Apache-2.0; a manifest is
+tracked, the weights are not), each finalized caption is translated into the
+other language on this Mac, shown as a second line, and quoted under the block
+in Markdown as `> [00:00:03.200 · zh] …`. The 0.6B model is fast (about 0.2 s
+per sentence on Apple Silicon) but small; expect readable, not polished,
+translations. Point `--translation-model` at a larger local instruct model
+for better ones.
+
+**Mark** (or the M key) writes `**[00:12:03.200] [MARK]**` into the transcript
+at the current moment. **Open folder** on the last-session strip reveals the
+session in Finder. Both are also CLI commands (`capture mark`,
+`transcripts open`).
+
+### System audio, channels, and echo
+
+Selected-application capture opens one Core Audio process tap per application,
+so the transcript labels each block with the application it came from
+(`[SYSTEM: Zoom]`), retained audio keeps one WAV track per application
+(`system-us.zoom.xos-part-001.wav`), and the browser shows the application
+name on the caption. All-system capture is one tap that excludes VoxInk's
+own audio. Taps intercept audio before the output device, so they keep
+delivering while the speakers are muted; the run that verified this captured
+837 frames at 99% nonzero bytes from a muted player, where ScreenCaptureKit
+delivered silence.
+
+When the speakers are on, the microphone hears the remote side a few tens of
+milliseconds after the system track played it. VoxInk compares each
+microphone utterance with what the system channels played over the same
+window and drops the ones that are a delayed copy (`audio.echo_suppressed`
+on the stream), so the same sentence is not transcribed twice under two
+labels. Turn it off with `--no-echo-suppression`.
+
+### The menu-bar application
+
+```sh
+./scripts/build-macos-capture
+./scripts/build-macos-menubar
+./scripts/voxink-dev --menubar
+```
+
+The menu bar item starts and stops capture, pauses, marks, shows or hides the
+floating captions, and opens the transcript folder. **Enable push to talk**
+holds a microphone session open; hold ⌃⌥Space to speak, release to have the
+finalized text pasted into the front application (with Accessibility access;
+otherwise it waits on the clipboard). The app is a control surface over the
+same local API the browser uses and never captures audio itself.
+
+### Speakers that keep their names
+
+With **Identify speakers** on, diarization runs after Stop and labels
+anonymous speakers. Click a speaker label in the browser to name it; tick
+**Remember this voice** and the speaker's embedding is stored in
+`~/Library/Application Support/VoxInk/speakers.json` (mode 0600, this Mac
+only). Later sessions compare their speakers against remembered voices and
+name a match automatically; one remembered voice claims at most one speaker
+per session, and nothing below the similarity threshold
+(`--speaker-threshold`, default 0.62) is named. Names appear in
+`transcript-with-speakers.md`; the canonical transcript never changes.
+`voxink speakers list|name|rename|forget` does the same from the CLI.
+
+Recognition quality is unverified on real multi-speaker sessions: on the one
+far-field session available, embeddings of the dominant speaker across
+separate clips scored 0.27, below the threshold, so recognition may stay
+silent there. The threshold is strict on purpose.
+
+### Agent access under consent
+
+Agents act under a **grant** the owner issues or approves in the browser's
+**Agent access** tab. A grant carries scopes, an optional application
+allow-list, a maximum recording length (the capture stops when it runs out),
+whether audio may be kept, an expiry, and single use. A grant token
+authenticates the control API; a call that lacks a scope returns
+`approval_required` together with a pending request the tab shows, and a
+claim secret only the caller sees. Revoking a grant stops any capture it
+started. Every control mutation writes one line to `audit.jsonl` (no
+transcript text, no credentials).
+
+```sh
+./scripts/voxink permissions request --scope capture.system --max-minutes 45 --client "Claude Code"
+# approve it in the Agent access tab, then
+./scripts/voxink permissions claim REQUEST_ID --claim-secret ... --out ~/.voxink-token --wait
+VOXINK_GRANT_TOKEN_FILE=~/.voxink-token ./scripts/voxink capture start --source system
+```
+
+`scripts/voxink-mcp` serves the same operations to an MCP client over stdio
+(`voxink_capture_start`, `voxink_capture_events` with a long-poll wait so an
+agent can follow a meeting as it happens, `voxink_transcript_show`, and the
+request/claim consent tools). Point it at a token file with `--token-file`
+or the environment variable above; without one it can only ask.
+
 ## Scripting and agents: the `voxink` command
 
 `scripts/voxink-dev` is the interactive launcher. `scripts/voxink` is the
@@ -262,10 +376,23 @@ Every command also accepts `--schema-version`, `--timeout`, `--request-id`,
 ./scripts/voxink applications list            # capturable applications
 
 ./scripts/voxink capture start --source microphone --source system
+./scripts/voxink capture start --source applications --app us.zoom.xos \
+    --device BuiltInMicrophoneDevice --language zh --translate
 ./scripts/voxink capture watch                # stream events until the session ends
+./scripts/voxink capture mark "decision"      # timestamped marker
 ./scripts/voxink capture pause
 ./scripts/voxink capture resume
 ./scripts/voxink capture stop --wait
+./scripts/voxink transcripts open             # reveal the last session in Finder
+
+./scripts/voxink speakers list
+./scripts/voxink speakers name SESSION_ID MIC_SPEAKER_00 "Wei" --remember
+
+./scripts/voxink permissions scopes
+./scripts/voxink permissions request --scope transcripts.read --client "agent"
+./scripts/voxink permissions claim REQUEST_ID --claim-secret S --out TOKEN_FILE
+./scripts/voxink permissions list             # owner only
+./scripts/voxink permissions audit --limit 50 # owner only
 
 ./scripts/voxink sessions list
 ./scripts/voxink sessions show SESSION_ID
@@ -287,11 +414,12 @@ that reconnects with `--after` resumes without replaying or skipping events.
 - `sessions list` reports only sessions the running helper holds open. Completed
   and interrupted sessions are discoverable through `transcripts list` until the
   durable session registry lands.
-- Scoped grants are not enforced. Possession of the loopback credential
-  authorizes every scope in this edition, and `capabilities` says so. The
-  signed application will issue real grants; no CLI flag will bypass that gate.
-- The `audio`, `config`, `diagnostics`, and `permissions` command groups,
-  transcript search and export, and derived agent artifacts are deferred.
+- Scoped grants are enforced for grant tokens. The owner credential in
+  `control-endpoint.json` still authorizes every scope, and a process running
+  as the same user can read that file; the signed application will keep that
+  credential to itself. `capabilities` reports which credential a call holds.
+- The `audio`, `config`, and `diagnostics` command groups, transcript search
+  and export, and derived agent artifacts are deferred.
 - `capture start` reaches the control plane through `/v1/ui/capture/*`, a
   UI-namespaced route. Extracting a domain capture route is deferred with the
   durable session registry (`PROJECT_SPEC.md` section 14.2).
@@ -434,6 +562,12 @@ Run all fast Python tests:
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
+```
+
+Frontend unit tests (every `frontend/tests/*.test.ts`) and the static build:
+
+```sh
+cd frontend && pnpm install --offline && npm test && npm run build:local
 ```
 
 Run the real local model smoke test:
