@@ -19,4 +19,12 @@ The local browser UI discovers complete immediate-child model packages through
 their `voxink-model-manifest.json` files. It can switch installed profiles while
 capture is stopped; command-line selection remains the default for each launch.
 
+Speaker diarization needs `models/pyannote-speaker-diarization-community-1/`,
+and splitting a transcript block between speakers additionally needs
+`models/Qwen3-ForcedAligner-0.6B/` (`Qwen/Qwen3-ForcedAligner-0.6B` on the
+Hugging Face hub, Apache-2.0, not gated). Both are optional: without the
+diarization package speakers are not found; without the aligner, blocks are
+labeled whole. Each directory keeps a tracked `voxink-model-manifest.json`
+recording the revision and per-file digests the code was built against.
+
 Model weights are runtime assets and are intentionally excluded from Git.

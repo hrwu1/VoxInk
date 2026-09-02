@@ -70,5 +70,11 @@ models/pyannote-speaker-diarization-community-1/
 models/pyannote-speaker-diarization-community-1/*
 !models/pyannote-speaker-diarization-community-1/voxink-model-manifest.json
 
+# Downloaded local forced-alignment model weights
+models/Qwen3-ForcedAligner-0.6B/
+!models/Qwen3-ForcedAligner-0.6B/
+models/Qwen3-ForcedAligner-0.6B/*
+!models/Qwen3-ForcedAligner-0.6B/voxink-model-manifest.json
+
 # TypeScript incremental build state
 *.tsbuildinfo
