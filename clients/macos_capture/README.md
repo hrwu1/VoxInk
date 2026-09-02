@@ -130,6 +130,16 @@ a host UI can map these directly to `CaptionItem`. Local capture diagnostics are
 delivered through a separate status callback because sending them as unknown
 WebSocket messages would violate the service contract.
 
+If a stream's socket dies mid-session, the next frame reopens it with a fresh
+`stream.start` and the status callback reports `service_reconnecting`, then
+`service_reconnected` once the service answers `stream.ready`. The service
+keeps the session open for a grace period, so a prompt reconnect leaves the
+transcript whole. Reconnects are bounded (`StreamReconnectPolicy`, three
+consecutive attempts): when the budget is spent the stream is abandoned with a
+`stream_abandoned` error and later frames are dropped, and a
+`session_unavailable` error from the service marks the stream dead at once,
+since that session has already been finalized.
+
 ## Frame delivery, ordering, and backpressure
 
 Every frame passes through one bounded queue per source, drained by a single

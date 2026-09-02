@@ -127,7 +127,14 @@ Server messages:
 | `stream.paused` / `stream.resumed` | control applied, with the resulting `session_state` |
 | `stream.lag` | transcription is slower than capture (`real_time_factor`) |
 | `stream.stopped` | stream released |
-| `error` | `code` and `message`; the stream survives a `transcript_not_stored` error |
+| `error` | `code` and `message`; the stream survives a `transcript_not_stored` error, but `session_unavailable` closes it |
+
+A socket that closes without `stream.stop` is not a stop. The service holds
+the session open for a grace period (`stream_grace_seconds`, 15 s by default)
+so a client whose connection dropped can send `stream.start` again with the
+same `stream_id` and continue; the session is finalized only if nothing rejoins
+in time. Once a session has stopped, audio or a final for it is answered with
+`session_unavailable` and the socket is closed: nothing after Stop is retained.
 
 Exactly one of `transcript.final`, `audio.accepted`, or `audio.ignored` answers
 each `audio.frame`. Overlapping audio that the model transcribes twice is

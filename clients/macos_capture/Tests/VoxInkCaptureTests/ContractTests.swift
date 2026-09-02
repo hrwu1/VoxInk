@@ -50,6 +50,43 @@ final class SessionIdentifierTests: XCTestCase {
     }
 }
 
+final class StreamReconnectPolicyTests: XCTestCase {
+    func testFirstSocketIsAPlainConnectAndLaterOnesAreReportedReconnects() {
+        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 3)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
+        XCTAssertFalse(policy.streamReady("microphone-1"))
+        XCTAssertEqual(.reconnect(attempt: 1, limit: 3), policy.socketNeeded(for: "microphone-1"))
+        XCTAssertTrue(policy.streamReady("microphone-1"))
+    }
+
+    func testAnAcceptedReconnectResetsTheBudget() {
+        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 2)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1"))
+        XCTAssertEqual(.reconnect(attempt: 1, limit: 2), policy.socketNeeded(for: "system-1"))
+        XCTAssertEqual(.reconnect(attempt: 2, limit: 2), policy.socketNeeded(for: "system-1"))
+        XCTAssertTrue(policy.streamReady("system-1"))
+        XCTAssertEqual(.reconnect(attempt: 1, limit: 2), policy.socketNeeded(for: "system-1"))
+    }
+
+    func testAnExhaustedBudgetAbandonsOnceThenDropsSilently() {
+        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 1)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
+        XCTAssertEqual(.reconnect(attempt: 1, limit: 1), policy.socketNeeded(for: "microphone-1"))
+        XCTAssertEqual(.abandon, policy.socketNeeded(for: "microphone-1"))
+        XCTAssertEqual(.dead, policy.socketNeeded(for: "microphone-1"))
+        XCTAssertTrue(policy.isDead("microphone-1"))
+    }
+
+    func testARefusedSessionKillsTheStreamWithoutSpendingTheBudget() {
+        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 3)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
+        policy.sessionUnavailable("microphone-1")
+        XCTAssertEqual(.dead, policy.socketNeeded(for: "microphone-1"))
+        // Other streams of the same session are judged on their own.
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1"))
+    }
+}
+
 final class ContractTests: XCTestCase {
     func testTranscriptWireEventMapsToCaption() throws {
         let json = Data(#"{"segment_id":"seg-1","source":"system","text":"hello","start_ms":10,"end_ms":30,"is_final":true}"#.utf8)

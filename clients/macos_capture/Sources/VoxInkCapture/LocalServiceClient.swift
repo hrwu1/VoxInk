@@ -115,6 +115,7 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     private var sessionSources = [AudioSource]()
     private var sessionStartedNanoseconds: UInt64 = 0
     private var sockets = [String: URLSessionWebSocketTask]()
+    private var reconnects = StreamReconnectPolicy()
     private var sendTails = [String: Task<Void, Error>]()
     private var stoppedWaiters = [String: CheckedContinuation<Void, Never>]()
 
@@ -275,6 +276,29 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     private func socket(for frame: AudioFrame) async throws -> URLSessionWebSocketTask {
         if let socket = sockets[frame.streamID] { return socket }
         guard let session, let sessionID else { throw URLError(.notConnectedToInternet) }
+        switch reconnects.socketNeeded(for: frame.streamID) {
+        case .connect:
+            break
+        case .reconnect(let attempt, let limit):
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID,
+                source: frame.source,
+                level: .warning,
+                code: "service_reconnecting",
+                message: "Reconnecting stream \(frame.streamID) to the service (attempt \(attempt) of \(limit)); the recording continues."
+            ))
+        case .abandon:
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID,
+                source: frame.source,
+                level: .error,
+                code: "stream_abandoned",
+                message: "Stream \(frame.streamID) could not be reconnected to the service after \(reconnects.maximumConsecutiveReconnects) attempts; its audio is no longer being recorded. Stop and start again."
+            ))
+            throw CaptureError.streamAbandoned(frame.streamID)
+        case .dead:
+            throw CaptureError.streamAbandoned(frame.streamID)
+        }
         var request = URLRequest(url: endpoint)
         if let authToken { request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization") }
         let task = session.webSocketTask(with: request)
@@ -319,7 +343,22 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                 } else if let envelope = try? decoder.decode(TypeOnlyResponse.self, from: data),
                           envelope.type == "stream.stopped" {
                     completeStopAcknowledgement(streamID: streamID)
+                } else if let envelope = try? decoder.decode(TypeOnlyResponse.self, from: data),
+                          envelope.type == "stream.ready" {
+                    if reconnects.streamReady(streamID) {
+                        statusHandler?(CaptureStatusEvent(
+                            sessionID: sessionID ?? "unknown",
+                            source: nil,
+                            level: .info,
+                            code: "service_reconnected",
+                            message: "Stream \(streamID) reconnected to the service."
+                        ))
+                    }
                 } else if let response = try? decoder.decode(ErrorResponse.self, from: data), response.type == "error" {
+                    if response.code == "session_unavailable" {
+                        // The session is finalized; a reconnect would only be refused again.
+                        reconnects.sessionUnavailable(streamID)
+                    }
                     statusHandler?(CaptureStatusEvent(
                         sessionID: sessionID ?? "unknown",
                         source: nil,
@@ -333,13 +372,16 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                 completeStopAcknowledgement(streamID: streamID)
                 if sockets[streamID] === task {
                     sockets.removeValue(forKey: streamID)
-                    statusHandler?(CaptureStatusEvent(
-                        sessionID: sessionID ?? "unknown",
-                        source: nil,
-                        level: .warning,
-                        code: "service_connection_closed",
-                        message: error.localizedDescription
-                    ))
+                    // A refused stream already reported why; its close is expected.
+                    if !reconnects.isDead(streamID) {
+                        statusHandler?(CaptureStatusEvent(
+                            sessionID: sessionID ?? "unknown",
+                            source: nil,
+                            level: .warning,
+                            code: "service_connection_closed",
+                            message: error.localizedDescription
+                        ))
+                    }
                 }
                 return
             }

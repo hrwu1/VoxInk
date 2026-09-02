@@ -153,6 +153,7 @@ public enum CaptureError: LocalizedError {
     case audioFormatUnavailable(String)
     case conversionFailed
     case tapUnavailable(String)
+    case streamAbandoned(String)
 
     public var errorDescription: String? {
         switch self {
@@ -176,6 +177,67 @@ public enum CaptureError: LocalizedError {
             return "AVAudioConverter could not normalize an audio frame."
         case .tapUnavailable(let detail):
             return "System audio could not be tapped: \(detail)"
+        case .streamAbandoned(let streamID):
+            return "Stream \(streamID) is no longer connected to the service; its audio is not being recorded."
         }
     }
+}
+
+/// What a stream does when it has no socket.
+///
+/// The first time is an ordinary connect. After that the socket died under a
+/// live stream, and reopening it is a reconnect the user must hear about: the
+/// service holds the session open for a grace period, so a prompt reconnect
+/// keeps the recording whole, but one that keeps failing must stop trying
+/// rather than reopen a socket on every 20 ms frame. A service that says the
+/// session is unavailable has already finalized it; nothing sent afterwards
+/// would be kept, so the stream is dead from then on.
+public struct StreamReconnectPolicy: Sendable {
+    public enum Decision: Equatable, Sendable {
+        case connect
+        case reconnect(attempt: Int, limit: Int)
+        /// The budget ran out just now; report it once.
+        case abandon
+        /// Already abandoned or refused; drop the frame silently.
+        case dead
+    }
+
+    public let maximumConsecutiveReconnects: Int
+    private var started = Set<String>()
+    private var attempts = [String: Int]()
+    private var dead = Set<String>()
+
+    public init(maximumConsecutiveReconnects: Int = 3) {
+        self.maximumConsecutiveReconnects = maximumConsecutiveReconnects
+    }
+
+    /// Called when a frame arrives for a stream with no socket.
+    public mutating func socketNeeded(for streamID: String) -> Decision {
+        if dead.contains(streamID) { return .dead }
+        if !started.contains(streamID) {
+            started.insert(streamID)
+            return .connect
+        }
+        let attempt = (attempts[streamID] ?? 0) + 1
+        if attempt > maximumConsecutiveReconnects {
+            dead.insert(streamID)
+            return .abandon
+        }
+        attempts[streamID] = attempt
+        return .reconnect(attempt: attempt, limit: maximumConsecutiveReconnects)
+    }
+
+    /// The service accepted the stream. Returns whether this closed a reconnect.
+    public mutating func streamReady(_ streamID: String) -> Bool {
+        let reconnected = (attempts[streamID] ?? 0) > 0
+        attempts[streamID] = 0
+        return reconnected
+    }
+
+    /// The service refused the stream because its session is gone.
+    public mutating func sessionUnavailable(_ streamID: String) {
+        dead.insert(streamID)
+    }
+
+    public func isDead(_ streamID: String) -> Bool { dead.contains(streamID) }
 }
