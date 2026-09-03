@@ -205,7 +205,11 @@ carries one small label with the time of its first caption. Long sentences
 wrap in full; partial captions are dimmed and replaced in place by stable
 event ID; translations sit under their caption; marks are amber rows. The
 stream follows new captions until you scroll up, when a "Latest" chip
-appears to jump back down. Hosts feed it through `show(_:)`, `showMark`,
+appears to jump back down. After five seconds without a caption or mark
+(`idleCollapseDelay`) the panel shrinks into a small bubble at its bottom
+centre that shows only the status dot; hovering or clicking the bubble, or
+the next caption, brings the panel back in the same place. It stays open
+while the pointer is over it or while you have scrolled back. Hosts feed it through `show(_:)`, `showMark`,
 `attachTranslation`, and `setStatus`; `show` never presents the window, so
 hosts call `showWindow` when they want it on screen. The CLI prints received
 transcript events and maps them into the panel.

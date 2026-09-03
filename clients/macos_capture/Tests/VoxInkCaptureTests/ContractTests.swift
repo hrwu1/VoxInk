@@ -530,3 +530,20 @@ final class CaptionPanelModelTests: XCTestCase {
         XCTAssertTrue(model.following)
     }
 }
+
+final class CaptionPanelGeometryTests: XCTestCase {
+    func testTheBubbleSitsAtTheBottomCentreAndExpandsBackToTheSameFrame() {
+        let expanded = NSRect(x: 100, y: 50, width: 560, height: 220)
+        let bubble = FloatingCaptionPanelController.bubbleFrame(for: expanded)
+        XCTAssertEqual(bubble.midX, expanded.midX)
+        XCTAssertEqual(bubble.minY, expanded.minY)
+        XCTAssertEqual(bubble.size, NSSize(width: 40, height: 40))
+        XCTAssertEqual(FloatingCaptionPanelController.expandedFrame(for: bubble, size: expanded.size), expanded)
+    }
+
+    func testADraggedBubbleCarriesTheExpandedFrameWithIt() {
+        let moved = NSRect(x: 300, y: 500, width: 40, height: 40)
+        let expanded = FloatingCaptionPanelController.expandedFrame(for: moved, size: NSSize(width: 400, height: 200))
+        XCTAssertEqual(expanded, NSRect(x: 120, y: 500, width: 400, height: 200))
+    }
+}

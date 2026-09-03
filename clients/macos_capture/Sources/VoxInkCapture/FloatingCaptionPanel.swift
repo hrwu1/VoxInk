@@ -55,12 +55,27 @@ public enum CaptionPanelStatus: Equatable, Sendable {
 /// transcript events through `show(_:)`, marks through `showMark`, and its
 /// session state through `setStatus`; the panel keeps a bounded, scrollable
 /// history grouped into speaker turns and remembers its frame and text size.
+/// After `idleCollapseDelay` without a caption it shrinks to a status bubble
+/// that expands again on hover or when the next caption arrives.
 @MainActor
 public final class FloatingCaptionPanelController {
-    private static let frameName = "VoxInkFloatingCaptions"
+    nonisolated static let bubbleDiameter: CGFloat = 40
+    private static let frameKey = "VoxInkFloatingCaptionsFrame"
+    private static let defaultSize = NSSize(width: 560, height: 220)
+    private static let minimumSize = NSSize(width: 340, height: 140)
     private let model = CaptionPanelModel()
     private let panel: NSPanel
     private var scrollMonitor: Any?
+    private var frameObservers = [NSObjectProtocol]()
+    private var collapseTimer: Timer?
+    /// Size of the panel when expanded; the bubble keeps it while collapsed.
+    private var expandedSize: NSSize
+    private var animating = false
+
+    /// Seconds without a caption or mark before the panel collapses into its
+    /// bubble. Zero or less disables collapsing.
+    public var idleCollapseDelay: TimeInterval = 5
+    public private(set) var isCollapsed = false
 
     /// Called when the person hides the panel from its own toolbar, so a
     /// host's "show captions" toggle can follow.
@@ -68,11 +83,12 @@ public final class FloatingCaptionPanelController {
 
     public init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 220),
+            contentRect: NSRect(origin: .zero, size: Self.defaultSize),
             styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
+        expandedSize = Self.defaultSize
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
@@ -81,15 +97,23 @@ public final class FloatingCaptionPanelController {
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.isMovableByWindowBackground = true
-        panel.minSize = NSSize(width: 340, height: 140)
+        panel.minSize = Self.minimumSize
         panel.animationBehavior = .utilityWindow
         // Captions sit over arbitrary content; a pinned dark look keeps them legible.
         panel.appearance = NSAppearance(named: .darkAqua)
         model.onHide = { [weak self] in self?.hideFromPanel() }
+        model.onExpand = { [weak self] in self?.expand() }
         panel.contentView = NSHostingView(rootView: FloatingCaptionView(model: model))
-        let restored = panel.setFrameUsingName(Self.frameName)
-        panel.setFrameAutosaveName(Self.frameName)
-        if !restored { placeAboveDock() }
+        // Restore the last frame if it is still on a connected display.
+        if let saved = UserDefaults.standard.string(forKey: Self.frameKey),
+           case let frame = NSRectFromString(saved),
+           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) })
+        {
+            panel.setFrame(frame, display: false)
+            expandedSize = frame.size
+        } else {
+            placeAboveDock()
+        }
         // Scrolling up stops the stream from following new captions; the
         // view turns following back on when the bottom comes into view.
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -98,20 +122,30 @@ public final class FloatingCaptionPanelController {
             }
             return event
         }
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            frameObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: panel, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.rememberFrame() }
+            })
+        }
     }
 
     public func show(_ item: CaptionItem) {
         model.upsert(item)
+        wake()
     }
 
     /// Attach a translation that arrived after its caption was shown.
     public func attachTranslation(_ translation: String, to id: String) {
         model.attachTranslation(translation, to: id)
+        if !isCollapsed { scheduleCollapse() }
     }
 
     /// Add a timestamped marker row to the stream.
     public func showMark(atMilliseconds milliseconds: Int64, label: String = "") {
         model.addMark(atMilliseconds: milliseconds, label: label)
+        wake()
     }
 
     public func setStatus(_ status: CaptionPanelStatus) {
@@ -120,9 +154,11 @@ public final class FloatingCaptionPanelController {
 
     public func showWindow() {
         panel.orderFrontRegardless()
+        wake()
     }
 
     public func hideWindow() {
+        collapseTimer?.invalidate()
         panel.orderOut(nil)
     }
 
@@ -132,6 +168,91 @@ public final class FloatingCaptionPanelController {
 
     public func clear() {
         model.clear()
+    }
+
+    // MARK: Collapse and expand
+
+    /// Where the bubble sits for an expanded frame: its bottom centre.
+    nonisolated static func bubbleFrame(for expanded: NSRect) -> NSRect {
+        NSRect(
+            x: expanded.midX - bubbleDiameter / 2, y: expanded.minY,
+            width: bubbleDiameter, height: bubbleDiameter
+        )
+    }
+
+    /// The expanded frame whose bottom centre is a given bubble.
+    nonisolated static func expandedFrame(for bubble: NSRect, size: NSSize) -> NSRect {
+        NSRect(x: bubble.midX - size.width / 2, y: bubble.minY, width: size.width, height: size.height)
+    }
+
+    /// Expand if collapsed, and start the idle countdown again.
+    private func wake() {
+        if isCollapsed { expand() } else { scheduleCollapse() }
+    }
+
+    private func scheduleCollapse() {
+        collapseTimer?.invalidate()
+        guard idleCollapseDelay > 0 else { return }
+        collapseTimer = Timer.scheduledTimer(withTimeInterval: idleCollapseDelay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.collapseIfIdle() }
+        }
+    }
+
+    private var pointerIsOverPanel: Bool {
+        panel.isVisible && !panel.ignoresMouseEvents && panel.frame.contains(NSEvent.mouseLocation)
+    }
+
+    private func collapseIfIdle() {
+        guard !isCollapsed, !animating, panel.isVisible else { return }
+        // Someone reading (pointer over the panel, or scrolled back) keeps it open.
+        guard model.following, !pointerIsOverPanel else { scheduleCollapse(); return }
+        isCollapsed = true
+        animating = true
+        expandedSize = panel.frame.size
+        model.collapsed = true
+        panel.styleMask.remove(.resizable)
+        panel.minSize = NSSize(width: Self.bubbleDiameter, height: Self.bubbleDiameter)
+        animateFrame(to: Self.bubbleFrame(for: panel.frame)) { [weak self] in
+            self?.animating = false
+        }
+    }
+
+    private func expand() {
+        guard isCollapsed, !animating else { return }
+        collapseTimer?.invalidate()
+        animating = true
+        var frame = Self.expandedFrame(for: panel.frame, size: expandedSize)
+        if let screen = panel.screen ?? NSScreen.main { frame = panel.constrainFrameRect(frame, to: screen) }
+        animateFrame(to: frame) { [weak self] in
+            guard let self else { return }
+            self.animating = false
+            self.isCollapsed = false
+            self.panel.styleMask.insert(.resizable)
+            self.panel.minSize = Self.minimumSize
+            self.model.collapsed = false
+            self.rememberFrame()
+            self.scheduleCollapse()
+        }
+    }
+
+    private func animateFrame(to frame: NSRect, completion: @escaping @MainActor () -> Void) {
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(frame, display: true)
+        }, completionHandler: { [weak self] in
+            Task { @MainActor in
+                self?.panel.invalidateShadow()
+                completion()
+            }
+        })
+    }
+
+    /// Persist the expanded frame, even while the bubble is what moved.
+    private func rememberFrame() {
+        guard !animating else { return }
+        let frame = isCollapsed ? Self.expandedFrame(for: panel.frame, size: expandedSize) : panel.frame
+        UserDefaults.standard.set(NSStringFromRect(frame), forKey: Self.frameKey)
     }
 
     private func hideFromPanel() {
@@ -215,7 +336,10 @@ final class CaptionPanelModel: ObservableObject {
     @Published var status: CaptionPanelStatus = .idle
     /// Whether the stream scrolls to each new caption.
     @Published var following = true
+    /// Whether the panel is showing its idle bubble instead of the stream.
+    @Published var collapsed = false
     var onHide: (() -> Void)?
+    var onExpand: (() -> Void)?
 
     var turns: [CaptionTurn] { CaptionTurn.group(entries) }
 
@@ -297,6 +421,20 @@ private struct FloatingCaptionView: View {
     @State private var hovering = false
 
     var body: some View {
+        ZStack(alignment: .bottom) {
+            if model.collapsed {
+                CollapsedBubble(status: model.status) { model.onExpand?() }
+                    .frame(width: FloatingCaptionPanelController.bubbleDiameter, height: FloatingCaptionPanelController.bubbleDiameter)
+                    .transition(.opacity)
+            } else {
+                panelBody.transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .animation(.easeOut(duration: 0.18), value: model.collapsed)
+    }
+
+    private var panelBody: some View {
         VStack(spacing: 0) {
             header
             CaptionStream(model: model, fontSize: fontSize)
@@ -369,13 +507,54 @@ private struct StatusBadge: View {
         }
     }
 
-    private var color: Color {
-        switch status {
+    private var color: Color { status.tint }
+}
+
+private extension CaptionPanelStatus {
+    var tint: Color {
+        switch self {
         case .idle: return .white.opacity(0.35)
         case .starting, .finishing: return Palette.mark
         case .live: return Color(red: 1.0, green: 0.27, blue: 0.23)
         case .paused: return Palette.mark.opacity(0.7)
         }
+    }
+
+    var isLive: Bool {
+        if case .live = self { return true }
+        return false
+    }
+}
+
+/// The idle form of the panel: a frosted dot that expands on hover.
+private struct CollapsedBubble: View {
+    let status: CaptionPanelStatus
+    let onExpand: () -> Void
+    @State private var pulsing = false
+
+    var body: some View {
+        ZStack {
+            HUDBackground()
+            Color.black.opacity(0.28)
+            if status.isLive {
+                Circle()
+                    .stroke(status.tint.opacity(0.7), lineWidth: 1.5)
+                    .frame(width: 10, height: 10)
+                    .scaleEffect(pulsing ? 2.6 : 1)
+                    .opacity(pulsing ? 0 : 0.9)
+                    .animation(.easeOut(duration: 1.6).repeatForever(autoreverses: false), value: pulsing)
+                    .onAppear { pulsing = true }
+            }
+            Circle().fill(status.tint).frame(width: 10, height: 10)
+        }
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+        .contentShape(Circle())
+        .onHover { if $0 { onExpand() } }
+        .onTapGesture(perform: onExpand)
+        .help("Show captions")
+        .accessibilityLabel("Captions are collapsed. Hover to show them.")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -424,6 +603,11 @@ private struct CaptionStream: View {
                     })
                 }
                 .coordinateSpace(name: "stream")
+                .onAppear {
+                    // The stream is rebuilt after the bubble; land on the newest caption.
+                    guard model.following else { return }
+                    DispatchQueue.main.async { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+                }
                 .onPreferenceChange(ContentBottomKey.self) { bottom in
                     if bottom <= viewport.size.height + 24 { model.following = true }
                 }
