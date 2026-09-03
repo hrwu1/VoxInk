@@ -127,9 +127,13 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let captionPanel = FloatingCaptionPanelController()
     private var showCaptions = true
-    /// Session options for Start, persisted like the browser's checkboxes.
-    /// Push to talk is dictation and never keeps audio.
-    private let defaults = UserDefaults.standard
+    /// Session options for Start, persisted like the browser's checkboxes and
+    /// on until turned off. Push to talk is dictation and never keeps audio.
+    private let defaults: UserDefaults = {
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: ["keepAudio": true, "identifySpeakers": true])
+        return defaults
+    }()
     private var keepAudio: Bool {
         get { defaults.bool(forKey: "keepAudio") }
         set { defaults.set(newValue, forKey: "keepAudio") }
