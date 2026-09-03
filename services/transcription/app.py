@@ -12,6 +12,7 @@ import sys
 import tempfile
 import re
 import threading
+import math
 import time
 import wave
 from collections import deque
@@ -26,6 +27,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.websockets import WebSocketDisconnect
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
@@ -53,6 +55,7 @@ from voxink_core.providers.qwen import QwenLocalProvider
 from voxink_core.session_ids import new_session_id
 from voxink_core.diarization.artifacts import read_document, rename_speaker
 from voxink_core.diarization.models import DiarizationError
+from voxink_core.diarization.live import LiveSpeakerIdentifier
 from voxink_core.speakers import SPEAKERS_FILENAME, SpeakerRegistry, SpeakerRegistryError
 from voxink_core.sessions import (
     InvalidSessionTransition,
@@ -131,6 +134,9 @@ class ServiceSettings:
     state_root: Path = Path.home() / "Library" / "Application Support" / "VoxInk"
     # Cosine similarity a session speaker must reach to be called a known voice.
     speaker_threshold: float = 0.62
+    # Name a live caption after a remembered voice once a stream has carried a
+    # few seconds of it. Needs the diarization model and an enrolled voice.
+    live_speaker_names: bool = True
 
 
 class GrantIssueRequest(BaseModel):
@@ -309,6 +315,15 @@ class ServiceRuntime:
             enabled=settings.diarization_enabled,
             registry=self.speakers,
         )
+        self.live_speakers = (
+            LiveSpeakerIdentifier(
+                self.speakers,
+                model_path=settings.diarization_model_path,
+                device=settings.diarization_device,
+            )
+            if settings.live_speaker_names and settings.diarization_enabled
+            else None
+        )
         self.translator = translator or _default_translator(settings)
         # Serializes translation across streams; the model is not re-entrant.
         self.translation_lock = threading.Lock()
@@ -316,6 +331,9 @@ class ServiceRuntime:
         # Why the last partial caption failed, if it did; a diagnostic only.
         self.partial_error: str | None = None
         self.echo = EchoDetector()
+        # Session id to stream id to (level, monotonic time) of its last frame,
+        # so the UI can show that audio is arriving before any caption does.
+        self.levels: dict[str, dict[str, tuple[Source, float, float]]] = {}
         self.audio_writers: dict[str, AudioRetentionWriter] = {}
         # Stream id to the connection that owns it. A reconnecting helper reuses
         # its stream id, and only the connection that registered it last may
@@ -633,6 +651,7 @@ def create_app(
             "backends": list(SYSTEM_AUDIO_BACKENDS),
             "partial_captions": runtime.settings.partial_captions,
             "echo_suppression": runtime.settings.echo_suppression,
+            "live_speaker_names": runtime.live_speakers is not None,
             "translation_available": runtime.translation_available,
             "languages": ["auto", "en", "zh"],
         }
@@ -1380,6 +1399,7 @@ def create_app(
                         pending_header = None
                         continue
                     _record_audio(runtime, session_id, context, pending_header, pcm)
+                    _note_level(runtime, context, pcm)
                     if pending_header["type"] == "audio.frame":
                         context.anchor_to(pending_header)
                         if context.source is Source.SYSTEM and runtime.settings.echo_suppression:
@@ -2071,6 +2091,7 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         "exit_code": exit_code,
         "error": runtime.native_error,
         "notice": runtime.native_notice,
+        "levels": _levels_view(runtime, session_id),
         "retention": _retention_view(runtime, session_id),
         "last_session": _last_session_view(runtime),
         "translation": {
@@ -2232,6 +2253,9 @@ def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
     runtime.last_session_id = session_id
     runtime.session_started_at.pop(session_id, None)
     runtime.echo.forget(session_id)
+    runtime.levels.pop(session_id, None)
+    if runtime.live_speakers is not None:
+        runtime.live_speakers.forget(session_id)
     writer = runtime.audio_writers.pop(session_id, None)
     if writer is not None:
         writer.close()
@@ -2485,7 +2509,47 @@ async def _timed_transcription(
     event = await _transcribe_pcm_chunk(
         runtime, session_id, context, header, pcm, segment_id=segment_id
     )
+    if runtime.live_speakers is not None and event.text.strip():
+        audio = context.start.get("audio", {})
+        speaker = await asyncio.to_thread(
+            runtime.live_speakers.identify,
+            session_id,
+            context.stream_id,
+            pcm,
+            int(audio.get("sample_rate_hz", 16000)),
+            int(audio.get("channels", 1)),
+        )
+        if speaker is not None:
+            event = replace(event, speaker=speaker)
     return event, (time.monotonic() - began) * 1000.0
+
+
+# Frame levels below this are shown as silence; a full-scale frame is 1.0.
+_LEVEL_FLOOR_DB = -60.0
+# A level older than this is stale: the stream stopped, paused, or dropped.
+_LEVEL_TTL_S = 2.0
+
+
+def _note_level(runtime: ServiceRuntime, context: _StreamContext, pcm: bytes) -> None:
+    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2")
+    if samples.size == 0:
+        return
+    rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) / 32768.0
+    decibels = 20.0 * math.log10(rms) if rms > 0 else _LEVEL_FLOOR_DB
+    level = min(1.0, max(0.0, (decibels - _LEVEL_FLOOR_DB) / -_LEVEL_FLOOR_DB))
+    runtime.levels.setdefault(context.session_id, {})[context.stream_id] = (
+        context.source, level, time.monotonic()
+    )
+
+
+def _levels_view(runtime: ServiceRuntime, session_id: str | None) -> dict[str, float]:
+    """The freshest level per source, zero once its last frame is stale."""
+    now = time.monotonic()
+    view: dict[str, float] = {}
+    for source, level, at in runtime.levels.get(session_id or "", {}).values():
+        current = level if now - at <= _LEVEL_TTL_S else 0.0
+        view[source.value] = max(view.get(source.value, 0.0), round(current, 3))
+    return view
 
 
 async def _transcribe_pcm_chunk(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -236,6 +237,62 @@ class LiveFeatureTests(unittest.TestCase):
 
     def test_mark_needs_a_running_capture(self) -> None:
         self.assertEqual(self.client.post("/v1/ui/capture/mark", json={}).status_code, 409)
+
+    # -- levels ----------------------------------------------------------------
+
+    def test_status_reports_the_level_of_each_source_and_forgets_stale_ones(self) -> None:
+        session_id = "levelled"
+        with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as websocket:
+            websocket.send_json(_start_message(session_id, "microphone"))
+            websocket.receive_json()
+            self.runtime.native_process = MagicMock(poll=MagicMock(return_value=None))
+            self.runtime.native_session_id = session_id
+            self.runtime.ui_events[session_id] = deque(maxlen=50)
+            self.runtime.ui_events_total[session_id] = 0
+            self.assertEqual(self.client.get("/v1/ui/capture/status").json()["levels"], {})
+            _frame_then_drain(websocket, "microphone", VOICED, 0)
+            loud = self.client.get("/v1/ui/capture/status").json()["levels"]
+            _frame_then_drain(websocket, "microphone", SILENCE, 20)
+            quiet = self.client.get("/v1/ui/capture/status").json()["levels"]
+            self.assertEqual(list(loud), ["microphone"])
+            self.assertGreater(loud["microphone"], 0.3)
+            self.assertLess(quiet["microphone"], loud["microphone"])
+            with patch("services.transcription.app.time.monotonic", return_value=time.monotonic() + 10):
+                self.assertEqual(self.client.get("/v1/ui/capture/status").json()["levels"], {"microphone": 0.0})
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 100})
+            websocket.receive_json()
+        self.assertNotIn(session_id, self.runtime.levels)
+        self.runtime.native_process = None
+
+    # -- live speaker names ----------------------------------------------------
+
+    def test_a_final_carries_the_live_speaker_name_into_the_feed_and_transcript(self) -> None:
+        self.assertFalse(self.client.get("/v1/ui/capture/capabilities").json()["live_speaker_names"] is None)
+        session_id = "named"
+        names = iter([None, "Alice"])
+        identifier = MagicMock()
+        identifier.identify = MagicMock(side_effect=lambda *args, **kwargs: next(names, "Alice"))
+        self.runtime.live_speakers = identifier
+        with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as websocket:
+            websocket.send_json(_start_message(session_id, "microphone"))
+            websocket.receive_json()
+            self.runtime.ui_events[session_id] = deque(maxlen=50)
+            self.runtime.ui_events_total[session_id] = 0
+            finals = []
+            for offset, pcm in enumerate((VOICED, SILENCE, SILENCE, VOICED, SILENCE, SILENCE)):
+                for message in _frame_then_drain(websocket, "microphone", pcm, offset * 20):
+                    if message["type"] == "transcript.final":
+                        finals.append(message["event"])
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 200})
+            websocket.receive_json()
+        self.assertEqual([event["speaker"] for event in finals], [None, "Alice"])
+        session, stream, pcm, rate, channels = identifier.identify.call_args.args
+        self.assertEqual((session, stream, rate, channels), (session_id, "microphone-1", 16_000, 1))
+        self.assertGreater(len(pcm), 0)
+        feed = [e for e in self.runtime.ui_events[session_id] if e["type"] == "transcript" and e["is_final"]]
+        self.assertEqual([e.get("speaker") for e in feed], [None, "Alice"])
+        self.assertIn("[MIC] [Alice]**", self.transcript(session_id))
+        identifier.forget.assert_called_with(session_id)
 
     # -- reveal ----------------------------------------------------------------
 
