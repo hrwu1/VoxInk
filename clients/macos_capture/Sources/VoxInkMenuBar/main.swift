@@ -35,9 +35,10 @@ private struct FeedEvent: Decodable {
     let isFinal: Bool?
     let channelName: String?
     let language: String?
+    let speaker: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, source, text, language
+        case type, source, text, language, speaker
         case segmentID = "segment_id"
         case startMs = "start_ms"
         case endMs = "end_ms"
@@ -52,9 +53,10 @@ private struct StatusView: Decodable {
     let events: [FeedEvent]
     let nextCursor: Int
     let error: String?
+    let levels: [String: Double]?
 
     enum CodingKeys: String, CodingKey {
-        case state, events, error
+        case state, events, error, levels
         case sessionID = "session_id"
         case nextCursor = "next_cursor"
     }
@@ -164,6 +166,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         captionPanel.onHide = { [weak self] in self?.showCaptions = false }
+        captionPanel.onMark = { [weak self] in self?.markMoment() }
         rebuildMenu()
         startPolling()
         installHotKey()
@@ -384,6 +387,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func apply(_ view: StatusView) {
         cursor = view.nextCursor
+        captionPanel.setLevels(CaptionLevels(microphone: view.levels?["microphone"], system: view.levels?["system"]))
         if view.state != state {
             state = view.state
             if state == "ready" || state == "failed" { startedAt = nil }
@@ -413,7 +417,8 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
                 startMilliseconds: event.startMs,
                 endMilliseconds: event.endMs,
                 isFinal: event.isFinal ?? true,
-                channelName: event.channelName
+                channelName: event.channelName,
+                speakerName: event.speaker
             ))
         }
     }

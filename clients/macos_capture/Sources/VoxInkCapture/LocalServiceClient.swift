@@ -31,6 +31,8 @@ public struct TranscriptWireEvent: Codable, Sendable {
     /// On-device translation of `text` into the other language, when enabled.
     public let translation: String?
     public let translationLanguage: String?
+    /// A remembered voice the service recognized live, if any.
+    public let speaker: String?
 
     public init(
         segmentID: String,
@@ -42,7 +44,8 @@ public struct TranscriptWireEvent: Codable, Sendable {
         channel: String? = nil,
         channelName: String? = nil,
         translation: String? = nil,
-        translationLanguage: String? = nil
+        translationLanguage: String? = nil,
+        speaker: String? = nil
     ) {
         self.segmentID = segmentID
         self.source = source
@@ -54,10 +57,11 @@ public struct TranscriptWireEvent: Codable, Sendable {
         self.channelName = channelName
         self.translation = translation
         self.translationLanguage = translationLanguage
+        self.speaker = speaker
     }
 
     enum CodingKeys: String, CodingKey {
-        case text, source, channel, translation
+        case text, source, channel, translation, speaker
         case segmentID = "segment_id"
         case startMilliseconds = "start_ms"
         case endMilliseconds = "end_ms"
@@ -75,7 +79,8 @@ public struct TranscriptWireEvent: Codable, Sendable {
             endMilliseconds: endMilliseconds,
             isFinal: isFinal,
             channelName: channelName ?? channel,
-            translation: translation
+            translation: translation,
+            speakerName: speaker
         )
     }
 }

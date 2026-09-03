@@ -458,12 +458,23 @@ private final class RecordingSink: AudioFrameSink, @unchecked Sendable {
 final class CaptionPanelModelTests: XCTestCase {
     private func caption(
         _ id: String, _ text: String, at ms: Int64, source: AudioSource = .microphone,
-        channel: String? = nil, final: Bool = true, translation: String? = nil
+        channel: String? = nil, final: Bool = true, translation: String? = nil, speaker: String? = nil
     ) -> CaptionItem {
         CaptionItem(
             id: id, source: source, text: text, startMilliseconds: ms, isFinal: final,
-            channelName: channel, translation: translation
+            channelName: channel, translation: translation, speakerName: speaker
         )
+    }
+
+    func testARecognizedVoiceNamesItsTurnAndANameChangeStartsANewOne() {
+        let model = CaptionPanelModel()
+        model.upsert(caption("a", "hello", at: 0))
+        model.upsert(caption("b", "it's me", at: 1000, speaker: "Alice"))
+        model.upsert(caption("c", "still me", at: 2000, speaker: "Alice"))
+        model.upsert(caption("d", "and me", at: 3000, source: .system, channel: "Zoom", speaker: "Bob"))
+        XCTAssertEqual(model.turns.map(\.label), ["Microphone", "Alice", "Bob"])
+        XCTAssertEqual(model.turns[1].captions.map(\.id), ["b", "c"])
+        XCTAssertTrue(model.transcriptText().contains("[00:01] Alice: it's me"))
     }
 
     func testAFinalReplacesItsPartialInPlaceAndKeepsAnEarlierTranslation() {

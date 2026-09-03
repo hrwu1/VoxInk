@@ -12,6 +12,8 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
     public let channelName: String?
     /// On-device translation shown as a second line, if any.
     public let translation: String?
+    /// A remembered voice the service recognized live, if any.
+    public let speakerName: String?
 
     public init(
         id: String,
@@ -21,7 +23,8 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
         endMilliseconds: Int64? = nil,
         isFinal: Bool,
         channelName: String? = nil,
-        translation: String? = nil
+        translation: String? = nil,
+        speakerName: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -31,14 +34,26 @@ public struct CaptionItem: Identifiable, Equatable, Sendable {
         self.isFinal = isFinal
         self.channelName = channelName
         self.translation = translation
+        self.speakerName = speakerName
     }
 
     public func withTranslation(_ translation: String?) -> CaptionItem {
         CaptionItem(
             id: id, source: source, text: text, startMilliseconds: startMilliseconds,
             endMilliseconds: endMilliseconds, isFinal: isFinal, channelName: channelName,
-            translation: translation
+            translation: translation, speakerName: speakerName
         )
+    }
+}
+
+/// Audio arriving per source, 0 to 1, for the header meter.
+public struct CaptionLevels: Equatable, Sendable {
+    public var microphone: Double?
+    public var system: Double?
+
+    public init(microphone: Double? = nil, system: Double? = nil) {
+        self.microphone = microphone
+        self.system = system
     }
 }
 
@@ -80,6 +95,12 @@ public final class FloatingCaptionPanelController {
     /// Called when the person hides the panel from its own toolbar, so a
     /// host's "show captions" toggle can follow.
     public var onHide: (() -> Void)?
+    /// Set by a host that can place a marker; the toolbar shows a bookmark
+    /// button only then.
+    public var onMark: (() -> Void)? {
+        get { model.onMark }
+        set { model.onMark = newValue }
+    }
 
     public init() {
         panel = NSPanel(
@@ -150,6 +171,11 @@ public final class FloatingCaptionPanelController {
 
     public func setStatus(_ status: CaptionPanelStatus) {
         model.status = status
+    }
+
+    /// Latest audio level per source; the meter hides sources that are nil.
+    public func setLevels(_ levels: CaptionLevels) {
+        model.levels = levels
     }
 
     public func showWindow() {
@@ -292,7 +318,7 @@ enum CaptionEntry: Identifiable, Equatable {
 /// Consecutive captions from one source, or a single mark.
 struct CaptionTurn: Identifiable, Equatable {
     enum Kind: Equatable {
-        case speech(source: AudioSource, channelName: String?)
+        case speech(source: AudioSource, channelName: String?, speakerName: String?)
         case mark(label: String)
     }
 
@@ -303,8 +329,9 @@ struct CaptionTurn: Identifiable, Equatable {
 
     var label: String {
         switch kind {
-        case .speech(.microphone, _): return "Microphone"
-        case .speech(.system, let channelName): return channelName ?? "System audio"
+        case .speech(_, _, let speakerName?): return speakerName
+        case .speech(.microphone, _, _): return "Microphone"
+        case .speech(.system, let channelName, _): return channelName ?? "System audio"
         case .mark(let label): return label.isEmpty ? "Marked" : label
         }
     }
@@ -316,7 +343,7 @@ struct CaptionTurn: Identifiable, Equatable {
             case .mark(let id, let milliseconds, let label):
                 turns.append(CaptionTurn(id: id, kind: .mark(label: label), startMilliseconds: milliseconds, captions: []))
             case .caption(let item):
-                let kind = Kind.speech(source: item.source, channelName: item.channelName)
+                let kind = Kind.speech(source: item.source, channelName: item.channelName, speakerName: item.speakerName)
                 if let last = turns.indices.last, turns[last].kind == kind {
                     turns[last].captions.append(item)
                 } else {
@@ -338,8 +365,17 @@ final class CaptionPanelModel: ObservableObject {
     @Published var following = true
     /// Whether the panel is showing its idle bubble instead of the stream.
     @Published var collapsed = false
+    @Published var levels = CaptionLevels()
     var onHide: (() -> Void)?
     var onExpand: (() -> Void)?
+    var onMark: (() -> Void)?
+
+    var canMark: Bool {
+        switch status {
+        case .live, .paused: return onMark != nil
+        default: return false
+        }
+    }
 
     var turns: [CaptionTurn] { CaptionTurn.group(entries) }
 
@@ -451,8 +487,13 @@ private struct FloatingCaptionView: View {
     private var header: some View {
         HStack(spacing: 10) {
             StatusBadge(status: model.status)
+            LevelMeter(levels: model.levels)
             Spacer(minLength: 0)
             HStack(spacing: 4) {
+                if model.onMark != nil {
+                    ToolbarButton(symbol: "bookmark.fill", help: "Mark this moment") { model.onMark?() }
+                        .disabled(!model.canMark)
+                }
                 ToolbarButton(symbol: "textformat.size.smaller", help: "Smaller text") {
                     fontSize = max(Palette.minimumFontSize, fontSize - 2)
                 }
@@ -555,6 +596,30 @@ private struct CollapsedBubble: View {
         .help("Show captions")
         .accessibilityLabel("Captions are collapsed. Hover to show them.")
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// Two thin bars, one per source, showing that audio is arriving.
+private struct LevelMeter: View {
+    let levels: CaptionLevels
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let microphone = levels.microphone { bar(microphone, tint: Palette.microphone, label: "Microphone level") }
+            if let system = levels.system { bar(system, tint: Palette.system, label: "System audio level") }
+        }
+    }
+
+    private func bar(_ level: Double, tint: Color, label: String) -> some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(.white.opacity(0.12))
+            Capsule().fill(tint.opacity(0.9))
+                .frame(width: 4 + 36 * min(1, max(0, level)))
+                .animation(.easeOut(duration: 0.25), value: level)
+        }
+        .frame(width: 40, height: 4)
+        .accessibilityLabel(label)
+        .accessibilityValue("\(Int(level * 100)) percent")
     }
 }
 
@@ -712,7 +777,7 @@ private struct TurnView: View {
             .padding(.vertical, 4)
             .background(Palette.mark.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             .accessibilityElement(children: .combine)
-        case .speech(let source, _):
+        case .speech(let source, _, _):
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Circle().fill(source == .microphone ? Palette.microphone : Palette.system).frame(width: 6, height: 6)

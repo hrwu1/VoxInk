@@ -23,7 +23,8 @@ and Transformers offline modes and loads the model exclusively from the local
 - Native ScreenCaptureKit filtering for all system audio or multiple apps.
 - Automatic selected-app reconnection by bundle identifier.
 - Always-on-top macOS caption panel: frosted, resizable, click-through-capable,
-  grouped by speaker turn with marks, status, scroll-back, and adjustable text.
+  grouped by speaker turn with names, marks, levels, status, scroll-back, and
+  adjustable text; it shrinks to a status bubble when nobody is talking.
 - Custom vocabulary that biases recognition and corrects finalized text,
   editable from a browser tab or as a plain file.
 - System audio through Core Audio process taps (macOS 14.2+), which work
@@ -278,6 +279,20 @@ per session, and nothing below the similarity threshold
 (`--speaker-threshold`, default 0.62) is named. Names appear in
 `transcript-with-speakers.md`; the canonical transcript never changes.
 `voxink speakers list|name|rename|forget` does the same from the CLI.
+
+Once a voice is remembered it can also be named **live**: each stream keeps
+a rolling mean of its recent utterance embeddings (about the last 20 s of
+speech), and once four seconds of one voice have accumulated the mean is
+compared against the registry with the same threshold. A match names the
+caption in the feed, the floating panel, and the transcript's `[MIC] [Name]`
+tag; the utterance itself must also resemble the matched voice, so a brief
+interjection by someone else stays anonymous. A single utterance is never
+enough on its own (a 2 s clip scores about 0.4 against the same voice on the
+reference sample; 4 s accumulated scores 0.75), and a system stream where
+several people alternate blurs its mean and stays unnamed. The embedding
+model loads on the first utterance after a voice is enrolled, so that one
+caption arrives a couple of seconds late. `live_speaker_names` in
+`ServiceSettings` turns it off.
 
 Recognition quality is unverified on real multi-speaker sessions: on the one
 far-field session available, embeddings of the dominant speaker across

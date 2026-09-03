@@ -196,12 +196,17 @@ frame and text size are remembered between launches, and on first launch it
 sits bottom-centre above the Dock.
 
 The header shows the session state (Starting, Live with elapsed time, Paused,
-Finishing, Ready), and hovering reveals a toolbar: smaller and larger text,
-copy the visible transcript, and hide the panel (the host's `onHide` callback
+Finishing, Ready) and a small level bar per source fed through `setLevels`
+(the menu-bar app forwards the `levels` field of each status poll). Hovering
+reveals a toolbar: mark this moment (shown when the host sets `onMark`, which
+the menu-bar app routes to the mark endpoint), smaller and larger text, copy
+the visible transcript, and hide the panel (the host's `onHide` callback
 keeps its own toggle in sync). The body is a scrolling stream of the newest 80
 entries grouped into turns: a turn begins whenever the source changes
 (microphone, system audio, or a named application) or a mark arrives, and
-carries one small label with the time of its first caption. Long sentences
+carries one small label with the time of its first caption. When the service
+recognizes a remembered voice live, the caption's `speaker` becomes the turn
+label and a change of name starts a new turn. Long sentences
 wrap in full; partial captions are dimmed and replaced in place by stable
 event ID; translations sit under their caption; marks are amber rows. The
 stream follows new captions until you scroll up, when a "Latest" chip
