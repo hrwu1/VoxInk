@@ -70,6 +70,28 @@ class Vocabulary:
         terms = self.biased_terms
         return ", ".join(terms) if terms else None
 
+    def is_echo(self, text: str) -> bool:
+        """Return whether `text` is the biasing context read back instead of speech.
+
+        The model sees the terms as its system message, and on a chunk that
+        holds no speech it sometimes transcribes that message: the list, with
+        punctuation between the terms.  Speech that consists of nothing but two
+        or more listed terms is rare enough to give up, while a single term on
+        its own is kept, because a person calling a name is indistinguishable
+        from the echo of a one-term list.
+        """
+        terms = self.biased_terms
+        if len(terms) < 2 or not text:
+            return False
+        remainder = text
+        matched = 0
+        for pattern in _echo_patterns(terms):
+            stripped = pattern.sub("", remainder)
+            if stripped != remainder:
+                matched += 1
+                remainder = stripped
+        return matched >= 2 and not any(character.isalnum() for character in remainder)
+
     def apply(self, text: str) -> str:
         """Rewrite `text` with every correction rule, in file order."""
         for pattern, replacement in _compiled(self.corrections):
@@ -179,6 +201,15 @@ def _signature(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return (status.st_mtime_ns, status.st_size)
+
+
+@lru_cache(maxsize=8)
+def _echo_patterns(terms: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    """Match each biased term, longest first so a term inside another is not split."""
+    return tuple(
+        re.compile(re.escape(term), re.IGNORECASE)
+        for term in sorted(terms, key=len, reverse=True)
+    )
 
 
 @lru_cache(maxsize=8)

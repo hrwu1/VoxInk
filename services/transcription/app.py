@@ -1297,7 +1297,10 @@ def create_app(
                 ),
             )
         event = _correct(vocabulary, event)
-        runtime.sessions.append(event)
+        if event.text.strip():
+            # Silence, or a line that only echoed the vocabulary, has no block
+            # worth a timestamp in the transcript.
+            runtime.sessions.append(event)
         if session_id is None:
             # A caller that named no session wanted one file transcribed, not an
             # open session. Closing it here writes the completion marker and
@@ -1792,8 +1795,17 @@ def _is_paused(runtime: ServiceRuntime, session_id: str) -> bool:
 
 
 def _correct(vocabulary: Vocabulary, event: TranscriptEvent) -> TranscriptEvent:
-    """Apply the user's correction rules to one event's text."""
-    if not vocabulary.corrections or not event.text:
+    """Apply the user's correction rules to one event's text.
+
+    A line that only reads the biasing terms back is the model transcribing
+    its own context on a chunk without speech. Blanking it here lets every
+    caller treat it the way it already treats the model's own silence output.
+    """
+    if not event.text:
+        return event
+    if vocabulary.is_echo(event.text):
+        return replace(event, text="")
+    if not vocabulary.corrections:
         return event
     corrected = vocabulary.apply(event.text)
     return event if corrected == event.text else replace(event, text=corrected)
@@ -1832,7 +1844,8 @@ async def _publish_event(
         runtime.dedup.reset(*key)
     event = runtime.dedup.deduplicate(event)
     if not event.text.strip():
-        # The chunk repeated its predecessor's overlap and carried nothing new.
+        # The chunk repeated its predecessor's overlap, or only echoed the
+        # vocabulary, and carried nothing new.
         return None
     _require_open_session(runtime, event.session_id)
     try:

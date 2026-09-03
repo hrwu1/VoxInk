@@ -67,6 +67,33 @@ class VocabularyParsingTests(unittest.TestCase):
         self.assertEqual(vocabulary.biased_terms, vocabulary.terms)
 
 
+class VocabularyEchoTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vocabulary = Vocabulary.parse("吴昊苒\nGogo\n喷菇\n")
+
+    def test_the_whole_list_read_back_is_an_echo(self) -> None:
+        self.assertTrue(self.vocabulary.is_echo("吴昊苒，Gogo，喷菇。"))
+        self.assertTrue(self.vocabulary.is_echo("吴昊苒， Gogo， 喷菇。"))
+        self.assertTrue(self.vocabulary.is_echo("吴昊苒、gogo、喷菇"))
+
+    def test_part_of_the_list_is_still_an_echo(self) -> None:
+        self.assertTrue(self.vocabulary.is_echo("Gogo, 喷菇."))
+
+    def test_one_term_alone_is_kept(self) -> None:
+        self.assertFalse(self.vocabulary.is_echo("Gogo."))
+        self.assertFalse(self.vocabulary.is_echo("Gogo, Gogo!"))
+
+    def test_terms_inside_speech_are_kept(self) -> None:
+        self.assertFalse(self.vocabulary.is_echo("吴昊苒，Gogo，喷菇来了。"))
+        self.assertFalse(self.vocabulary.is_echo("I met Gogo and 喷菇 today."))
+
+    def test_a_one_term_vocabulary_never_echoes(self) -> None:
+        self.assertFalse(Vocabulary.parse("Gogo\n").is_echo("Gogo."))
+
+    def test_an_empty_vocabulary_never_echoes(self) -> None:
+        self.assertFalse(Vocabulary.parse("").is_echo("anything"))
+
+
 class VocabularyCorrectionTests(unittest.TestCase):
     def test_replaces_a_whole_word_case_insensitively(self) -> None:
         vocabulary = Vocabulary.parse("hallow => Hrwu")

@@ -1605,6 +1605,35 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(1, len(finals))
         self.assertEqual("Hello Hrwu.", finals[0]["event"]["text"])
 
+    def test_a_streamed_line_that_only_echoes_the_terms_is_dropped(self) -> None:
+        self.vocabulary.write_text("吴昊苒\nGogo\n喷菇\n", encoding="utf-8")
+        provider = RecordingProvider(text="吴昊苒，Gogo，喷菇。")
+        client = self._client(provider)
+
+        with client.websocket_connect("/v1/sessions/echo/stream") as websocket:
+            websocket.send_json(_start_message("echo", "microphone"))
+            self.assertEqual("stream.ready", websocket.receive_json()["type"])
+            finals = [
+                item
+                for item in _utterance(websocket, "microphone", 0)
+                if item["type"] == "transcript.final"
+            ]
+
+        self.assertEqual(["吴昊苒, Gogo, 喷菇"], provider.contexts)
+        self.assertEqual([], finals)
+        for part in (self.output_root / "echo").glob("transcript-part-*.md"):
+            self.assertNotIn("喷菇", part.read_text())
+
+    def test_a_batch_line_that_only_echoes_the_terms_is_blanked(self) -> None:
+        self.vocabulary.write_text("吴昊苒\nGogo\n喷菇\n", encoding="utf-8")
+        client = self._client(RecordingProvider(text="Gogo，喷菇。"))
+
+        event = self._transcribe(client, "echo-batch")
+
+        self.assertEqual("", event["text"])
+        for part in (self.output_root / "echo-batch").glob("transcript-part-*.md"):
+            self.assertNotIn("[MIC]", part.read_text())
+
     def test_the_api_reports_the_file_text_and_what_it_parses(self) -> None:
         self.vocabulary.write_text("# names\nVoxInk\nharu => Hrwu\n", encoding="utf-8")
         client = self._client(RecordingProvider())
