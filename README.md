@@ -22,7 +22,8 @@ and Transformers offline modes and loads the model exclusively from the local
 - Optional combined WAV generation using aligned saturating mixing.
 - Native ScreenCaptureKit filtering for all system audio or multiple apps.
 - Automatic selected-app reconnection by bundle identifier.
-- Minimal always-on-top, click-through-capable macOS caption panel.
+- Always-on-top macOS caption panel: frosted, resizable, click-through-capable,
+  grouped by speaker turn with marks, status, scroll-back, and adjustable text.
 - Custom vocabulary that biases recognition and corrects finalized text,
   editable from a browser tab or as a plain file.
 - System audio through Core Audio process taps (macOS 14.2+), which work

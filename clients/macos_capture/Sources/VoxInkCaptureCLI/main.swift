@@ -144,6 +144,7 @@ private struct VoxInkCaptureCommand {
                     application.finishLaunching()
                     let panel = FloatingCaptionPanelController()
                     panel.setClickThrough(options.clickThroughCaptions)
+                    panel.setStatus(.starting)
                     panel.showWindow()
                     return panel
                 }
@@ -167,6 +168,9 @@ private struct VoxInkCaptureCommand {
                 }
             )
             try await coordinator.start()
+            if let captionPanel {
+                await MainActor.run { captionPanel.setStatus(.live(since: Date())) }
+            }
             print("Capture started for session \(options.sessionID). Press Ctrl-C to stop.")
             await waitForInterrupt(coordinator: coordinator)
             await coordinator.stop()

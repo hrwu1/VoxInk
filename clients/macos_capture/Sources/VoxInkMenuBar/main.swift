@@ -163,6 +163,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.toolTip = "VoxInk"
         menu.delegate = self
         statusItem.menu = menu
+        captionPanel.onHide = { [weak self] in self?.showCaptions = false }
         rebuildMenu()
         startPolling()
         installHotKey()
@@ -277,6 +278,9 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         state = "starting"
         lastError = nil
         refreshStatusButton()
+        captionPanel.clear()
+        syncPanelStatus()
+        if showCaptions { captionPanel.showWindow() }
         do {
             let view = try await api.start(
                 sources: sources, language: nil, retainAudio: keepAudio,
@@ -285,13 +289,23 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             cursor = view.nextCursor
             startedAt = Date()
             state = view.state
-            captionPanel.clear()
-            if showCaptions { captionPanel.showWindow() }
         } catch {
             state = "failed"
             lastError = error.localizedDescription
         }
+        syncPanelStatus()
         refreshStatusButton()
+    }
+
+    /// Mirror the session state into the caption panel's header.
+    private func syncPanelStatus() {
+        switch state {
+        case "recording": captionPanel.setStatus(.live(since: startedAt ?? Date()))
+        case "paused": captionPanel.setStatus(.paused)
+        case "starting": captionPanel.setStatus(.starting)
+        case "stopping": captionPanel.setStatus(.finishing)
+        default: captionPanel.setStatus(.idle)
+        }
     }
 
     @objc private func toggleKeepAudio() { keepAudio.toggle() }
@@ -374,6 +388,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             state = view.state
             if state == "ready" || state == "failed" { startedAt = nil }
             lastError = view.error
+            syncPanelStatus()
             refreshStatusButton()
         }
         for event in view.events {
@@ -382,21 +397,24 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
                 captionPanel.attachTranslation(event.text, to: event.segmentID)
                 continue
             }
-            if kind == "mark" { continue }
+            if kind == "mark" {
+                captionPanel.showMark(atMilliseconds: event.startMs, label: event.text)
+                continue
+            }
             if pushToTalkActive || (pushToTalkArmed && event.startMs >= pushToTalkSince), event.isFinal ?? true {
                 if event.startMs >= pushToTalkSince { dictated.append(event) }
             }
-            if showCaptions {
-                captionPanel.show(CaptionItem(
-                    id: event.segmentID,
-                    source: event.source == "system" ? .system : .microphone,
-                    text: event.text,
-                    startMilliseconds: event.startMs,
-                    endMilliseconds: event.endMs,
-                    isFinal: event.isFinal ?? true,
-                    channelName: event.channelName
-                ))
-            }
+            // The panel keeps its history while hidden, so showing it again
+            // catches up instead of starting blank.
+            captionPanel.show(CaptionItem(
+                id: event.segmentID,
+                source: event.source == "system" ? .system : .microphone,
+                text: event.text,
+                startMilliseconds: event.startMs,
+                endMilliseconds: event.endMs,
+                isFinal: event.isFinal ?? true,
+                channelName: event.channelName
+            ))
         }
     }
 
