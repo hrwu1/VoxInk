@@ -256,7 +256,10 @@ labels. Turn it off with `--no-echo-suppression`.
 ```
 
 The menu bar item starts and stops capture, pauses, marks, shows or hides the
-floating captions, and opens the transcript folder. **Enable push to talk**
+floating captions, and opens the transcript folder. **Keep audio** and
+**Identify speakers after Stop** are the browser's checkboxes of the same
+names; they apply to the Start items, persist across launches, and speaker
+identification needs kept microphone audio. **Enable push to talk**
 holds a microphone session open; hold ⌃⌥Space to speak, release to have the
 finalized text pasted into the front application (with Accessibility access;
 otherwise it waits on the clipboard). The app is a control surface over the

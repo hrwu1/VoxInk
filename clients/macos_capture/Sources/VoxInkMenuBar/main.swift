@@ -71,8 +71,10 @@ private final class ControlAPI {
         try await request("GET", "/v1/ui/capture/status?after=\(cursor)")
     }
 
-    func start(sources: [String], language: String?) async throws -> StatusView {
-        var body: [String: Any] = ["sources": sources, "retain_audio": false]
+    func start(
+        sources: [String], language: String?, retainAudio: Bool = false, diarize: Bool = false
+    ) async throws -> StatusView {
+        var body: [String: Any] = ["sources": sources, "retain_audio": retainAudio, "diarize": diarize]
         if let language { body["language"] = language }
         return try await request("POST", "/v1/ui/capture/start", body: body)
     }
@@ -125,6 +127,17 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private let captionPanel = FloatingCaptionPanelController()
     private var showCaptions = true
+    /// Session options for Start, persisted like the browser's checkboxes.
+    /// Push to talk is dictation and never keeps audio.
+    private let defaults = UserDefaults.standard
+    private var keepAudio: Bool {
+        get { defaults.bool(forKey: "keepAudio") }
+        set { defaults.set(newValue, forKey: "keepAudio") }
+    }
+    private var identifySpeakers: Bool {
+        get { defaults.bool(forKey: "identifySpeakers") }
+        set { defaults.set(newValue, forKey: "identifySpeakers") }
+    }
     private var pollTimer: Timer?
     private var cursor = 0
     private var state = "ready"
@@ -178,6 +191,19 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             item.isEnabled = idle && !pushToTalkArmed
             menu.addItem(item)
         }
+        let audio = NSMenuItem(title: "Keep audio", action: #selector(toggleKeepAudio), keyEquivalent: "")
+        audio.target = self
+        audio.state = keepAudio ? .on : .off
+        audio.isEnabled = idle
+        menu.addItem(audio)
+        let speakers = NSMenuItem(
+            title: keepAudio ? "Identify speakers after Stop" : "Identify speakers after Stop (needs kept audio)",
+            action: #selector(toggleIdentifySpeakers), keyEquivalent: ""
+        )
+        speakers.target = self
+        speakers.state = keepAudio && identifySpeakers ? .on : .off
+        speakers.isEnabled = idle && keepAudio
+        menu.addItem(speakers)
         menu.addItem(.separator())
         let pause = NSMenuItem(title: state == "paused" ? "Resume" : "Pause", action: #selector(togglePause), keyEquivalent: "")
         pause.target = self
@@ -248,7 +274,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         lastError = nil
         refreshStatusButton()
         do {
-            let view = try await api.start(sources: sources, language: nil)
+            let view = try await api.start(
+                sources: sources, language: nil, retainAudio: keepAudio,
+                diarize: keepAudio && identifySpeakers && sources.contains("microphone")
+            )
             cursor = view.nextCursor
             startedAt = Date()
             state = view.state
@@ -260,6 +289,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         }
         refreshStatusButton()
     }
+
+    @objc private func toggleKeepAudio() { keepAudio.toggle() }
+
+    @objc private func toggleIdentifySpeakers() { identifySpeakers.toggle() }
 
     @objc private func togglePause() {
         Task { await control(state == "paused" ? "resume" : "pause") }

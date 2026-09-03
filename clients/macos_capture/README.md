@@ -38,8 +38,10 @@ Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
 `voxink-menubar` (built by `scripts/build-macos-menubar`) is a control
 surface over the helper's HTTP API, launched by `voxink-dev --menubar` with
 `VOXINK_SERVICE_URL`, `VOXINK_AUTH_SECRET`, and `VOXINK_OUTPUT_ROOT` in its
-environment. It starts, pauses, marks, and stops capture, shows the floating
-captions, opens the transcript folder, and offers push to talk on ⌃⌥Space
+environment. It starts, pauses, marks, and stops capture (optionally keeping
+the audio and identifying speakers after Stop, remembered in UserDefaults;
+push-to-talk sessions never keep audio), shows the floating captions, opens
+the transcript folder, and offers push to talk on ⌃⌥Space
 (hold to speak; the finalized text is pasted into the front application when
 Accessibility access is granted, else copied). It captures no audio itself.
 
