@@ -266,25 +266,35 @@ final class ProcessTapCapture {
         }
     }
 
+    /// Audio is being lost from the moment the output device changes until the
+    /// tap is rebuilt on the new one, so the check that costs two property
+    /// reads runs four times a second. Listing every audio process, and
+    /// retrying a rebuild that is waiting on hardware to appear, do not get
+    /// better for being asked more often, so they stay on the slow tick.
+    private static let monitorInterval: UInt64 = 250_000_000
+    private static let slowTickEvery = 8
+
     /// One task, one tick at a time, so no two rebuilds ever overlap.
     private func startMonitor() {
         let task = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: Self.monitorInterval)
                 guard !Task.isCancelled, let self, !self.isStopping else { return }
-                await self.monitorTick()
+                tick += 1
+                await self.monitorTick(slowTick: tick % Self.slowTickEvery == 0)
             }
         }
         withLock { reconnectTask = task }
     }
 
-    private func monitorTick() async {
+    private func monitorTick(slowTick: Bool) async {
         if withLock({ needsRebuild }) {
-            await performRebuild(reason: "an earlier rebuild failed")
+            if slowTick { await performRebuild(reason: "an earlier rebuild failed") }
             return
         }
         if await followOutputDeviceChange() { return }
-        await refreshProcesses()
+        if slowTick { await refreshProcesses() }
     }
 
     /// Rebuild when the user sends their audio somewhere else.
