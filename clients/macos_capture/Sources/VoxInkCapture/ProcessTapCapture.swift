@@ -40,6 +40,18 @@ final class ProcessTapCapture {
     private var peakAmplitude = 0
     private var stopping = false
     private var reconnectTask: Task<Void, Never>?
+    /// The format the IO proc's buffers are read with. Not the tap's declared
+    /// format: it carries the tap's channel layout at the rate the device is
+    /// measured to be delivering, which is the only rate the audio is really at.
+    private var inputFormat: AVAudioFormat?
+    /// The tap's own description, kept so a corrected rate can be applied to it
+    /// without asking the HAL again.
+    private var tapStreamDescription: AudioStreamBasicDescription?
+    private var rateEstimator = DeliveredRateEstimator()
+    /// The output device the current aggregate was built around. The aggregate
+    /// is pinned to it, so when the default moves the tap has to be rebuilt.
+    private var builtWithOutputUID: String?
+    private var needsRebuild = false
 
     init(channel: Channel, sessionID: String, sampleRate: Int, sink: AudioFrameSink) {
         self.channel = channel
@@ -60,9 +72,10 @@ final class ProcessTapCapture {
             await frames.finishAndDrain()
             throw error
         }
-        if channel.bundleIdentifier != nil {
-            startReconnectMonitor()
-        }
+        // Every channel needs the monitor now, not just the application-scoped
+        // ones: it is also what notices the output device changing underneath
+        // a whole-system tap.
+        startMonitor()
     }
 
     /// The tap stays open across a pause so no permission is re-requested;
@@ -172,7 +185,18 @@ final class ProcessTapCapture {
             AudioHardwareDestroyProcessTap(tap)
             throw CaptureError.tapUnavailable("tap format unavailable: \(error.localizedDescription)")
         }
+        // The tap declares a format, but the audio arrives through the
+        // aggregate device, clocked by the output device — and the two do
+        // disagree: a tap here declared 48 kHz while a Bluetooth headset
+        // delivered 44.1 kHz, and 16 kHz in its call profile. The nominal rate
+        // is the better opening guess of the two, and `DeliveredRateEstimator`
+        // corrects whichever of them is wrong within about a second.
         var format = streamDescription
+        if let nominalRate: Float64 = try? CoreAudioSupport.scalarProperty(
+            aggregate, selector: kAudioDevicePropertyNominalSampleRate
+        ), nominalRate > 0 {
+            format.mSampleRate = nominalRate
+        }
         guard let tapFormat = AVAudioFormat(streamDescription: &format) else {
             AudioHardwareDestroyAggregateDevice(aggregate)
             AudioHardwareDestroyProcessTap(tap)
@@ -180,8 +204,10 @@ final class ProcessTapCapture {
         }
 
         var procID: AudioDeviceIOProcID?
-        status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregate, queue) { [weak self] _, inputData, _, _, _ in
-            self?.handle(bufferList: inputData, format: tapFormat)
+        // The block reads the current format rather than capturing one, so a
+        // corrected rate takes effect on the next buffer.
+        status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregate, queue) { [weak self] _, inputData, inputTime, _, _ in
+            self?.handle(bufferList: inputData, inputTime: inputTime)
         }
         guard status == noErr, let procID else {
             AudioHardwareDestroyAggregateDevice(aggregate)
@@ -199,6 +225,13 @@ final class ProcessTapCapture {
             tapID = tap
             aggregateID = aggregate
             ioProcID = procID
+            tapStreamDescription = format
+            inputFormat = tapFormat
+            builtWithOutputUID = outputUID
+            needsRebuild = false
+            // Evidence gathered from the previous device says nothing about
+            // this one.
+            rateEstimator.reset()
         }
         await emitStatus(
             level: .info,
@@ -213,6 +246,12 @@ final class ProcessTapCapture {
             tapID = AudioObjectID(kAudioObjectUnknown)
             aggregateID = AudioObjectID(kAudioObjectUnknown)
             ioProcID = nil
+            // A callback already in flight finds no format and returns rather
+            // than reading a buffer against a torn-down device's layout.
+            inputFormat = nil
+            tapStreamDescription = nil
+            builtWithOutputUID = nil
+            rateEstimator.reset()
             return state
         }
         if aggregate != kAudioObjectUnknown {
@@ -227,15 +266,44 @@ final class ProcessTapCapture {
         }
     }
 
-    private func startReconnectMonitor() {
+    /// One task, one tick at a time, so no two rebuilds ever overlap.
+    private func startMonitor() {
         let task = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled, let self, !self.isStopping else { return }
-                await self.refreshProcesses()
+                await self.monitorTick()
             }
         }
         withLock { reconnectTask = task }
+    }
+
+    private func monitorTick() async {
+        if withLock({ needsRebuild }) {
+            await performRebuild(reason: "an earlier rebuild failed")
+            return
+        }
+        if await followOutputDeviceChange() { return }
+        await refreshProcesses()
+    }
+
+    /// Rebuild when the user sends their audio somewhere else.
+    ///
+    /// The aggregate device names its output device at creation and keeps it,
+    /// so after a switch it is clocked by — or waiting on — a device the user
+    /// has left. Unplugged headphones would otherwise end the capture silently.
+    private func followOutputDeviceChange() async -> Bool {
+        guard let built = withLock({ builtWithOutputUID }) else { return false }
+        guard let current = try? CoreAudioSupport.defaultOutputDeviceUID(), current != built else {
+            return false
+        }
+        await emitStatus(
+            level: .info,
+            code: "output_device_changed",
+            message: "The default output device changed; rebuilding tap \(channel.streamID) on it."
+        )
+        await performRebuild(reason: "the output device changed")
+        return true
     }
 
     private func refreshProcesses() async {
@@ -250,18 +318,42 @@ final class ProcessTapCapture {
                 code: "applications_changed",
                 message: "\(channel.name ?? bundle) processes changed; rebuilding the tap."
             )
-            try await rebuildTap(allowMissingProcesses: true)
         } catch {
             await emitStatus(level: .error, code: "application_reconnect_failed", message: error.localizedDescription)
+            return
+        }
+        await performRebuild(reason: "the tapped processes changed")
+    }
+
+    /// Rebuild, and leave the session running if it fails.
+    ///
+    /// There may be no output device at all for a moment — the last one
+    /// unplugged, none chosen yet — and that is a wait, not the end of a
+    /// recording. The monitor retries until one is there.
+    private func performRebuild(reason: String) async {
+        do {
+            try await rebuildTap(allowMissingProcesses: true)
+        } catch {
+            withLock { needsRebuild = true }
+            await emitStatus(
+                level: .warning,
+                code: "tap_rebuild_failed",
+                message: "Could not rebuild tap \(channel.streamID) after \(reason): \(error.localizedDescription). Retrying."
+            )
         }
     }
 
     // MARK: - Audio delivery
 
-    private func handle(bufferList: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
+    private func handle(bufferList: UnsafePointer<AudioBufferList>, inputTime: UnsafePointer<AudioTimeStamp>) {
+        guard let format = withLock({ inputFormat }) else { return }
         guard let input = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: bufferList, deallocator: nil),
               input.frameLength > 0
         else { return }
+        // The buffer's frame count never depended on the assumed rate — only
+        // how long those frames are held to last did, which is the whole
+        // defect — so the measurement is sound even while the rate is wrong.
+        trackDeliveredRate(frameCount: Int(input.frameLength), timestamp: inputTime.pointee, assumedRate: format.sampleRate)
         do {
             let activity = SystemAudioCapture.pcmByteActivity(input)
             let data = try normalizer.normalize(input)
@@ -289,6 +381,51 @@ final class ProcessTapCapture {
         } catch {
             Task { await emitStatus(level: .warning, code: "system_frame_dropped", message: error.localizedDescription) }
         }
+    }
+
+    /// Measure what the device is delivering, and convert at that rate instead
+    /// when it disagrees with what the format claims.
+    private func trackDeliveredRate(frameCount: Int, timestamp: AudioTimeStamp, assumedRate: Double) {
+        // A device that does not stamp its buffers still has a clock we can
+        // read; reading it here is no worse than the timestamp would have been.
+        let hostTime = timestamp.mFlags.contains(.hostTimeValid) ? timestamp.mHostTime : mach_absolute_time()
+        let corrected = withLock { () -> Double? in
+            rateEstimator.observe(
+                frameCount: frameCount,
+                hostSeconds: Self.seconds(fromHostTime: hostTime),
+                assumedRate: assumedRate
+            )
+        }
+        guard let corrected else { return }
+        let adopted: Bool = withLock {
+            guard var description = tapStreamDescription else { return false }
+            description.mSampleRate = corrected
+            guard let format = AVAudioFormat(streamDescription: &description) else { return false }
+            tapStreamDescription = description
+            inputFormat = format
+            return true
+        }
+        guard adopted else { return }
+        let streamID = channel.streamID
+        Task { [weak self] in
+            await self?.emitStatus(
+                level: .warning,
+                code: "tap_rate_corrected",
+                message: "Tap \(streamID) is delivering \(Int(corrected)) Hz, not the \(Int(assumedRate)) Hz its format declared; converting at the measured rate."
+            )
+        }
+    }
+
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
+
+    private static func seconds(fromHostTime hostTime: UInt64) -> TimeInterval {
+        let info = timebase
+        guard info.denom != 0 else { return 0 }
+        return Double(hostTime) * Double(info.numer) / Double(info.denom) / 1_000_000_000
     }
 
     private var isStopping: Bool { withLock { stopping } }
