@@ -120,7 +120,12 @@ class ControlClient:
     # -- Agent grants (§14.5) ----------------------------------------------
 
     def grant_scopes(self) -> dict[str, Any]:
+        """The catalog of scopes a grant may carry — not what this caller holds."""
         return self._request("GET", "/v1/grants/scopes")
+
+    def grant_self(self) -> dict[str, Any]:
+        """What this caller may actually do, according to the credential it sent."""
+        return self._request("GET", "/v1/grants/self")
 
     def grants(self) -> dict[str, Any]:
         return self._request("GET", "/v1/grants")

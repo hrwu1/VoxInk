@@ -496,18 +496,48 @@ def create_app(
     async def authenticate(request: Request, call_next):
         path = request.url.path
         public_ui = path == "/ui" or path.startswith("/ui/")
-        request.state.principal = _Principal.anonymous()
-        if public_ui or path in _PUBLIC_PATHS or _is_consent_path(request.method, path):
-            return await call_next(request)
+        # Identify the caller before deciding whether this path needs one, so a
+        # public route such as `/v1/grants/self` can still describe a credential
+        # that was presented instead of reporting every caller as anonymous.
         header = request.headers.get("authorization")
         if _authorized(header, runtime.settings.auth_secret):
             request.state.principal = _Principal.owner()
+        else:
+            grant = runtime.grants.authenticate(_bearer(header)) if _bearer(header) else None
+            request.state.principal = (
+                _Principal.for_grant(grant) if grant is not None else _Principal.anonymous()
+            )
+        if public_ui or path in _PUBLIC_PATHS or _is_consent_path(request.method, path):
             return await call_next(request)
-        grant = runtime.grants.authenticate(_bearer(header)) if _bearer(header) else None
-        if grant is not None:
-            request.state.principal = _Principal.for_grant(grant)
+        if request.state.principal.kind != "anonymous":
             return await call_next(request)
-        return JSONResponse(status_code=401, content={"detail": "invalid local service credential"})
+        # An agent that holds nothing is not stuck: the consent flow is open to
+        # it, so name the way out rather than refusing in prose (§14.5).
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": {
+                    "code": "permission_denied",
+                    "message": (
+                        "no valid local credential: this call needs the owner's approval"
+                        if header
+                        else "no local credential was presented"
+                    ),
+                    "remediation": (
+                        "Ask the owner for a grant: POST /v1/grants/requests with the scopes you "
+                        "need, have the owner approve it in VoxInk, then POST "
+                        "/v1/grants/requests/{request_id}/claim. Both are open to callers holding "
+                        "no credential."
+                    ),
+                    "consent": {
+                        "request": "POST /v1/grants/requests",
+                        "claim": "POST /v1/grants/requests/{request_id}/claim",
+                        "scopes": "GET /v1/grants/scopes",
+                        "self": "GET /v1/grants/self",
+                    },
+                }
+            },
+        )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -875,6 +905,28 @@ def create_app(
     @app.get("/v1/grants/scopes")
     async def grant_scopes() -> dict[str, Any]:
         return {"scopes": list(GRANT_SCOPES)}
+
+    @app.get("/v1/grants/self")
+    async def grant_self(http: Request) -> dict[str, Any]:
+        """What the caller may actually do, as opposed to what a grant can carry.
+
+        A caller cannot learn its own standing from `/v1/grants/scopes`, which
+        is only the catalog; reading the catalog as one's own permissions is
+        the mistake this route exists to prevent. Public, because describing a
+        credential to the caller that presented it discloses nothing further.
+        """
+        principal = _principal(http)
+        grant = principal.grant
+        return {
+            "credential": "owner" if principal.kind == "owner" else ("grant" if grant else "none"),
+            # The owner credential authorizes every scope; anonymous, none.
+            "scopes": list(GRANT_SCOPES) if principal.kind == "owner" else (list(grant.scopes) if grant else []),
+            "grant_id": grant.id if grant else None,
+            "expires_at": grant.expires_at if grant else None,
+            "applications": list(grant.applications) if grant else [],
+            "retain_audio": bool(grant.retain_audio) if grant else False,
+            "requestable_scopes": list(GRANT_SCOPES),
+        }
 
     @app.get("/v1/grants")
     async def list_grants(http: Request) -> dict[str, Any]:
@@ -1487,7 +1539,9 @@ def _bearer(header: str | None) -> str | None:
 
 # Paths anyone on loopback may call: readiness, the UI bootstrap, and the
 # consent flow an agent uses before it has any credential at all.
-_PUBLIC_PATHS = frozenset({"/health", "/v1/ui/bootstrap", "/v1/ui/capture/capabilities", "/v1/grants/scopes"})
+_PUBLIC_PATHS = frozenset(
+    {"/health", "/v1/ui/bootstrap", "/v1/ui/capture/capabilities", "/v1/grants/scopes", "/v1/grants/self"}
+)
 _CAPTURE_SCOPES = ("capture.microphone", "capture.system", "capture.applications")
 
 

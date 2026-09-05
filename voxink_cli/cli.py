@@ -106,14 +106,23 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
                 "permitted": False,
             },
         },
+        # `grant_scopes` is the §14.4 name for the catalog of scopes a grant may
+        # carry. It says nothing about this caller, which read as permission the
+        # caller did not hold, so `permitted_scopes` below now answers that. The
+        # old name stays: schema 1 may gain fields but not lose them.
         "grant_scopes": list(GRANT_SCOPES),
+        "requestable_scopes": list(GRANT_SCOPES),
         "grant_enforcement": "grant-token" if client.uses_grant else "developer-credential",
         "deferred_command_groups": list(DEFERRED_COMMAND_GROUPS),
     }
-    if client.uses_grant:
-        # Under a grant, "permitted" means what the grant says, not what the
-        # helper could do for its owner.
-        granted = set(_granted_scopes(client))
+    standing = client.grant_self()
+    data["credential"] = standing.get("credential", "none")
+    data["permitted_scopes"] = list(standing.get("scopes", []))
+    if data["credential"] != "owner":
+        # Only the owner credential authorizes every scope. For anyone else —
+        # a grant, or a caller holding nothing at all — "permitted" means what
+        # the credential says, not what the helper could do for its owner.
+        granted = set(data["permitted_scopes"])
         for feature in data["features"].values():
             feature["permitted"] = feature["permitted"] and bool(granted)
         for scope in GRANT_SCOPES:
@@ -126,12 +135,19 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
         f"{data['bind_policy']}",
         "capture modes: " + (", ".join(data["capture_modes"]) or "none"),
         f"grant enforcement: {data['grant_enforcement']}",
+        f"credential: {data['credential']}; permitted scopes: "
+        + (", ".join(data["permitted_scopes"]) or "none"),
     ]
     warnings = []
-    if not client.uses_grant:
+    if data["credential"] == "owner":
         warnings.append(
             "This command holds the owner credential, which authorizes every scope. "
             f"Agents should run under a grant token ({GRANT_TOKEN_FILE_ENV})."
+        )
+    elif data["credential"] == "none":
+        warnings.append(
+            "This command holds no credential, so no scope is permitted. Ask for a grant "
+            "with: voxink permissions request --scope SCOPE --client NAME"
         )
     if not native:
         warnings.append(
@@ -692,24 +708,13 @@ def _speakers_forget(args: argparse.Namespace, client: ControlClient) -> Result:
 
 
 def _granted_scopes(client: ControlClient) -> list[str]:
-    """Scopes the current grant token carries, learned by asking for a listing.
+    """Scopes the current credential carries, as the service reports them.
 
-    A grant cannot list grants (owner only), so this probes the cheapest
-    scoped read and infers from the refusal which scopes are missing.
+    This used to probe two scoped reads and infer the rest from their refusals,
+    which could only ever learn about those two and filed no answer for the
+    others. `/v1/grants/self` answers for every scope directly.
     """
-    scopes = []
-    for scope, probe in (
-        ("transcripts.read", client.transcripts),
-        ("sessions.read", client.sessions),
-    ):
-        try:
-            probe()
-        except Failure as failure:
-            if failure.code not in {ErrorCode.APPROVAL_REQUIRED, ErrorCode.PERMISSION_DENIED}:
-                raise
-            continue
-        scopes.append(scope)
-    return scopes
+    return list(client.grant_self().get("scopes", []))
 
 
 def _permissions_scopes(args: argparse.Namespace, client: ControlClient) -> Result:

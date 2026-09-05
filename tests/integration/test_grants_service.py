@@ -88,6 +88,38 @@ class GrantServiceTests(unittest.TestCase):
 
     # -- who may do what --------------------------------------------------------
 
+    def test_self_reports_the_callers_own_standing_not_the_catalog(self) -> None:
+        catalog = self.client.get("/v1/grants/scopes").json()["scopes"]
+
+        anonymous = self.client.get("/v1/grants/self").json()
+        self.assertEqual(anonymous["credential"], "none")
+        # The catalog is offered to choose from, never as the caller's own.
+        self.assertEqual(anonymous["scopes"], [])
+        self.assertEqual(anonymous["requestable_scopes"], catalog)
+
+        owner = self.client.get("/v1/grants/self", headers=self.owner()).json()
+        self.assertEqual(owner["credential"], "owner")
+        self.assertEqual(owner["scopes"], catalog)
+
+        grant, token = self.issue(scopes=["transcripts.read"], label="agent")
+        held = self.client.get("/v1/grants/self", headers=self.bearer(token)).json()
+        self.assertEqual(held["credential"], "grant")
+        self.assertEqual(held["scopes"], ["transcripts.read"])
+        self.assertEqual(held["grant_id"], grant["id"])
+
+        # A token that is not a credential at all is nobody, not a grant.
+        bogus = self.client.get("/v1/grants/self", headers=self.bearer("vxg_bogus")).json()
+        self.assertEqual(bogus["credential"], "none")
+
+    def test_a_caller_holding_nothing_is_told_how_to_ask(self) -> None:
+        refused = self.client.get("/v1/transcripts")
+        self.assertEqual(refused.status_code, 401)
+        detail = refused.json()["detail"]
+        self.assertEqual(detail["code"], "permission_denied")
+        # The way out is named, so the refusal is actionable rather than prose.
+        self.assertEqual(detail["consent"]["request"], "POST /v1/grants/requests")
+        self.assertIn("/v1/grants/requests", detail["remediation"])
+
     def test_grant_tokens_authenticate_but_only_the_owner_manages_grants(self) -> None:
         grant, token = self.issue()
         self.assertEqual(self.client.get("/v1/grants", headers=self.owner()).json()["grants"][0]["id"], grant["id"])
