@@ -307,9 +307,13 @@ allow-list, a maximum recording length (the capture stops when it runs out),
 whether audio may be kept, an expiry, and single use. A grant token
 authenticates the control API; a call that lacks a scope returns
 `approval_required` together with a pending request the tab shows, and a
-claim secret only the caller sees. Revoking a grant stops any capture it
-started. Every control mutation writes one line to `audit.jsonl` (no
-transcript text, no credentials).
+claim secret only the caller sees. An agent that holds no credential at all
+gets the same answer rather than a bare refusal, so a first run reaches the
+consent flow from the error it actually receives. `voxink permissions scopes`
+lists what a grant may carry; `capabilities` reports `credential` and
+`permitted_scopes`, which is what the caller may actually do. Revoking a grant
+stops any capture it started. Every control mutation writes one line to
+`audit.jsonl` (no transcript text, no credentials).
 
 ```sh
 ./scripts/voxink permissions request --scope capture.system --max-minutes 45 --client "Claude Code"
@@ -322,7 +326,12 @@ VOXINK_GRANT_TOKEN_FILE=~/.voxink-token ./scripts/voxink capture start --source 
 (`voxink_capture_start`, `voxink_capture_events` with a long-poll wait so an
 agent can follow a meeting as it happens, `voxink_transcript_show`, and the
 request/claim consent tools). Point it at a token file with `--token-file`
-or the environment variable above; without one it can only ask.
+or the environment variable above; without one it can only ask. A refused tool
+files the request for the agent and returns its `request_id` and
+`claim_secret`, naming only the scopes that tool needs — starting a microphone
+capture asks for `capture.microphone`, not for every capture scope — so the
+agent's next step is to have the owner approve it and call
+`voxink_permissions_claim`.
 
 ## Scripting and agents: the `voxink` command
 

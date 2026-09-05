@@ -90,6 +90,31 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# The scopes each tool needs, so a refusal can name them and ask for exactly
+# those. The consent tools are absent on purpose: they are how an agent holding
+# nothing gets a credential, so they must never trigger a request of their own.
+TOOL_SCOPES: dict[str, tuple[str, ...]] = {
+    "voxink_status": ("sessions.read",),
+    "voxink_capture_start": ("capture.microphone", "capture.system", "capture.applications"),
+    "voxink_capture_pause": ("capture.microphone", "capture.system", "capture.applications"),
+    "voxink_capture_resume": ("capture.microphone", "capture.system", "capture.applications"),
+    "voxink_capture_stop": ("capture.microphone", "capture.system", "capture.applications"),
+    "voxink_capture_mark": ("capture.microphone", "capture.system", "capture.applications"),
+    "voxink_capture_events": ("sessions.read",),
+    "voxink_transcripts_list": ("transcripts.read",),
+    "voxink_transcript_show": ("transcripts.read",),
+}
+
+# Starting a capture should ask only for the sources it was actually given.
+_SOURCE_SCOPES = {
+    "microphone": "capture.microphone",
+    "system": "capture.system",
+    "applications": "capture.applications",
+}
+
+_PERMISSION_CODES = {ErrorCode.PERMISSION_DENIED, ErrorCode.APPROVAL_REQUIRED}
+
+
 class Session:
     """One MCP session: a client, the grant it acts under, and its tools."""
 
@@ -120,7 +145,61 @@ class Session:
         handler = getattr(self, f"tool_{name.removeprefix('voxink_')}", None)
         if handler is None:
             raise Failure(ErrorCode.INVALID_REQUEST, f"unknown tool: {name}")
-        return handler(**arguments)
+        try:
+            return handler(**arguments)
+        except Failure as failure:
+            raise self._as_consent_request(name, arguments, failure) from None
+
+    def _as_consent_request(self, name: str, arguments: dict[str, Any], failure: Failure) -> Failure:
+        """Turn a refusal this session cannot act on into one it can.
+
+        The service files a pending request for a caller that holds a grant but
+        lacks a scope. A caller holding nothing never reaches that code — it is
+        refused while being authenticated — so without this it would receive a
+        dead end where the instructions promise `approval_required`. Filing the
+        request here keeps that promise, and the claim secret goes only to this
+        caller.
+        """
+        if failure.code not in _PERMISSION_CODES or failure.details.get("request_id"):
+            return failure
+        scopes = self._scopes_for(name, arguments)
+        if not scopes:
+            return failure
+        try:
+            response = self.client().request_grant(
+                client=self.client_name,
+                reason=f"needed by {name}",
+                scopes=list(scopes),
+                applications=list(arguments.get("applications") or []),
+                max_duration_s=None,
+                retain_audio=bool(arguments.get("retain_audio")),
+            )
+        except Failure:
+            # The consent flow itself is unreachable; the original refusal is
+            # still the truest thing we can say.
+            return failure
+        request = response.get("request", {})
+        return Failure(
+            ErrorCode.APPROVAL_REQUIRED,
+            f"{name} needs the owner's approval: {', '.join(scopes)}",
+            details={
+                "missing_scopes": list(scopes),
+                "request_id": request.get("id"),
+                "claim_secret": response.get("claim_secret"),
+                "next": (
+                    "Ask the user to approve this request in VoxInk's Agent access tab, "
+                    "then call voxink_permissions_claim with the request_id and claim_secret."
+                ),
+            },
+        )
+
+    def _scopes_for(self, name: str, arguments: dict[str, Any]) -> tuple[str, ...]:
+        if name == "voxink_capture_start":
+            sources = arguments.get("sources") or []
+            asked = tuple(dict.fromkeys(_SOURCE_SCOPES[s] for s in sources if s in _SOURCE_SCOPES))
+            if asked:
+                return asked
+        return TOOL_SCOPES.get(name, ())
 
     def tool_status(self) -> dict[str, Any]:
         client = self.client()
@@ -138,13 +217,19 @@ class Session:
         client = self.client()
         health = client.health()
         capture = client.capture_capabilities()
+        # What this session may do comes from the service, not from the catalog
+        # of what a grant could carry: reporting the catalog beside a credential
+        # of "none" reads as permission the agent does not have.
+        standing = client.grant_self()
         return {
             "protocol_version": health.get("protocol_version"),
             "capture_modes": capture.get("modes", []),
             "partial_captions": capture.get("partial_captions"),
             "translation_available": capture.get("translation_available"),
-            "credential": "owner" if self.owner else ("grant" if self.token else "none"),
-            "grant_scopes": client.grant_scopes().get("scopes", []),
+            "credential": standing.get("credential", "none"),
+            "permitted_scopes": standing.get("scopes", []),
+            "requestable_scopes": standing.get("requestable_scopes", []),
+            "grant_expires_at": standing.get("expires_at"),
         }
 
     def tool_capture_start(
@@ -337,9 +422,12 @@ def handle(session: Session, message: dict[str, Any]) -> dict[str, Any] | None:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
             "instructions": (
-                "VoxInk transcribes locally. Live capture needs a grant the user approves in the "
-                "VoxInk app: if a tool returns approval_required, call voxink_permissions_request, "
-                "ask the user to approve it, then voxink_permissions_claim."
+                "VoxInk transcribes locally. Every tool except voxink_capabilities and the "
+                "consent tools needs a grant the user approves in VoxInk's Agent access tab. "
+                "A refused call returns approval_required together with the request_id and "
+                "claim_secret of a request already filed for you: ask the user to approve it, "
+                "then call voxink_permissions_claim with those two values. Call "
+                "voxink_capabilities first to see permitted_scopes for this session."
             ),
         })
     if method in {"notifications/initialized", "notifications/cancelled"}:

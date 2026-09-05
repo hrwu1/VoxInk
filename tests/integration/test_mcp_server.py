@@ -51,6 +51,13 @@ class McpServerTests(unittest.TestCase):
     def owner_client(self) -> ControlClient:
         return ControlClient(self.endpoint, RequestContext.create())
 
+    def mint_grant(self, scopes: list[str]) -> str:
+        """A token carrying exactly `scopes`, through the real consent flow."""
+        asked = self.owner_client().request_grant(client="agent", reason="test", scopes=scopes)
+        request_id = asked["request"]["id"]
+        self.owner_client().approve_grant_request(request_id)
+        return self.owner_client().claim_grant(request_id, asked["claim_secret"])["token"]
+
     def call(self, session: Session, name: str, arguments: dict | None = None, identifier: int = 1) -> dict:
         response = handle(session, {"jsonrpc": "2.0", "id": identifier, "method": "tools/call", "params": {"name": name, "arguments": arguments or {}}})
         return json.loads(response["result"]["content"][0]["text"]) | {"isError": response["result"].get("isError", False)}
@@ -70,7 +77,13 @@ class McpServerTests(unittest.TestCase):
         session = Session(token=None, owner=False, client_name="Claude Code", client_factory=self.factory)
         status = self.call(session, "voxink_status")
         self.assertFalse(status["ok"])
-        self.assertEqual(status["error"]["code"], "permission_denied")
+        # Holding nothing is not a dead end: the refusal carries a request the
+        # owner can approve, which is what `initialize` tells the agent to expect.
+        self.assertEqual(status["error"]["code"], "approval_required")
+        self.assertEqual(status["error"]["details"]["missing_scopes"], ["sessions.read"])
+        self.assertTrue(status["error"]["details"]["request_id"])
+        self.assertTrue(status["error"]["details"]["claim_secret"])
+        self.assertTrue(status["error"]["retryable"])
         asked = self.call(session, "voxink_permissions_request", {"scopes": ["capture.system", "transcripts.read"], "max_minutes": 15, "reason": "meeting notes"})
         self.assertTrue(asked["ok"], asked)
         request_id = asked["data"]["request_id"]
@@ -99,6 +112,37 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(refused["error"]["details"]["missing_scopes"], ["capture.microphone"])
         listed = self.call(session, "voxink_transcripts_list")
         self.assertTrue(listed["ok"], listed)
+
+    def test_capabilities_reports_what_this_session_may_do_not_the_catalog(self) -> None:
+        session = Session(token=None, owner=False, client_name="Claude Code", client_factory=self.factory)
+        holding_nothing = self.call(session, "voxink_capabilities")
+        self.assertTrue(holding_nothing["ok"], holding_nothing)
+        self.assertEqual(holding_nothing["data"]["credential"], "none")
+        # The catalog stays available to choose from, but never as this
+        # session's own permissions.
+        self.assertEqual(holding_nothing["data"]["permitted_scopes"], [])
+        self.assertIn("capture.system", holding_nothing["data"]["requestable_scopes"])
+        self.assertNotIn("grant_scopes", holding_nothing["data"])
+
+        token = self.mint_grant(["transcripts.read"])
+        granted = self.call(Session(token=token, owner=False, client_name="a", client_factory=self.factory), "voxink_capabilities")
+        self.assertEqual(granted["data"]["credential"], "grant")
+        self.assertEqual(granted["data"]["permitted_scopes"], ["transcripts.read"])
+
+    def test_a_refused_capture_asks_only_for_the_sources_it_was_given(self) -> None:
+        session = Session(token=None, owner=False, client_name="Claude Code", client_factory=self.factory)
+        refused = self.call(session, "voxink_capture_start", {"sources": ["microphone"]})
+        self.assertEqual(refused["error"]["code"], "approval_required")
+        self.assertEqual(refused["error"]["details"]["missing_scopes"], ["capture.microphone"])
+        pending = {item["id"]: item for item in self.owner_client().grant_requests()["requests"]}
+        self.assertEqual(pending[refused["error"]["details"]["request_id"]]["scopes"], ["capture.microphone"])
+
+    def test_the_consent_tools_never_ask_for_a_grant_of_their_own(self) -> None:
+        session = Session(token=None, owner=False, client_name="Claude Code", client_factory=self.factory)
+        claimed = self.call(session, "voxink_permissions_claim", {"request_id": "req_missing", "claim_secret": "nope"})
+        self.assertFalse(claimed["ok"])
+        self.assertNotEqual(claimed["error"]["code"], "approval_required")
+        self.assertEqual(self.owner_client().grant_requests()["requests"], [])
 
     def test_serve_reads_jsonrpc_lines_from_stdin(self) -> None:
         stdin = io.StringIO(

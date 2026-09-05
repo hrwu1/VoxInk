@@ -699,7 +699,13 @@ device. The service publishes `transcript.translation` events and a
 `max_duration_s`, `retain_audio`, expiry, single use) and pending requests
 with claim secrets. Grant tokens (`vxg_…`) authenticate the control API; the
 owner credential remains unrestricted. Missing scope returns HTTP 403 with
-`{"code": "approval_required", "request_id": …, "claim_secret": …}`. Every
+`{"code": "approval_required", "request_id": …, "claim_secret": …}`. A caller
+holding no credential is refused earlier, while being authenticated, so it
+cannot reach that answer from the service; `voxink_mcp` files the request for
+it from the scopes its tool needs and returns the same shape, which is what
+section 14.5 requires of missing authorization. `GET /v1/grants/self` reports
+the caller's own credential and effective scopes, as distinct from
+`/v1/grants/scopes`, which is only the catalog a grant may carry. Every
 control mutation is appended to `audit.jsonl`. `voxink_mcp` is the agent
 adapter over the shared client.
 
