@@ -30,13 +30,13 @@ class _Response:
 def _http_error(status: int, detail: str | None) -> HTTPError:
     body = json.dumps({"detail": detail}).encode() if detail is not None else b""
     return HTTPError(
-        "http://127.0.0.1:8765/v1/models/active", status, "failed", {}, io.BytesIO(body)
+        "http://127.0.0.1:8300/v1/models/active", status, "failed", {}, io.BytesIO(body)
     )
 
 
 class ControlClientTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.endpoint = ControlEndpoint("http://127.0.0.1:8765", "secret-value")
+        self.endpoint = ControlEndpoint("http://127.0.0.1:8300", "secret-value")
         self.context = RequestContext.create(request_id="req_test", timeout=4.0)
         self.client = ControlClient(self.endpoint, self.context)
 
@@ -72,7 +72,7 @@ class ControlClientTests(unittest.TestCase):
         self.assertIsNone(read.args[0].get_header("X-voxink-idempotency-key"))
 
     def test_an_endpoint_without_a_credential_sends_no_authorization(self) -> None:
-        client = ControlClient(ControlEndpoint("http://127.0.0.1:8765", None), self.context)
+        client = ControlClient(ControlEndpoint("http://127.0.0.1:8300", None), self.context)
 
         _, call = self._call(_Response(b"{}"), client.models)
 
@@ -166,7 +166,7 @@ class FileTranscriptionTests(unittest.TestCase):
         self.addCleanup(self._temporary.cleanup)
         self.root = Path(self._temporary.name)
         self.client = ControlClient(
-            ControlEndpoint("http://127.0.0.1:8765", None),
+            ControlEndpoint("http://127.0.0.1:8300", None),
             RequestContext.create(request_id="req_test"),
         )
 

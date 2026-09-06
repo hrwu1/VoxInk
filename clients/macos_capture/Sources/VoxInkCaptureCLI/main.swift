@@ -67,7 +67,7 @@ private struct CLIError: LocalizedError {
       voxink-capture --list-devices
       voxink-capture [--mic] [--mic-device UID] [--system-all | --app BUNDLE_ID ...]
                       [--backend auto|tap|screencapturekit] [--language en|zh]
-                      [--endpoint ws://127.0.0.1:8765/v1/sessions/SESSION_ID/stream]
+                      [--endpoint ws://127.0.0.1:8300/v1/sessions/SESSION_ID/stream]
                       [--session-id ID] [--no-captions | --click-through]
                       [--retain-audio]
 

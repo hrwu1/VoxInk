@@ -19,7 +19,7 @@ python -m clients.python_capture --stream-mode frames
 
 The interactive commands are `start`, `pause`, `resume`, `stop`, and `quit`.
 The default endpoint is
-`ws://127.0.0.1:8765/v1/sessions/{session_id}/stream`. Use `--url` to override
+`ws://127.0.0.1:8300/v1/sessions/{session_id}/stream`. Use `--url` to override
 it. Run `python -m clients.python_capture --help` for VAD and device settings.
 
 Audio retention is off by default. `--retain-audio` asks the service to save the

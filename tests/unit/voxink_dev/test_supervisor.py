@@ -27,22 +27,26 @@ class PortSelectionTests(unittest.TestCase):
         listener.getsockname.return_value = ("127.0.0.1", port)
         return listener
 
-    def test_prefers_port_8765_when_available(self) -> None:
-        listener = self._listener(8765)
+    def test_prefers_port_8300_when_available(self) -> None:
+        listener = self._listener(8300)
         with patch("voxink_dev.supervisor.socket.socket", return_value=listener):
-            self.assertEqual(8765, _preferred_loopback_port())
-        listener.bind.assert_called_once_with(("127.0.0.1", 8765))
+            self.assertEqual(8300, _preferred_loopback_port())
+        listener.bind.assert_called_once_with(("127.0.0.1", 8300))
 
-    def test_uses_an_os_assigned_port_when_8765_is_unavailable(self) -> None:
-        preferred = self._listener(8765, bind_error=OSError("address in use"))
-        fallback = self._listener(54321)
+    def test_uses_next_port_in_project_range_when_8300_is_unavailable(self) -> None:
+        preferred = self._listener(8300, bind_error=OSError("address in use"))
+        fallback = self._listener(8301)
         with patch(
             "voxink_dev.supervisor.socket.socket",
             side_effect=(preferred, fallback),
         ):
-            self.assertEqual(54321, _preferred_loopback_port())
-        preferred.bind.assert_called_once_with(("127.0.0.1", 8765))
-        fallback.bind.assert_called_once_with(("127.0.0.1", 0))
+            self.assertEqual(8301, _preferred_loopback_port())
+        preferred.bind.assert_called_once_with(("127.0.0.1", 8300))
+        fallback.bind.assert_called_once_with(("127.0.0.1", 8301))
+
+    def test_rejects_preferred_port_outside_project_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "8300-8399"):
+            _preferred_loopback_port(8765)
 
 
 class SupervisorIntegrationTests(unittest.TestCase):

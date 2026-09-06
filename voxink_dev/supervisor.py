@@ -23,7 +23,8 @@ from voxink_cli import discovery
 from .diagnostics import DiagnosticLog
 
 
-PREFERRED_HELPER_PORT = 8765
+PREFERRED_HELPER_PORT = 8300
+HELPER_PORT_RANGE = range(8300, 8400)
 
 
 class SupervisorError(RuntimeError):
@@ -290,12 +291,18 @@ class HelperSupervisor:
 
 
 def _preferred_loopback_port(preferred_port: int = PREFERRED_HELPER_PORT) -> int:
-    for port in (preferred_port, 0):
+    if preferred_port not in HELPER_PORT_RANGE:
+        raise ValueError("VoxInk helper ports must be within 8300-8399")
+    candidates = (
+        preferred_port,
+        *(port for port in HELPER_PORT_RANGE if port != preferred_port),
+    )
+    last_error: OSError | None = None
+    for port in candidates:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
                 listener.bind(("127.0.0.1", port))
                 return int(listener.getsockname()[1])
-        except OSError:
-            if port == 0:
-                raise
-    raise AssertionError("loopback port selection exhausted unexpectedly")
+        except OSError as error:
+            last_error = error
+    raise OSError("no available VoxInk helper port in 8300-8399") from last_error

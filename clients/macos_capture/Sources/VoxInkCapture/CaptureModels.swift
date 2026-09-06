@@ -70,7 +70,7 @@ public struct CaptureConfiguration: Sendable {
         self.language = language
         self.applicationNames = applicationNames
         let safeSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
-        self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8765/v1/sessions/\(safeSessionID)/stream")!
+        self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8300/v1/sessions/\(safeSessionID)/stream")!
         self.authToken = authToken
     }
 }

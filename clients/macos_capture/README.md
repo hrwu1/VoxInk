@@ -92,7 +92,7 @@ below for what it shows.
 ## Local service contract
 
 The default endpoint is
-`ws://127.0.0.1:8765/v1/sessions/{session_id}/stream`. `--endpoint` may change
+`ws://127.0.0.1:8300/v1/sessions/{session_id}/stream`. `--endpoint` may change
 its port or path, but the client rejects every non-loopback hostname and every
 non-WebSocket scheme.
 

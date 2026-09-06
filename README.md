@@ -65,8 +65,8 @@ workflow with:
 ```
 
 The command verifies the Python environment and local model checksums, checks
-disk space, prefers private loopback port `8765` (and chooses an available port
-automatically if it is busy), creates a per-launch credential, starts the helper,
+disk space, prefers private loopback port `8300` (and chooses the next available
+port through `8399` if it is busy), creates a per-launch credential, starts the helper,
 negotiates the protocol version, and opens a private recording console in the
 default browser. The page asks for microphone permission, streams audio only to
 the supervised loopback helper, displays finalized captions, and removes its
@@ -462,14 +462,14 @@ export VOXINK_AUTH_SECRET="replace-with-a-random-development-secret"
 .venv/bin/python -m services.transcription --device cpu
 ```
 
-The default direct-debug URL is `http://127.0.0.1:8765`. `/health` exposes only
+The default direct-debug URL is `http://127.0.0.1:8300`. `/health` exposes only
 minimal readiness and compatibility metadata; all session HTTP routes and
 WebSocket upgrades require `Authorization: Bearer $VOXINK_AUTH_SECRET`.
 
 ### Batch transcription
 
 ```sh
-curl -X POST http://127.0.0.1:8765/v1/transcriptions \
+curl -X POST http://127.0.0.1:8300/v1/transcriptions \
   -H "Authorization: Bearer $VOXINK_AUTH_SECRET" \
   -F file=@samples/asr_en.wav \
   -F session_id=batch-demo \

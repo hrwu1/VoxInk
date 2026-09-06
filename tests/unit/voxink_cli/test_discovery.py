@@ -27,7 +27,7 @@ class ControlEndpointTests(unittest.TestCase):
 
     def _publish(self, **overrides: object) -> Path:
         values: dict[str, object] = {
-            "base_url": "http://127.0.0.1:8765",
+            "base_url": "http://127.0.0.1:8300",
             "auth_secret": "secret-value",
             "protocol_version": "1",
             "service_version": "0.2.0",
@@ -41,7 +41,7 @@ class ControlEndpointTests(unittest.TestCase):
 
         endpoint = load(self.path)
 
-        self.assertEqual("http://127.0.0.1:8765", endpoint.base_url)
+        self.assertEqual("http://127.0.0.1:8300", endpoint.base_url)
         self.assertEqual("secret-value", endpoint.auth_secret)
         self.assertEqual("1", endpoint.protocol_version)
         self.assertEqual(4242, endpoint.pid)
@@ -93,7 +93,7 @@ class ControlEndpointTests(unittest.TestCase):
             load(self.path)
 
     def test_a_non_loopback_endpoint_is_refused(self) -> None:
-        self._publish(base_url="http://example.com:8765")
+        self._publish(base_url="http://example.com:8300")
 
         with self.assertRaises(EndpointUnavailable) as caught:
             load(self.path)

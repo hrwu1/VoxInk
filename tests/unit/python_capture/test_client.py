@@ -7,7 +7,7 @@ from clients.python_capture.client import CaptureConfig, MicrophoneCaptureClient
 
 def _start_message(**overrides) -> dict:
     config = CaptureConfig(
-        websocket_url="ws://127.0.0.1:8765/v1/sessions/demo/stream",
+        websocket_url="ws://127.0.0.1:8300/v1/sessions/demo/stream",
         session_id="demo",
         **overrides,
     )

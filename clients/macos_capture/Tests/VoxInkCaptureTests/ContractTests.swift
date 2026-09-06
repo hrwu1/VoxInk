@@ -165,16 +165,16 @@ final class ContractTests: XCTestCase {
         )
         XCTAssertEqual(
             configuration.serviceURL.absoluteString,
-            "ws://127.0.0.1:8765/v1/sessions/session-1/stream"
+            "ws://127.0.0.1:8300/v1/sessions/session-1/stream"
         )
     }
 
     func testEndpointPolicyOnlyAllowsLoopbackWebSockets() throws {
-        XCTAssertNoThrow(try LocalEndpointPolicy.validate(URL(string: "ws://127.0.0.1:8765/stream")!))
+        XCTAssertNoThrow(try LocalEndpointPolicy.validate(URL(string: "ws://127.0.0.1:8300/stream")!))
         XCTAssertNoThrow(try LocalEndpointPolicy.validate(URL(string: "wss://localhost/stream")!))
-        XCTAssertNoThrow(try LocalEndpointPolicy.validate(URL(string: "ws://[::1]:8765/stream")!))
-        XCTAssertThrowsError(try LocalEndpointPolicy.validate(URL(string: "ws://0.0.0.0:8765/stream")!))
-        XCTAssertThrowsError(try LocalEndpointPolicy.validate(URL(string: "ws://192.168.1.10:8765/stream")!))
+        XCTAssertNoThrow(try LocalEndpointPolicy.validate(URL(string: "ws://[::1]:8300/stream")!))
+        XCTAssertThrowsError(try LocalEndpointPolicy.validate(URL(string: "ws://0.0.0.0:8300/stream")!))
+        XCTAssertThrowsError(try LocalEndpointPolicy.validate(URL(string: "ws://192.168.1.10:8300/stream")!))
         XCTAssertThrowsError(try LocalEndpointPolicy.validate(URL(string: "https://127.0.0.1/stream")!))
     }
 
