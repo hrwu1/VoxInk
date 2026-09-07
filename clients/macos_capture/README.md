@@ -206,7 +206,11 @@ entries grouped into turns: a turn begins whenever the source changes
 (microphone, system audio, or a named application) or a mark arrives, and
 carries one small label with the time of its first caption. When the service
 recognizes a remembered voice live, the caption's `speaker` becomes the turn
-label and a change of name starts a new turn. Long sentences
+label and a change of name starts a new turn. The experimental live diarizer
+sends the same field with `speaker_provisional`, and `SpeakerLabel.compose`
+turns it into "Speaker 1 · provisional" (or "… · overlap · provisional", or
+"Unassigned · provisional" for speech it could not attribute) so a session-local
+guess never reads like a remembered name. Long sentences
 wrap in full; partial captions are dimmed and replaced in place by stable
 event ID; translations sit under their caption; marks are amber rows. The
 stream follows new captions until you scroll up, when a "Latest" chip

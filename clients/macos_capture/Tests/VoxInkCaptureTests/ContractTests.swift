@@ -97,6 +97,41 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(event.captionItem.isFinal)
     }
 
+    /// The experimental live diarizer labels voices within one session and can
+    /// revise them, so its labels say so and an enrolled name never does.
+    func testLiveDiarizationLabelsSayTheyAreProvisional() {
+        XCTAssertEqual(
+            "Speaker 1 · provisional",
+            SpeakerLabel.compose(speaker: "Speaker 1", provisional: true, overlap: false)
+        )
+        XCTAssertEqual(
+            "Speaker 1 + Speaker 2 · overlap · provisional",
+            SpeakerLabel.compose(speaker: "Speaker 1 + Speaker 2", provisional: true, overlap: true)
+        )
+        // Speech the diarizer could not attribute is still shown as a turn.
+        XCTAssertEqual(
+            "Unassigned · provisional",
+            SpeakerLabel.compose(speaker: nil, provisional: true, overlap: false)
+        )
+        XCTAssertEqual("Alice", SpeakerLabel.compose(speaker: "Alice", provisional: false, overlap: false))
+        XCTAssertNil(SpeakerLabel.compose(speaker: nil, provisional: false, overlap: false))
+        XCTAssertNil(SpeakerLabel.compose(speaker: "  ", provisional: false, overlap: false))
+    }
+
+    func testProvisionalSpeakerFieldsReachTheCaption() throws {
+        let json = Data(#"{"segment_id":"seg-2","source":"microphone","text":"hello","start_ms":0,"end_ms":900,"is_final":true,"speaker":"Speaker 2","speaker_provisional":true,"speaker_overlap":false}"#.utf8)
+        let event = try JSONDecoder().decode(TranscriptWireEvent.self, from: json)
+        XCTAssertEqual(event.captionItem.speakerName, "Speaker 2 · provisional")
+    }
+
+    /// Post-Stop diarization and enrolled voices send no such fields, and a
+    /// remembered name must keep reading as a name.
+    func testAnEventWithoutProvisionalFieldsKeepsItsPlainName() throws {
+        let json = Data(#"{"segment_id":"seg-3","source":"microphone","text":"hello","start_ms":0,"end_ms":900,"is_final":true,"speaker":"Alice"}"#.utf8)
+        let event = try JSONDecoder().decode(TranscriptWireEvent.self, from: json)
+        XCTAssertEqual(event.captionItem.speakerName, "Alice")
+    }
+
     /// Every stream of a session reports the selected applications and the
     /// retention request, because the service records whichever stream.start
     /// arrives first and the microphone socket usually opens before the system

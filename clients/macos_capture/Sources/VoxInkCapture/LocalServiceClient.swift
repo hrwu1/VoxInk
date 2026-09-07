@@ -31,8 +31,14 @@ public struct TranscriptWireEvent: Codable, Sendable {
     /// On-device translation of `text` into the other language, when enabled.
     public let translation: String?
     public let translationLanguage: String?
-    /// A remembered voice the service recognized live, if any.
+    /// A remembered voice the service recognized live, if any. Live
+    /// diarization puts its anonymous label here instead.
     public let speaker: String?
+    /// Set by live diarization: the label names a voice within this session
+    /// only, and may still change.
+    public let speakerProvisional: Bool?
+    /// Set by live diarization when more than one voice shares the turn.
+    public let speakerOverlap: Bool?
 
     public init(
         segmentID: String,
@@ -45,7 +51,9 @@ public struct TranscriptWireEvent: Codable, Sendable {
         channelName: String? = nil,
         translation: String? = nil,
         translationLanguage: String? = nil,
-        speaker: String? = nil
+        speaker: String? = nil,
+        speakerProvisional: Bool? = nil,
+        speakerOverlap: Bool? = nil
     ) {
         self.segmentID = segmentID
         self.source = source
@@ -58,6 +66,8 @@ public struct TranscriptWireEvent: Codable, Sendable {
         self.translation = translation
         self.translationLanguage = translationLanguage
         self.speaker = speaker
+        self.speakerProvisional = speakerProvisional
+        self.speakerOverlap = speakerOverlap
     }
 
     enum CodingKeys: String, CodingKey {
@@ -68,6 +78,8 @@ public struct TranscriptWireEvent: Codable, Sendable {
         case isFinal = "is_final"
         case channelName = "channel_name"
         case translationLanguage = "translation_language"
+        case speakerProvisional = "speaker_provisional"
+        case speakerOverlap = "speaker_overlap"
     }
 
     public var captionItem: CaptionItem {
@@ -80,8 +92,25 @@ public struct TranscriptWireEvent: Codable, Sendable {
             isFinal: isFinal,
             channelName: channelName ?? channel,
             translation: translation,
-            speakerName: speaker
+            speakerName: SpeakerLabel.compose(
+                speaker: speaker, provisional: speakerProvisional ?? false,
+                overlap: speakerOverlap ?? false
+            )
         )
+    }
+}
+
+/// How a turn's speaker is written above it.
+///
+/// Live diarization names voices within one session and can revise them, so
+/// its labels say so; a remembered enrolled voice is shown as its plain name.
+public enum SpeakerLabel {
+    public static func compose(speaker: String?, provisional: Bool, overlap: Bool) -> String? {
+        let name = speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard provisional else { return name.isEmpty ? nil : name }
+        // Live diarization reports speech it could not attribute as an
+        // unnamed turn; showing it keeps the caption from looking enrolled.
+        return "\(name.isEmpty ? "Unassigned" : name)\(overlap ? " · overlap" : "") · provisional"
     }
 }
 
