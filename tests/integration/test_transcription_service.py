@@ -278,6 +278,35 @@ class ApiTests(unittest.TestCase):
                 ).status_code,
             )
 
+    def test_ui_html_is_not_cached_but_hashed_assets_keep_normal_caching(self) -> None:
+        project_root = Path(self.temporary.name) / "project"
+        ui_root = project_root / "frontend" / "static-dist"
+        assets = ui_root / "assets"
+        assets.mkdir(parents=True)
+        (ui_root / "index.html").write_text("<html>Current recorder</html>")
+        (ui_root / "settings.html").write_text("<html>Settings</html>")
+        (assets / "index-current.js").write_text("window.voxink = true;")
+        with patch("services.transcription.app.PROJECT_ROOT", project_root):
+            app = create_app(
+                ServiceSettings(output_root=self.output_root, auth_secret="ui-secret"),
+                provider=self.provider,
+            )
+
+        with TestClient(app) as client:
+            for path in ("/ui", "/ui/", "/ui/index.html", "/ui/settings.html"):
+                with self.subTest(path=path):
+                    response = client.get(path, follow_redirects=False)
+                    self.assertIn(response.status_code, (200, 307))
+                    self.assertEqual("no-store", response.headers["cache-control"])
+            initial = client.get("/ui/")
+            conditional = client.get("/ui/", headers={"If-None-Match": initial.headers["etag"]})
+            self.assertEqual(304, conditional.status_code)
+            self.assertEqual("no-store", conditional.headers["cache-control"])
+            asset = client.get("/ui/assets/index-current.js")
+            self.assertEqual(200, asset.status_code)
+            self.assertNotIn("cache-control", asset.headers)
+            self.assertEqual(401, client.get("/v1/providers").status_code)
+
     def test_native_capture_ui_builds_selected_application_command_and_controls_it(self) -> None:
         executable = Path(self.temporary.name) / "voxink-capture"
         executable.touch()

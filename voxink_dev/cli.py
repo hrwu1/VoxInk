@@ -400,7 +400,9 @@ def _run_web_ui(
     fragment = urlencode(
         {"bootstrap": supervisor.ui_bootstrap_secret, "retain_audio": "1" if retain_audio else "0"}
     )
-    url = f"{supervisor.base_url}/ui/#{fragment}"
+    # A fresh public URL reloads an existing tab instead of just changing its
+    # fragment, and also bypasses HTML cached by earlier service versions.
+    url = f"{supervisor.base_url}/ui/?launch={time.time_ns()}#{fragment}"
     if not webbrowser.open(url):
         raise SupervisorError("the browser could not be opened")
     diagnostics.emit("ui.opened", component="ui", port=supervisor.port)

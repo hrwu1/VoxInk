@@ -521,7 +521,12 @@ def create_app(
                 _Principal.for_grant(grant) if grant is not None else _Principal.anonymous()
             )
         if public_ui or path in _PUBLIC_PATHS or _is_consent_path(request.method, path):
-            return await call_next(request)
+            response = await call_next(request)
+            if public_ui and (path in {"/ui", "/ui/"} or path.endswith(".html")):
+                # The entry point must discover the current hashed assets after
+                # an upgrade; the assets themselves can retain normal caching.
+                response.headers["Cache-Control"] = "no-store"
+            return response
         if request.state.principal.kind != "anonymous":
             return await call_next(request)
         # An agent that holds nothing is not stuck: the consent flow is open to

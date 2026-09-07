@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from voxink_dev.cli import (
     _build_capture_plan,
@@ -135,10 +136,39 @@ class WebUiLauncherTests(unittest.TestCase):
 
         self.assertEqual(0, result)
         url = opened.call_args.args[0]
-        self.assertIn("bootstrap=temporary-bootstrap", url)
-        self.assertIn("retain_audio=1", url)
+        parts = urlsplit(url)
+        self.assertEqual("/ui/", parts.path)
+        self.assertEqual({"launch"}, set(parse_qs(parts.query)))
+        self.assertEqual(
+            {"bootstrap": ["temporary-bootstrap"], "retain_audio": ["1"]},
+            parse_qs(parts.fragment),
+        )
+        self.assertNotIn("temporary-bootstrap", parts.query)
         self.assertNotIn("persistent-service-secret", url)
         diagnostics.emit.assert_called_once_with("ui.opened", component="ui", port=43210)
+
+    def test_each_launch_bypasses_previously_cached_html(self) -> None:
+        supervisor = MagicMock()
+        supervisor.ui_bootstrap_secret = "temporary-bootstrap"
+        supervisor.base_url = "http://127.0.0.1:43210"
+        supervisor.port = 43210
+        supervisor.process.poll.return_value = None
+
+        with (
+            patch("voxink_dev.cli.webbrowser.open", return_value=True) as opened,
+            patch("voxink_dev.cli.time.time_ns", side_effect=[100, 101]),
+            patch("voxink_dev.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch("builtins.print"),
+        ):
+            for _ in range(2):
+                _run_web_ui(
+                    supervisor, {"ui_available": True}, MagicMock(),
+                    Path("/tmp/voxink-test-output"),
+                )
+
+        first, second = (urlsplit(call.args[0]) for call in opened.call_args_list)
+        self.assertNotEqual(first.query, second.query)
+        self.assertEqual(first.fragment, second.fragment)
 
     def test_audio_retention_reaches_the_browser_recorder(self) -> None:
         process = MagicMock()
