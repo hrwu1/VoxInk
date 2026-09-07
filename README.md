@@ -609,9 +609,7 @@ documented in `clients/macos_capture/README.md`.
 
 ## Architecture and roadmap
 
-- [PROJECT_SPEC.md](PROJECT_SPEC.md) is the architecture, event-schema, and
-  file-format reference.
-- [REMAINING_WORK.md](REMAINING_WORK.md) is the maintained developer roadmap.
-- [SHIP_SPEC.md](SHIP_SPEC.md) defines the signed production release.
+- [PROJECT_SPEC.md](PROJECT_SPEC.md) is the canonical architecture,
+  event-schema, file-format, active-roadmap, and production-shipping reference.
 - [.claude/plans/public-cli.md](.claude/plans/public-cli.md) records the
   public CLI review, its accepted deviations, and what it defers.

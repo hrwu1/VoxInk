@@ -1,6 +1,13 @@
 # VoxInk Project Specification
 
-Status: Architecture reference
+Status: Canonical architecture, roadmap, and shipping reference
+
+This file is the single source of truth for VoxInk's product architecture,
+implemented extensions, remaining work, and production-release requirements.
+Sections 1-15 define the product and current technical contracts, section 16
+tracks verified state and open work, and section 17 defines what "shipped"
+means. Update open-item status in section 16 as evidence changes; keep durable
+requirements in their owning technical or shipping section.
 
 ## 1. Product Summary
 
@@ -433,8 +440,8 @@ environments remain outside version control.
 - Crash recovery and multi-part session tests.
 - Long-duration soak tests before declaring sessions unlimited in production.
 
-Current implementation status and priorities are maintained in
-`REMAINING_WORK.md`; setup and test commands are maintained in `README.md`.
+Current implementation status and priorities are maintained in section 16;
+setup and test commands are maintained in `README.md`.
 
 ## 13. Design Principles
 
@@ -716,3 +723,376 @@ speaker; `speaker-turns.json` stores them under `speakers`, with optional
 `name`, `registry_id`, and `similarity`. `voxink_core.speakers.SpeakerRegistry`
 (state directory, 0600, opt-in) matches later sessions by cosine similarity.
 Names are rendered in the derived Markdown view only.
+
+## 16. Current Status and Remaining Work
+
+Status: Active roadmap. Last verified against the tree on 2026-09-02.
+
+This section tracks work remaining after the developer workflow, native capture
+integration, and the 2026-09-02 feature push. Completed implementation plans
+are removed once their durable requirements are reflected in this specification,
+`README.md`, or tests; Git history retains their implementation detail.
+`.claude/plans/feature-push.md` records the 2026-09-02 push.
+
+Priority follows observed evidence: defects affecting current sessions first,
+then advertised but incomplete capabilities, verification of frequently changed
+code, and finally convenience. Work without an observed problem belongs under
+Deferred rather than in a priority tier.
+
+### 16.1 Verified state
+
+Confirmed by reading the tree and running the checks on 2026-09-02:
+
+- A one-command browser workflow through `./scripts/voxink-dev`, a menu-bar
+  application through `--menubar`, and a public `./scripts/voxink` command.
+- System audio through Core Audio process taps, with ScreenCaptureKit as the
+  fallback. A target-Mac muted-player run produced 837 frames, 99% nonzero
+  bytes, and a finalized transcript. The same run through ScreenCaptureKit
+  could not create a display-backed filter.
+- Partial captions while an utterance is open, replaced in place by the final
+  and never written to Markdown.
+- One labelled channel per selected application, one WAV track per channel,
+  and suppression of microphone echo from a system channel.
+- Timestamped markers, microphone selection, language override, Finder reveal,
+  and browser settings.
+- On-device translation of finalized captions with a local Qwen3 instruct
+  model, shown as a second line and quoted in Markdown.
+- Speaker diarization after Stop with forced-alignment splitting, per-speaker
+  embeddings, and an opt-in local registry for remembered voices.
+- Scoped agent grants, application allow-lists, duration and retention limits,
+  expiry, single-use approval and revocation flows, audit records, and an MCP
+  server over the shared client.
+- Bounded audio retention, interrupted-part recovery, and an adaptive speech
+  gate.
+
+Recorded checks on 2026-09-02:
+
+- `.venv/bin/python -m unittest discover -s tests`: 603 passing tests.
+- `swift test` in `clients/macos_capture`: 15 passing tests.
+- `npm test` in `frontend`: 6 passing tests; `npm run build:local` succeeded.
+
+These counts are historical evidence, not a substitute for rerunning the suites
+after later changes.
+
+### 16.2 P0: Target-Mac acceptance of capture paths
+
+The tap backend delivered real all-system audio from a muted player. The
+following modes still require a person at the target Mac:
+
+- [ ] Exercise per-application taps with a real application such as Zoom or
+  Safari. Verify one channel per application, reconnection after application
+  restart, and the `[SYSTEM: Name]` transcript label.
+- [ ] Exercise microphone plus system capture with speakers on. Observe echo
+  suppression against real room echo and tune `EchoPolicy.min_correlation` if
+  it fires on the user's own speech.
+- [ ] Exercise floating captions and push-to-talk from the menu-bar application,
+  including the Accessibility prompt for pasting.
+- [ ] Exercise partial captions with the 1.7B model on MPS and confirm the
+  interval stretches rather than queueing ahead of final inference.
+
+Complete this priority when each mode has been exercised once on the target Mac
+and every discovered defect has a regression test.
+
+### 16.3 P1: Speaker recognition quality
+
+Registry, matching, and naming are covered end to end with synthetic embeddings;
+real recognition is not. In the available far-field session, separate clips
+from the dominant speaker scored cosine 0.27, below the 0.62 threshold.
+
+- [ ] Record two clean sessions of the same person and set the fallback
+  embedding threshold from measured similarity rather than literature.
+- [ ] Compare the pipeline centroid with the per-speaker fallback on a
+  multi-speaker session. Observed agreement was 0.86 for one speaker and 0.14
+  for a speaker with short turns.
+- [ ] Decide whether system-channel speakers use their own registry namespace
+  or remain session-local.
+
+### 16.4 P1: Translation quality
+
+The 0.6B model translates in about 0.2 seconds per sentence and follows the
+prompt, but observed output dropped clauses and mistranslated jargon such as
+"churn."
+
+- [ ] Compare Qwen3-1.7B on the same sentences; the target Mac can hold it
+  alongside the 1.7B ASR model.
+- [ ] Carry vocabulary terms into the translation prompt so names and product
+  terms survive.
+
+### 16.5 P1: Test frequently changed boundaries
+
+- [ ] Test the recorder hook's capture-lifecycle ownership; only its caption
+  feed merge has been extracted and tested.
+- [ ] Add a focused failure test for the helper dying mid-session.
+- [ ] Test malformed traffic and model corruption at the service boundary.
+
+### 16.6 P1: Durable session discovery and recovery
+
+As last verified, `sessions list` reports only sessions held open by the running
+helper, while `last_session` in the capture view is the only pointer to the most
+recently finished session. Promote this work when session volume or agent use
+makes directory listing insufficient.
+
+### 16.7 P2: Production macOS application
+
+The development menu-bar app drives the helper through the control API. The
+remaining production work is defined in section 17: application-owned helper
+lifecycle and permissions, self-contained runtime and model setup, signing,
+notarization, installation, and updates.
+
+### 16.8 Deferred
+
+- Long-run and deterministic replay infrastructure.
+- The remaining public CLI surface: `audio`, `config`, and `diagnostics` command
+  groups; transcript search and export; and derived agent artifacts.
+- Owner-credential isolation. A process running as the user can currently read
+  `control-endpoint.json`. Grants are enforced for grant tokens, but keeping the
+  owner credential out of reach requires signed-application work.
+- A testable offline-network assertion.
+
+### 16.9 Developer-edition gates
+
+1. One command reaches ready state without manual port or helper management.
+2. All advertised capture modes pass target-Mac acceptance.
+3. Capture preserves quiet speech across microphones and input gains, while
+   silence produces no text.
+4. Local IPC remains authenticated, versioned, and loopback-only.
+5. Finalized transcripts survive interruption and recovery without overwrite.
+6. Slow inference, long sessions, and a full disk keep memory and storage
+   bounded and never cost finalized text.
+7. Offline tests detect no unexpected network access.
+8. Model, permission, device, helper, and disk failures provide useful recovery
+   actions.
+9. Python, Swift, frontend, real-model smoke, replay, and soak checks pass in the
+   supported development environment.
+
+As of 2026-09-02, gates 1, 4, and 5 were met. Gate 9 was met for the Python,
+Swift, and frontend suites. Gate 2 was met for all-system capture and remained
+open for per-application and combined modes. Gate 3 was met in code and fixtures.
+Gates 6, 7, and 8 remained open.
+
+## 17. Production Shipping Specification
+
+Status: Proposed.
+
+### 17.1 Shipping goal and initial scope
+
+Ship VoxInk as a signed, notarized macOS menu-bar application that can be
+installed and used without a terminal or developer environment. On a clean
+supported Mac, a user must be able to complete permission and model setup,
+choose microphone and system-audio sources, start a session, see responsive
+captions, stop, and open the saved transcript from the application.
+
+The first production release targets Apple Silicon Macs running macOS 13 or
+newer and supports:
+
+- Local-only speech recognition.
+- Microphone-only, all-system, selected-application, and combined microphone
+  plus system capture with separate source labels.
+- English and Chinese transcription with automatic detection or an explicit
+  language preference.
+- Floating captions and Markdown transcript persistence.
+- Optional separate and combined audio retention.
+- Manually controlled start, pause, resume, and stop.
+
+Production-quality speaker identity, cloud providers, Windows and Linux,
+guaranteed word-level timestamps, direct typing into other applications, and a
+mobile application are not version-one release blockers.
+
+### 17.2 Installation and first launch
+
+The user installs and launches one signed application. VoxInk must not require
+Homebrew, Python, Xcode, command-line tools, or manual shell commands.
+
+First-run setup must:
+
+1. Explain that transcription runs locally.
+2. Request microphone permission when microphone capture is selected.
+3. Request Screen & System Audio Recording permission when system capture is
+   selected.
+4. Explain when macOS requires an application restart after a permission change.
+5. Locate, validate, import, or install the transcription model and runtime.
+6. Show required disk space and installation progress.
+7. Confirm readiness or present a recoverable error.
+
+Users may import a verified offline model package. Any offered download must be
+explicit and must not weaken offline operation after setup.
+
+### 17.3 Product experience
+
+The menu-bar interface must provide:
+
+- State: not ready, ready, starting, recording, paused, stopping, or failed.
+- Microphone selection and system selection of none, all audio, or one or more
+  running applications.
+- Start, Pause, Resume, and Stop controls; a visible recording indicator; and
+  elapsed time.
+- Caption visibility and click-through controls.
+- Transcript destination, audio-retention controls, and storage implications.
+- Language selection with an automatic option.
+- Open Current Transcript and Open Transcript Folder actions.
+- Settings, diagnostics, help, and Quit.
+
+The UI must prevent invalid combinations before capture begins.
+
+The floating caption window must stay above ordinary windows, support optional
+click-through, show microphone and system captions chronologically, identify
+sources with text as well as color, replace partials without duplication,
+preserve finals in the transcript, remain legible across appearances and common
+display scales, and remember its position and appearance.
+
+Errors must use user language and offer a useful next action. This includes
+permission denial, missing models, low disk space, unavailable devices, selected
+applications not running, helper failure, and transcription lag. Raw exceptions
+and protocol messages may appear in diagnostics but not as the primary UX.
+
+### 17.4 Application, helper, runtime, and model packaging
+
+Create an Xcode application target that links the existing `VoxInkCapture`
+Swift package. The app owns the menu-bar UI, settings, permission flow, capture
+selection, captions, and session lifecycle. Development CLIs may remain for
+diagnostics but are not the normal product flow.
+
+The app must automatically start, monitor, and stop the local transcription
+helper. Lifecycle management must include:
+
+- A readiness probe that avoids unnecessary model loading.
+- A version and protocol compatibility handshake.
+- Model-loading progress and actionable failure reporting.
+- Safe automatic restart after unexpected helper failure.
+- Graceful shutdown and final transcript flushing.
+- Bounded audio queues, explicit backpressure, and cancellation of obsolete or
+  stopped-session inference.
+
+Before beta, benchmark the current Python/Torch runtime and at least one viable
+accelerated Apple Silicon path. Select the production runtime using measured
+accuracy, latency, memory, power, package size, model compatibility, and
+maintenance cost.
+
+If Python remains, bundle a self-contained, reproducible, signed interpreter and
+dependencies; never rely on system Python. Runtime and models may live under the
+user's Application Support directory and must support resumable downloads where
+offered, checksum validation, versioned storage and migration, partial or corrupt
+installation detection, preflight disk checks, and removal from settings.
+
+Production IPC must replace broadly discoverable owner credentials with a Unix
+domain socket, XPC, a per-launch secret, or an equivalently private mechanism.
+Credentials must not appear in command-line arguments or persistent logs.
+Messages remain versioned, size-limited, and strictly validated.
+
+### 17.5 Performance and accuracy requirements
+
+Benchmark the production path on every supported hardware tier and set beta
+thresholds for model startup, speech-to-first-text, silence-to-final, real-time
+factor, peak and steady memory, CPU/GPU use, and battery impact. Detect lag and
+never accumulate an unbounded inference queue.
+
+Partial results are replaceable and disposable; finalized results are durable.
+The VAD-finalized path remains a fallback. Overlap and deduplication must not
+introduce repeated phrases into saved transcripts.
+
+Maintain an evaluation set covering English, Mandarin, code-switching, silence,
+noise, music, different microphones and system sources, overlapping microphone
+and system speech, and both short utterances and long meetings. A runtime or
+model change may ship only after comparison with the recorded accuracy and
+latency baseline.
+
+### 17.6 Reliability, privacy, and security requirements
+
+VoxInk must handle helper failure, interrupted app restart, sleep and wake,
+microphone or default-device changes, selected-application exit and restart,
+permission removal, offline operation, low disk or write failure, malformed or
+incomplete protocol messages, and Stop or Quit with pending work without losing
+finalized transcript content. Recovery must never overwrite an existing
+transcript or audio part. Long-running capture must bound memory and temporary
+storage.
+
+In local mode:
+
+- No network request occurs after installation, and this is testable with the
+  network disabled.
+- Microphone and system audio never leave the Mac.
+- Telemetry, diagnostic upload, and crash reporting are absent or opt-in.
+- Default logs omit raw audio, transcript text, credentials, and sensitive paths.
+- Transcript and retained-audio files use user-only permissions.
+- Audio retention is clearly indicated, defaults to enabled, and has a
+  pre-session opt-out.
+- The app discloses model, transcript, audio, and log locations and can remove
+  application-managed data.
+- Dependency and model provenance, licenses, integrity checks, and third-party
+  notices are documented.
+
+### 17.7 Quality and validation requirements
+
+Pinned Python and Xcode/Swift CI environments must run Python unit and API tests,
+Swift unit and contract tests, app/helper protocol compatibility tests, golden
+Markdown and event-schema tests, model installation and migration tests, and
+release builds with signing checks where credentials permit.
+
+Release validation must include real-model file transcription; microphone,
+all-system, selected-application, and combined capture; permission recovery;
+helper crash and restart; app restart and transcript recovery; device and
+selected-application disappearance; and monitored offline operation.
+
+Before production, complete representative multi-hour meeting tests with
+rotation, optional retention, pause/resume, overlapping sources, sleep/wake, and
+forced termination. Record memory growth, queue depth, latency, dropped audio,
+and recovery outcomes.
+
+### 17.8 Distribution requirements
+
+The production release must include a stable bundle identifier, Developer ID
+signing, hardened runtime configuration, correct entitlements and usage strings,
+Apple notarization and stapling, a reproducible archive and checksum, a friendly
+DMG or equivalent installer, an authenticated update mechanism or documented
+manual update path, and release notes, privacy documentation, third-party
+notices, support guidance, and uninstall instructions.
+
+The release pipeline must reject unsigned helpers, unverified model artifacts,
+incompatible protocol versions, and mismatched build dependencies.
+
+### 17.9 Delivery milestones
+
+1. **Product shell:** add the signed macOS target, menu-bar state and controls,
+   source selection, permission onboarding, caption panel, settings, and
+   transcript-folder actions. Exit when a developer build completes a session
+   without terminal interaction given an installed helper and model.
+2. **Managed local engine:** package a self-contained runtime; supervise and
+   version the helper; install or import and validate models; secure local
+   communication. Exit when a clean Mac reaches ready state without developer
+   tools.
+3. **Performance and caption quality:** select the production runtime, add Apple
+   Silicon acceleration, set device targets, improve partial or stable updates,
+   and enforce queue, backpressure, deduplication, and lag behavior. Exit when
+   transcription stays responsive and bounded on supported hardware.
+4. **Reliability beta:** implement recovery and user-facing errors, CI,
+   integration and soak tests, offline validation, and a signed notarized beta.
+   Exit when beta users can install, operate, recover, and update without
+   developer help.
+5. **Production release:** resolve beta blockers; finish licensing, privacy,
+   documentation, and support; complete security and performance review; and
+   publish the notarized build and update channel. Exit when all release gates
+   below pass.
+
+### 17.10 Production release gates
+
+VoxInk is ready to ship only when:
+
+1. A clean supported Mac installs and runs it without a terminal, developer
+   tools, or a separately installed Python environment.
+2. First-run permissions and model setup succeed or provide recoverable,
+   user-readable errors.
+3. Microphone, all-system, selected-application, and combined capture work from
+   the application UI.
+4. Captions stay responsive and transcripts stay durable for the supported
+   session duration.
+5. Inference queues and temporary storage remain bounded under lag.
+6. Forced termination cannot corrupt or overwrite finalized transcript data.
+7. Local-only mode produces no network traffic after setup.
+8. Local IPC is authenticated or private to the application.
+9. Performance, memory, and power targets pass on every supported hardware tier.
+10. Automated, real-model integration, and soak tests pass in the pinned release
+    environment.
+11. The app and every executable helper are signed, hardened, notarized, and
+    distributed as verified artifacts.
+12. Privacy, licensing, third-party notice, support, update, and uninstall
+    documentation are complete.

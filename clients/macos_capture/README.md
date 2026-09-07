@@ -172,7 +172,7 @@ the capture filter or re-prompt for permission.
 
 The development CLI still exposes only start and stop, because a pause command
 needs interactive stdin that the CLI does not have. Pause and resume are for the
-menu-bar app target described in `SHIP_SPEC.md`.
+menu-bar app target described in `PROJECT_SPEC.md` section 17.
 
 ## Permissions and app packaging
 

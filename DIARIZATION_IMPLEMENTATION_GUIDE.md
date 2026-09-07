@@ -556,7 +556,7 @@ provenance, anonymous-label default, or immutable canonical transcript.
 - [Community-1 model card](https://huggingface.co/pyannote/speaker-diarization-community-1)
 - [pyannote.audio repository](https://github.com/pyannote/pyannote-audio)
 - `PROJECT_SPEC.md` sections 6.4, 8, 9, and 14.6
-- `REMAINING_WORK.md` diarization environment checkpoint
+- `PROJECT_SPEC.md` section 16.3 speaker-recognition quality checkpoint
 - `voxink_core/models.py`
 - `voxink_core/persistence/audio.py`
 - `voxink_core/persistence/markdown.py`
