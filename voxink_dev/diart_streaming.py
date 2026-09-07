@@ -50,6 +50,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--queue-size", type=int, default=4)
     p.add_argument("--device", choices=("cpu", "mps"), default="cpu")
     p.add_argument("--threads", type=int, default=2)
+    p.add_argument("--tau-active", type=float, default=.6)
+    p.add_argument("--rho-update", type=float, default=.3)
+    p.add_argument("--delta-new", type=float, default=1)
     p.add_argument("--qwen-device", choices=("auto", "mps", "cpu"), default="auto")
     p.add_argument("--qwen-python", type=Path, default=SOURCE_PROJECT / ".venv/bin/python")
     p.add_argument("--qwen-model", type=Path, default=SOURCE_PROJECT / "models/Qwen3-ASR-0.6B")
@@ -231,7 +234,8 @@ class CaptionQueue:
                               "overlap": len(job["speakers"]) > 1,
                               "context_extends_turn": lo < job["start_ms"] or hi > job["end_ms"],
                               "caption_elapsed_s": now, "queue_wait_s": started - job["enqueued_s"],
-                              "caption_latency_s": now - job["end_ms"] / 1000,
+                              "caption_latency_s": None if self.args.unpaced else now - job["end_ms"] / 1000,
+                              "caption_delay_from_start_s": None if self.args.unpaced else now - job["start_ms"] / 1000,
                               "short_turn": job["end_ms"] - job["start_ms"] < 1000}
                     self.results.append(result)
                     emit(output, result)
@@ -276,6 +280,9 @@ def percentile(values, fraction):
 def run(args) -> Path:
     from .diart_runtime import runtime_environment, validate_runtime, model_paths, record_action, save_manifest
     validate_runtime(args.runtime)
+    args.runtime = args.runtime.absolute()
+    if (args.runtime / "runs").is_symlink():
+        raise ValueError("experiment runs directory must not be a symlink")
     environment = {**runtime_environment(args.runtime), "PYTHONDONTWRITEBYTECODE": "1",
                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                    "PYANNOTE_METRICS_ENABLED": "0", "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
@@ -305,6 +312,7 @@ def run(args) -> Path:
         segmentation=SegmentationModel.from_pretrained(str(paths["segmentation"]), use_hf_token=False),
         embedding=EmbeddingModel.from_pretrained(str(paths["embedding"]), use_hf_token=False),
         duration=5, step=.5, latency=args.latency_s, device=torch.device(args.device),
+        tau_active=args.tau_active, rho_update=args.rho_update, delta_new=args.delta_new,
     ))
     metadata = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     metadata.update({"diart_load_s": time.monotonic() - started,
@@ -359,7 +367,10 @@ def run(args) -> Path:
                                    "elapsed_s": time.monotonic() - origin, "provisional": True,
                                    "tracks": raw, "inference_s": inference_s[-1]})
                 if end_ms > committed_ms:
-                    for span in partition(committed_ms, end_ms, tracks):
+                    # Diart binarizes at frame midpoints (~8.5 ms from each
+                    # step edge); snap only those edges to avoid inventing a
+                    # tiny unknown turn every 500 ms. Internal turns survive.
+                    for span in partition(committed_ms, end_ms, tracks, edge_tolerance_ms=10):
                         spans.append(span)
                         emit(span_log, {**asdict(span), "start_ms": span.start_ms + offset_ms,
                                         "end_ms": span.end_ms + offset_ms, "source": args.source,
@@ -403,13 +414,17 @@ def run(args) -> Path:
                    "diart_rtf": sum(inference_s) / (received / RATE),
                    "qwen_rtf": sum(r["asr_s"] for r in results) / (received / RATE),
                    "diart_step_p95_s": percentile(inference_s, .95),
-                   "caption_latency_p50_s": percentile([r["caption_latency_s"] for r in results], .5),
-                   "caption_latency_p95_s": percentile([r["caption_latency_s"] for r in results], .95),
+                   "caption_latency_p50_s": percentile([r["caption_latency_s"] for r in results if r["caption_latency_s"] is not None], .5),
+                   "caption_latency_p95_s": percentile([r["caption_latency_s"] for r in results if r["caption_latency_s"] is not None], .95),
+                   "caption_start_delay_p50_s": percentile([r["caption_delay_from_start_s"] for r in results if r["caption_delay_from_start_s"] is not None], .5),
+                   "caption_start_delay_p95_s": percentile([r["caption_delay_from_start_s"] for r in results if r["caption_delay_from_start_s"] is not None], .95),
                    "queue_wait_max_s": max((r["queue_wait_s"] for r in results), default=0),
                    "input_lag_max_s": max(input_lag_s, default=0),
                    "queue_depth_max": captions.maximum_depth, "queue_blocked_s": captions.blocked_s,
                    "diart_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                    "qwen_peak_rss_bytes": max((r["max_rss_bytes"] for r in results), default=0),
+                   "qwen_peak_mps_allocated_bytes": max((r.get("mps_allocated_bytes", 0) for r in results), default=0),
+                   "qwen_peak_mps_driver_bytes": max((r.get("mps_driver_bytes", 0) for r in results), default=0),
                    "committed_ms": committed_ms, "no_ground_truth_accuracy_measured": True}
         if args.device == "mps":
             summary["diart_mps_allocated_bytes"] = torch.mps.current_allocated_memory()
@@ -428,6 +443,8 @@ def main():
         p.error("latency must be 0.5 through 5 seconds in 0.5 second steps")
     if args.max_turn_s < .001 or args.queue_size < 1 or args.threads < 1:
         p.error("turn duration must be at least 1 ms; queue size and threads must be positive")
+    if not (0 < args.tau_active < 1 and 0 < args.rho_update <= 1 and 0 < args.delta_new <= 2):
+        p.error("activity/update thresholds must be probabilities; cosine distance must be in (0, 2]")
     if args.microphone and (args.source != "microphone" or args.file_offset_s or args.session_offset_s or args.unpaced):
         p.error("live microphone uses microphone source, zero offsets, and real-time pacing")
     run(args)

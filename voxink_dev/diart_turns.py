@@ -24,12 +24,15 @@ class Span:
             raise ValueError("speakers must be unique and sorted")
 
 
-def partition(start_ms: int, end_ms: int, tracks: Iterable[Span]) -> list[Span]:
+def partition(start_ms: int, end_ms: int, tracks: Iterable[Span], *, edge_tolerance_ms: int = 0) -> list[Span]:
     """Cover the whole interval, including overlaps and unassigned regions."""
     if end_ms <= start_ms:
         return []
+    if edge_tolerance_ms < 0:
+        raise ValueError("edge tolerance must be nonnegative")
     clipped = [
-        Span(max(start_ms, t.start_ms), min(end_ms, t.end_ms), t.speakers)
+        Span(start_ms if t.start_ms <= start_ms + edge_tolerance_ms else t.start_ms,
+             end_ms if t.end_ms >= end_ms - edge_tolerance_ms else t.end_ms, t.speakers)
         for t in tracks if t.end_ms > start_ms and t.start_ms < end_ms
     ]
     edges = sorted({start_ms, end_ms, *(p for t in clipped for p in (t.start_ms, t.end_ms))})

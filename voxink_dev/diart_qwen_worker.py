@@ -21,6 +21,7 @@ async def serve(args: argparse.Namespace) -> None:
         from voxink_core.local_models import inspect_model_package
         from voxink_core.models import Source, TranscriptionOptions
         from voxink_core.providers.qwen import QwenLocalProvider
+        import torch
         inspection = inspect_model_package(args.model, verify_checksums=True)
         if inspection.failures:
             raise RuntimeError("Qwen package verification failed: " + "; ".join(inspection.failures))
@@ -45,6 +46,9 @@ async def serve(args: argparse.Namespace) -> None:
                 result = {"id": request["id"], "text": event.text, "language": event.language,
                           "asr_s": time.monotonic() - started,
                           "max_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+                if torch.backends.mps.is_available():
+                    result["mps_allocated_bytes"] = torch.mps.current_allocated_memory()
+                    result["mps_driver_bytes"] = torch.mps.driver_allocated_memory()
             except Exception as exc:
                 result = {"id": request.get("id"), "error": f"{type(exc).__name__}: {exc}"}
             print(json.dumps(result, ensure_ascii=False), flush=True)

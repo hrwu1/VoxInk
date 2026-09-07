@@ -53,6 +53,41 @@ class PartitionTests(unittest.TestCase):
     def test_zero_width_window_emits_no_audio(self):
         self.assertEqual(partition(100, 100, [Span(0, 200, ("A",))]), [])
 
+    def test_step_edge_rounding_gaps_merge_into_one_contiguous_speaker_turn(self):
+        buffer = TurnBuffer()
+        ready = []
+        for start in (0, 500, 1_000):
+            spans = partition(start, start + 500, [Span(start + 8, start + 492, ("A",))], edge_tolerance_ms=10)
+            for span in spans:
+                ready.extend(buffer.feed(span))
+        self.assertEqual(ready + buffer.flush(), [Span(0, 1_500, ("A",))])
+
+    def test_edge_snapping_preserves_internal_eighty_millisecond_interjection(self):
+        spans = partition(0, 500, [
+            Span(8, 220, ("A",)), Span(220, 300, ("B",)), Span(300, 492, ("A",)),
+        ], edge_tolerance_ms=10)
+        self.assertEqual(spans, [Span(0, 220, ("A",)), Span(220, 300, ("B",)), Span(300, 500, ("A",))])
+
+    def test_edge_tolerance_does_not_fill_internal_small_unknown_gaps(self):
+        self.assertEqual(partition(0, 500, [Span(8, 200, ("A",)), Span(208, 492, ("A",))], edge_tolerance_ms=10), [
+            Span(0, 200, ("A",)), Span(200, 208, ()), Span(208, 500, ("A",)),
+        ])
+
+    def test_tolerance_never_extends_beyond_step_or_imports_outside_speech(self):
+        self.assertEqual(partition(100, 600, [
+            Span(90, 100, ("outside-left",)), Span(95, 200, ("A",)),
+            Span(400, 608, ("B",)), Span(600, 610, ("outside-right",)),
+        ], edge_tolerance_ms=10), [Span(100, 200, ("A",)), Span(200, 400, ()), Span(400, 600, ("B",))])
+
+    def test_default_zero_tolerance_preserves_original_edge_gaps(self):
+        self.assertEqual(partition(0, 500, [Span(8, 492, ("A",))]), [
+            Span(0, 8, ()), Span(8, 492, ("A",)), Span(492, 500, ()),
+        ])
+
+    def test_negative_edge_tolerance_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            partition(0, 500, [Span(8, 492, ("A",))], edge_tolerance_ms=-1)
+
 
 class TurnBufferTests(unittest.TestCase):
     def test_eighty_millisecond_interjection_survives_between_longer_turns(self):

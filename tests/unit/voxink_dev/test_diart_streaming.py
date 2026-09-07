@@ -126,7 +126,7 @@ class CaptionQueueTests(unittest.TestCase):
         (self.run / "clips").mkdir()
         self.pcm = b"\x11\x22" * RATE + b"\x33\x44" * RATE + b"\x55\x66" * RATE
         (self.run / "input.s16le").write_bytes(self.pcm)
-        self.args = SimpleNamespace(queue_size=1, session_id="real-session", stream_id="one-source", source="system", context="vocabulary")
+        self.args = SimpleNamespace(queue_size=1, session_id="real-session", stream_id="one-source", source="system", context="vocabulary", unpaced=False)
         self.worker = SimpleNamespace(stdin=io.StringIO())
 
     def child_worker(self):
@@ -185,6 +185,17 @@ class CaptionQueueTests(unittest.TestCase):
                     captions.finish()
                 self.assertFalse(captions.thread.is_alive())
                 self.assertEqual(captions.results, [])
+
+    def test_unpaced_replay_does_not_report_caption_latency_from_virtual_audio_time(self):
+        self.args.unpaced = True
+        with patch("voxink_dev.diart_streaming.receive", side_effect=self.reply), redirect_stdout(io.StringIO()):
+            captions = CaptionQueue(self.args, self.run, self.worker, time.monotonic(), 8_700_000)
+            captions.submit(Span(2_000, 3_000, ("system:A",)), 3_000)
+            captions.finish()
+        self.assertIsNone(captions.results[0]["caption_latency_s"])
+        self.assertGreaterEqual(captions.results[0]["caption_elapsed_s"], 0)
+        self.assertGreaterEqual(captions.results[0]["queue_wait_s"], 0)
+        self.assertEqual(captions.results[0]["asr_s"], .1)
 
     def test_insufficient_spool_data_is_rejected_before_requesting_asr(self):
         (self.run / "input.s16le").write_bytes(b"\x00\x00" * 10)
