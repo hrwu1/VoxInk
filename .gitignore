@@ -84,3 +84,6 @@ models/Qwen3-0.6B/*
 
 # TypeScript incremental build state
 *.tsbuildinfo
+
+# Disposable, manifest-owned opt-in experiment runtimes and outputs
+.experiments/
