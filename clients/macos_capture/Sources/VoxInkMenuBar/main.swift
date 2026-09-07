@@ -202,6 +202,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.title = "◉"
         statusItem.button?.toolTip = "VoxInk"
         menu.delegate = self
+        // Every item's enabled state is decided in `rebuildMenu` from the
+        // session state; AppKit's automatic enabling would override all of it
+        // and offer Stop with nothing recording, or a session option mid-session.
+        menu.autoenablesItems = false
         statusItem.menu = menu
         captionPanel.onHide = { [weak self] in self?.showCaptions = false }
         captionPanel.onMark = { [weak self] in self?.markMoment() }
