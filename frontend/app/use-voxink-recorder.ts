@@ -34,6 +34,14 @@ type NativeStatus = {
   retention?: { retaining: boolean; retained_bytes: number; stopped_reason: string | null };
   last_session?: { session_id: string; directory: string; transcript_parts: string[] } | null;
   translation?: { requested: boolean; available: boolean; error: string | null };
+  live_diarization?: LiveDiarization;
+};
+
+export type LiveDiarization = {
+  available: boolean;
+  requested: boolean;
+  state: 'disabled' | 'starting' | 'ready' | 'running' | 'failed' | 'stopped';
+  error: string | null;
 };
 
 export type DiarizationState =
@@ -114,6 +122,10 @@ export function useVoxInkRecorder() {
   const [launch, setLaunch] = useState<LaunchConfig | null>(null);
   const [retainAudio, setRetainAudioState] = useState(true);
   const [identifySpeakers, setIdentifySpeakersState] = useState(false);
+  const [liveSpeakers, setLiveSpeakersState] = useState(false);
+  const [liveDiarization, setLiveDiarization] = useState<LiveDiarization>({
+    available: false, requested: false, state: 'disabled', error: null,
+  });
   const [diarization, setDiarization] = useState<Diarization>(IDLE_DIARIZATION);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const diarizedSessionId = useRef<string | null>(null);
@@ -133,6 +145,11 @@ export function useVoxInkRecorder() {
   const [modelSwitching, setModelSwitching] = useState(false);
   const [lastSession, setLastSession] = useState<LastSession | null>(null);
   const [active, setActive] = useState(false);
+  // Network replies from an earlier session/start must never reopen capture
+  // after Stop, restore old captions, or unlock a newer loading session.
+  const sessionGeneration = useRef(0);
+  const startPending = useRef(false);
+  const stopPending = useRef(false);
   const nativeCursor = useRef(0);
   const retentionNotice = useRef<string | null>(null);
   const translationNotice = useRef<string | null>(null);
@@ -230,10 +247,12 @@ export function useVoxInkRecorder() {
       .then((payload) => {
         const capabilities = payload as {
           native_capture_available?: boolean; partial_captions?: boolean; translation_available?: boolean;
+          live_diarization?: LiveDiarization;
         };
         setNativeAvailable(Boolean(capabilities.native_capture_available));
         setPartialCaptions(Boolean(capabilities.partial_captions));
         setTranslationAvailable(Boolean(capabilities.translation_available));
+        if (capabilities.live_diarization) setLiveDiarization(capabilities.live_diarization);
         if (capabilities.native_capture_available) void refreshDevices();
       })
       .catch(() => {
@@ -300,6 +319,7 @@ export function useVoxInkRecorder() {
 
   const applyNativeStatus = useCallback((status: NativeStatus) => {
     if (status.events.length) setCaptions((current) => applyFeedEvents(current, status.events));
+    if (status.live_diarization) setLiveDiarization(status.live_diarization);
     nativeCursor.current = status.next_cursor;
     if (status.last_session) {
       setLastSession({
@@ -332,6 +352,9 @@ export function useVoxInkRecorder() {
       helperNotice.current = notice;
       setMessage(notice.slice(notice.indexOf(': ') + 2) || notice);
     }
+    // Keep controls locked until the Stop request has completed its cleanup.
+    // A poll can observe the helper exit before that request returns.
+    if (stopPending.current) return;
     if (status.state === 'failed') {
       pauseElapsed();
       setActive(false); setState('failed');
@@ -344,17 +367,27 @@ export function useVoxInkRecorder() {
 
   useEffect(() => {
     if (!active || !launch) return;
+    const generation = sessionGeneration.current;
+    let cancelled = false;
+    let inFlight = false;
     const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await authorizedFetch(`/v1/ui/capture/status?after=${nativeCursor.current}`);
-        applyNativeStatus(await response.json() as NativeStatus);
+        const status = await response.json() as NativeStatus;
+        if (!cancelled && generation === sessionGeneration.current) applyNativeStatus(status);
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : 'Cannot read native capture status');
+        if (!cancelled && generation === sessionGeneration.current) {
+          setMessage(error instanceof Error ? error.message : 'Cannot read native capture status');
+        }
+      } finally {
+        inFlight = false;
       }
     };
     const timer = window.setInterval(() => void poll(), 500);
     void poll();
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [active, applyNativeStatus, authorizedFetch, launch]);
 
   // Ask once whether diarization can run here. The weights are a separate
@@ -377,9 +410,13 @@ export function useVoxInkRecorder() {
 
   const refreshDiarization = useCallback(async () => {
     const sessionId = diarizedSessionId.current;
+    const generation = sessionGeneration.current;
     if (!launch || !sessionId) return;
     const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
-    setDiarization(parseDiarization(await response.json() as DiarizationStatus));
+    const status = await response.json() as DiarizationStatus;
+    if (generation === sessionGeneration.current && sessionId === diarizedSessionId.current) {
+      setDiarization(parseDiarization(status));
+    }
   }, [authorizedFetch, launch]);
 
   // Poll only after Stop, and only until the job settles. Nothing here blocks
@@ -404,13 +441,24 @@ export function useVoxInkRecorder() {
 
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
+    if (startPending.current || stopPending.current) return;
+    const generation = ++sessionGeneration.current;
     if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
+    startPending.current = true;
+    setActive(false);
     setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
+    diarizedSessionId.current = null;
+    setDiarization(IDLE_DIARIZATION);
     translationNotice.current = null;
     // Speakers are only findable in audio that was kept, so the two travel
     // together. The control is disabled without retention, and this makes the
     // request agree with what the UI already shows.
     const wantsSpeakers = identifySpeakers && retainAudio && diarizationAvailable;
+    const wantsLiveSpeakers = liveSpeakers && mode.startsWith('microphone') && liveDiarization.available;
+    setLiveDiarization((current) => ({
+      ...current, requested: wantsLiveSpeakers,
+      state: wantsLiveSpeakers ? 'starting' : 'disabled', error: null,
+    }));
     try {
       if ((mode === 'applications' || mode === 'microphone_applications') && selectedApplications.length === 0) throw new Error('Choose at least one running application first');
       setMessage('Starting macOS audio capture…');
@@ -421,12 +469,16 @@ export function useVoxInkRecorder() {
           applications: mode.endsWith('applications') ? selectedApplications : [],
           retain_audio: retainAudio,
           diarize: wantsSpeakers,
+          live_diarization: wantsLiveSpeakers,
           microphone_device: selectedDevice || null,
           language: language === 'auto' ? null : language,
           translate: translate && translationAvailable,
         }),
       });
       const status = await response.json() as NativeStatus;
+      if (generation !== sessionGeneration.current) return;
+      if (status.events.length) setCaptions((current) => applyFeedEvents(current, status.events));
+      if (status.live_diarization) setLiveDiarization(status.live_diarization);
       nativeCursor.current = status.next_cursor;
       diarizedSessionId.current = wantsSpeakers ? status.session_id ?? null : null;
       setDiarization(wantsSpeakers
@@ -435,22 +487,47 @@ export function useVoxInkRecorder() {
       beginElapsed();
       setActive(true); setState('recording');
       setMessage(partialCaptions ? 'Listening locally — words appear as you speak' : 'Listening locally with macOS capture');
-    } catch (error) { fail(error); }
-  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, launch, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
+    } catch (error) {
+      if (generation !== sessionGeneration.current) return;
+      if (wantsLiveSpeakers) setLiveDiarization((current) => ({
+        ...current, state: 'failed', error: error instanceof Error ? error.message : 'Cannot start live speakers',
+      }));
+      fail(error);
+    } finally {
+      if (generation === sessionGeneration.current) startPending.current = false;
+    }
+  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, launch, liveDiarization.available, liveSpeakers, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
 
   const control = useCallback(async (
     action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
   ) => {
+    if (stopPending.current) return;
+    const cancellingStart = action === 'stop' && startPending.current;
+    if (cancellingStart) {
+      ++sessionGeneration.current;
+      startPending.current = false;
+    }
+    const generation = sessionGeneration.current;
     if (action !== 'resume') pauseElapsed();
     else beginElapsed();
     if (!launch) { setState(action === 'stop' ? 'ready' : next); setMessage('Preview ready'); return; }
+    if (action === 'stop') stopPending.current = true;
     setState(action === 'stop' ? 'stopping' : next);
-    setMessage(action === 'stop' ? 'Finalizing the last utterance…' : note);
+    setMessage(cancellingStart ? 'Cancelling startup…' : action === 'stop' ? 'Finalizing the last utterance…' : note);
     try {
       const response = await authorizedFetch(`/v1/ui/capture/${action}`, { method: 'POST' });
-      applyNativeStatus(await response.json() as NativeStatus);
+      const status = await response.json() as NativeStatus;
+      if (generation !== sessionGeneration.current) return;
+      if (action === 'stop') stopPending.current = false;
+      applyNativeStatus(cancellingStart ? { ...status, events: [], next_cursor: 0 } : status);
+      if (cancellingStart && status.state === 'ready') setMessage('Startup cancelled — ready to record');
       if (action !== 'stop') setMessage(note);
-    } catch (error) { fail(error); }
+    } catch (error) {
+      if (generation === sessionGeneration.current) {
+        if (action === 'stop') stopPending.current = false;
+        fail(error);
+      }
+    }
   }, [applyNativeStatus, authorizedFetch, beginElapsed, fail, launch, pauseElapsed]);
 
   const pause = useCallback(() => control('pause', 'paused', 'Session paused'), [control]);
@@ -509,6 +586,7 @@ export function useVoxInkRecorder() {
   const setMode = useCallback((value: CaptureMode) => {
     if (state !== 'ready' && state !== 'failed') return;
     setModeState(value);
+    if (!value.startsWith('microphone')) setLiveSpeakersState(false);
     // Listing applications starts the capture helper, which calls
     // SCShareableContent and prompts for Screen & System Audio Recording.
     // Asking on load would demand that permission from someone recording only
@@ -537,6 +615,15 @@ export function useVoxInkRecorder() {
       ? 'Speakers will be identified after you stop recording'
       : 'Speaker identification is off for the next session');
   }, [retainAudio, state]);
+
+  const setLiveSpeakers = useCallback((enabled: boolean) => {
+    if (state !== 'ready' && state !== 'failed') return;
+    if (enabled && (!launch || !nativeAvailable || !liveDiarization.available || !mode.startsWith('microphone'))) return;
+    setLiveSpeakersState(enabled);
+    setMessage(enabled
+      ? 'Microphone captions will show provisional speaker labels during recording'
+      : 'Live speaker labels are off for the next session');
+  }, [launch, liveDiarization.available, mode, nativeAvailable, state]);
 
   const setTranslate = useCallback((enabled: boolean) => {
     if (state !== 'ready' && state !== 'failed') return;
@@ -582,6 +669,7 @@ export function useVoxInkRecorder() {
     state, elapsed, captions, message, isLive: Boolean(launch), mode, setMode,
     retainAudio, setRetainAudio,
     identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization, nameSpeaker,
+    liveSpeakers, setLiveSpeakers, liveDiarization,
     nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
     devices, selectedDevice, setSelectedDevice, refreshDevices,
     language, setLanguage, translate, setTranslate, translationAvailable, partialCaptions,

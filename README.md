@@ -83,6 +83,17 @@ For selected-application capture, open the target app, choose it from the list,
 and press **Refresh** if it was opened after VoxInk. Start, pause, resume, and
 stop work from the same browser controls for every mode.
 
+For the installed Diart experiment, restart `./scripts/voxink-dev`, choose a
+mode that includes the microphone, enable **Live speakers (experimental)**,
+and press **Start recording**. The checkbox is off by default. Wait for model
+loading, then speak normally; **Speaker 1**, **Speaker 2**, overlap, and
+unassigned labels appear in the live captions. These labels are provisional,
+and the first captions take longer while Qwen loads. Stop also cancels startup.
+The option uses the existing isolated Diart runtime without installing anything;
+it explains when that runtime is unavailable. It works with **Save audio** off.
+Post-Stop **Identify speakers** remains a separate option for retained audio.
+Provisional live labels are not written into the canonical transcript.
+
 For interactive Terminal microphone controls, install the capture dependencies
 and select the Terminal interface explicitly:
 

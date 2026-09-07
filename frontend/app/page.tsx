@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { sourceLabel } from './caption-feed';
+import { liveSpeakerLabel, sourceLabel } from './caption-feed';
 import {
-  Caption, CaptionLanguage, CaptureMode, Diarization, SpeakerSegment, useVoxInkRecorder,
+  Caption, CaptionLanguage, CaptureMode, Diarization, LiveDiarization, SpeakerSegment, useVoxInkRecorder,
 } from './use-voxink-recorder';
 import { GrantsPanel } from './grants-panel';
 import { useGrants } from './use-grants';
@@ -95,6 +95,17 @@ function SpeakerChip({ diarization }: { diarization: Diarization }) {
   );
 }
 
+function LiveSpeakerChip({ status }: { status: LiveDiarization }) {
+  if (!status.requested || status.state === 'disabled') return null;
+  const loading = status.state === 'starting';
+  const failed = status.state === 'failed';
+  return (
+    <span className={`speaker-chip ${loading ? 'busy' : failed ? 'warn' : 'on'}`} role="status">
+      <i />{loading ? 'Loading live speakers…' : failed ? 'Live speakers failed' : status.state === 'stopped' ? 'Live labels · provisional' : 'Live speakers · provisional'}
+    </span>
+  );
+}
+
 /** Rename a speaker for this session, optionally remembering the voice. */
 function SpeakerNameDialog({ speakerId, current, onClose, onSave }: {
   speakerId: string; current: string; onClose: () => void;
@@ -138,6 +149,19 @@ export default function Home() {
   const selectionLocked = recorder.modelSwitching || !['ready', 'failed'].includes(state);
   const selectedModel = recorder.models.find((model) => model.id === recorder.activeModel);
   const usesMicrophone = recorder.mode.startsWith('microphone');
+  const liveSpeakerHint = !isLive
+    ? 'Connect with ./scripts/voxink-dev to use live speakers'
+    : !recorder.nativeAvailable
+      ? 'Native microphone capture is unavailable'
+      : !usesMicrophone
+        ? 'Choose a capture mode that includes the microphone'
+        : !recorder.liveDiarization.available
+          ? recorder.liveDiarization.error || 'The Diart experiment runtime is unavailable on this helper'
+          : recorder.modelSwitching
+            ? 'Wait for the transcription model to finish changing'
+            : selectionLocked
+              ? 'Microphone only. Stop recording to change this option.'
+              : 'Label microphone speech while recording; labels are provisional';
   const captionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -353,6 +377,21 @@ export default function Home() {
               />
             </label>
 
+            <label className="audio-retention-control live-speaker-control">
+              <span>
+                <strong id="live-speakers-label">Live speakers (experimental)</strong>
+                <small id="live-speakers-hint">{liveSpeakerHint}</small>
+              </span>
+              <input
+                type="checkbox"
+                aria-labelledby="live-speakers-label"
+                aria-describedby="live-speakers-hint"
+                checked={recorder.liveSpeakers}
+                disabled={selectionLocked || !isLive || !recorder.nativeAvailable || !usesMicrophone || !recorder.liveDiarization.available}
+                onChange={(event) => recorder.setLiveSpeakers(event.target.checked)}
+              />
+            </label>
+
             {recorder.diarizationAvailable && (
               <label className="audio-retention-control speaker-control">
                 <span>
@@ -432,11 +471,17 @@ export default function Home() {
             <div className="panel-heading">
               <div><p className="eyebrow">Live transcript</p><h2>Captions</h2></div>
               <div className="panel-chips">
+                <LiveSpeakerChip status={recorder.liveDiarization} />
                 <SpeakerChip diarization={recorder.diarization} />
                 {recorder.translate && recorder.translationAvailable && <span className="language-chip">Translating</span>}
                 <span className="language-chip">{languageLabel}</span>
               </div>
             </div>
+            {recorder.liveDiarization.requested && recorder.liveDiarization.error && (
+              <p className="live-speaker-error" role="alert">
+                Live speakers: {recorder.liveDiarization.error}
+              </p>
+            )}
             <div
               ref={captionListRef}
               className="caption-list"
@@ -457,7 +502,7 @@ export default function Home() {
                   );
                 }
                 const segment = segmentFor(recorder.diarization, caption);
-                const speaker = speakerFor(segment, recorder.diarization.names);
+                const speaker = speakerFor(segment, recorder.diarization.names) ?? liveSpeakerLabel(caption);
                 return (
                   <article className={caption.isFinal ? 'caption-line' : 'caption-line partial'} key={caption.id}>
                     <time>{formatTime(caption.startMs)}</time>

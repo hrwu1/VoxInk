@@ -22,6 +22,12 @@ export type Caption = {
   /** On-device translation into the other language, once it arrives. */
   translation?: string;
   translationLanguage?: string;
+  /** Existing enrolled name, or anonymous live diarization label. */
+  speaker?: string | null;
+  speakerProvisional?: boolean;
+  /** Session-local labels; an empty list explicitly means unassigned audio. */
+  speakers?: string[];
+  speakerOverlap?: boolean;
 };
 
 export type FeedEvent = {
@@ -37,6 +43,10 @@ export type FeedEvent = {
   language?: string | null;
   translation?: string | null;
   translation_language?: string | null;
+  speaker?: string | null;
+  speaker_provisional?: boolean;
+  speakers?: string[];
+  speaker_overlap?: boolean;
 };
 
 export const MAX_VISIBLE_CAPTIONS = 250;
@@ -49,7 +59,17 @@ function upsert(captions: Caption[], caption: Caption): Caption[] {
   const previous = captions[existing];
   // A final that replaces a partial keeps a translation that beat it here.
   const next = [...captions];
-  next[existing] = { ...caption, translation: caption.translation ?? previous.translation, translationLanguage: caption.translationLanguage ?? previous.translationLanguage };
+  next[existing] = {
+    ...caption,
+    translation: caption.translation ?? previous.translation,
+    translationLanguage: caption.translationLanguage ?? previous.translationLanguage,
+    // An omitted field leaves existing metadata intact; null and [] are
+    // explicit unassigned results and must replace an earlier guess.
+    speaker: caption.speaker === undefined ? previous.speaker : caption.speaker,
+    speakerProvisional: caption.speakerProvisional ?? previous.speakerProvisional,
+    speakers: caption.speakers ?? previous.speakers,
+    speakerOverlap: caption.speakerOverlap ?? previous.speakerOverlap,
+  };
   return next;
 }
 
@@ -78,6 +98,10 @@ export function applyFeedEvent(captions: Caption[], event: FeedEvent): Caption[]
     channelName: event.channel_name ?? event.channel ?? undefined,
     translation: event.translation ?? undefined,
     translationLanguage: event.translation_language ?? undefined,
+    speaker: event.speaker,
+    speakerProvisional: event.speaker_provisional,
+    speakers: event.speakers,
+    speakerOverlap: event.speaker_overlap,
   });
 }
 
@@ -90,4 +114,16 @@ export function sourceLabel(caption: Caption): string {
   if (caption.kind === 'mark') return 'MARK';
   if (caption.source === 'system') return caption.channelName ? caption.channelName.toUpperCase() : 'SYSTEM / APP';
   return 'MIC';
+}
+
+/** Live labels identify provisional voices within this session, not people. */
+export function liveSpeakerLabel(caption: Caption): string | null {
+  if (caption.kind !== 'transcript') return null;
+  if (!caption.speakerProvisional) return caption.speaker || null;
+  const names = caption.speakers?.map((id) => {
+    const index = /^(?:microphone:)?speaker(\d+)$/.exec(id);
+    return index ? `Speaker ${Number(index[1]) + 1}` : id;
+  });
+  const label = names ? names.join(' + ') || 'Unassigned' : caption.speaker || 'Unassigned';
+  return `${label}${caption.speakerOverlap ? ' · overlap' : ''} · provisional`;
 }

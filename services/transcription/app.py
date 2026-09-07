@@ -66,6 +66,8 @@ from voxink_core.sessions import (
 from voxink_core.transcripts import OverlapDeduplicator
 from voxink_core.translation import QwenLocalTranslator, TranslationProvider, other_language
 from voxink_core.vocabulary import MAX_FILE_BYTES, Vocabulary, VocabularyFile
+from voxink_dev.diart_runtime import DEFAULT_RUNTIME
+from services.transcription.diart_bridge import DiartBridge, LiveTurn, availability as diart_availability
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +139,8 @@ class ServiceSettings:
     # Name a live caption after a remembered voice once a stream has carried a
     # few seconds of it. Needs the diarization model and an enrolled voice.
     live_speaker_names: bool = True
+    # Disposable, offline Diart environment; activated only by the UI checkbox.
+    live_diarization_runtime: Path = DEFAULT_RUNTIME
 
 
 class GrantIssueRequest(BaseModel):
@@ -229,6 +233,7 @@ class NativeCaptureRequest(BaseModel):
     applications: list[str] = Field(default_factory=list)
     retain_audio: bool = False
     diarize: bool = False
+    live_diarization: bool = False
     # Core Audio device UID from /v1/devices; None keeps the system default.
     microphone_device: str | None = None
     # Manual language override ("en" or "zh"); None lets the model detect it.
@@ -356,6 +361,12 @@ class ServiceRuntime:
         self.native_process: subprocess.Popen[str] | None = None
         self.native_session_id: str | None = None
         self.native_capture_state = "ready"
+        self.native_starting = False
+        self.native_start_task: asyncio.Task | None = None
+        self.live_diarization_session_id: str | None = None
+        self.live_diarization_state = "disabled"
+        self.live_diarization_error: str | None = None
+        self.live_diarizers: dict[str, DiartBridge] = {}
         self.native_error: str | None = None
         # The helper's latest status line while it runs, for the UI to show.
         self.native_notice: str | None = None
@@ -405,6 +416,8 @@ class _StreamContext:
     source: Source
     chunker: EnergyVadChunker
     sample_rate: int
+    live_diarizer: DiartBridge | None = None
+    live_last_speakers: tuple[str, ...] | None = None
     channel: str | None = None
     channel_name: str | None = None
     anchor_ms: float = 0.0
@@ -682,6 +695,7 @@ def create_app(
             "partial_captions": runtime.settings.partial_captions,
             "echo_suppression": runtime.settings.echo_suppression,
             "live_speaker_names": runtime.live_speakers is not None,
+            "live_diarization": _live_diarization_view(runtime),
             "translation_available": runtime.translation_available,
             "languages": ["auto", "en", "zh"],
         }
@@ -705,6 +719,8 @@ def create_app(
         principal: _Principal = request.state.principal
         request_id = request.headers.get("x-voxink-request-id")
         executable = _native_capture_executable(runtime)
+        if runtime.native_starting:
+            raise HTTPException(status_code=409, detail="native capture is already starting")
         if runtime.native_process is not None and runtime.native_process.poll() is None:
             raise HTTPException(status_code=409, detail="a native capture session is already running")
         sources = tuple(dict.fromkeys(options.sources))
@@ -760,6 +776,14 @@ def create_app(
                 status_code=409,
                 detail="translation is unavailable; the local translation package is not installed",
             )
+        if options.live_diarization:
+            if Source.MICROPHONE not in sources:
+                raise HTTPException(status_code=422, detail="live speakers requires microphone capture")
+            if principal.kind != "owner":
+                raise HTTPException(status_code=403, detail="experimental live speakers is owner-only")
+            info = diart_availability(runtime.settings.live_diarization_runtime)
+            if not info["available"]:
+                raise HTTPException(status_code=409, detail=f"Live speakers unavailable: {info['error']}")
         session_id = new_session_id()
         server = request.scope.get("server")
         port = request.url.port or (int(server[1]) if server else None)
@@ -787,6 +811,32 @@ def create_app(
                     command.extend(("--app", bundle_id))
             else:
                 command.append("--system-all")
+        runtime.live_diarization_session_id = session_id if options.live_diarization else None
+        runtime.live_diarization_error = None
+        runtime.live_diarization_state = "starting" if options.live_diarization else "disabled"
+        if options.live_diarization:
+            bridge = DiartBridge(
+                runtime.settings.live_diarization_runtime, device=runtime.settings.diarization_device,
+                session_id=session_id, stream_id="microphone-1",
+            )
+            runtime.live_diarizers[session_id] = bridge
+            runtime.native_starting = True
+            runtime.native_start_task = asyncio.current_task()
+            try:
+                await bridge.start()
+                runtime.live_diarization_state = "ready"
+            except asyncio.CancelledError as exc:
+                _close_live_diarization(runtime, session_id)
+                raise HTTPException(status_code=409, detail="Live speakers startup was cancelled") from exc
+            except Exception as exc:
+                _close_live_diarization(runtime, session_id, error=str(exc))
+                raise HTTPException(status_code=503, detail=f"Live speakers failed to start: {exc}") from exc
+            except BaseException:
+                _close_live_diarization(runtime, session_id, error="Live speakers startup was cancelled")
+                raise
+            finally:
+                runtime.native_starting = False
+                runtime.native_start_task = None
         try:
             process = subprocess.Popen(
                 command,
@@ -797,6 +847,7 @@ def create_app(
                 text=True,
             )
         except OSError as exc:
+            _close_live_diarization(runtime, session_id, error=str(exc))
             raise HTTPException(status_code=503, detail=f"cannot start native capture: {exc}") from exc
         runtime.native_process = process
         runtime.native_session_id = session_id
@@ -880,6 +931,16 @@ def create_app(
         if action not in {"pause", "resume", "stop"}:
             raise HTTPException(status_code=404, detail="unknown native capture action")
         principal = _require_any(runtime, http, _CAPTURE_SCOPES)
+        if action == "stop" and runtime.native_starting:
+            task = runtime.native_start_task
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, HTTPException):
+                    pass
+            runtime.native_capture_state = "ready"
+            return _native_capture_view(runtime, after=0)
         process = runtime.native_process
         if process is None or process.poll() is not None:
             runtime.native_capture_state = "ready"
@@ -1383,13 +1444,15 @@ def create_app(
                     control = _parse_control(message["text"])
                     message_type = control.get("type")
                     if message_type == "stream.start":
+                        if context is not None:
+                            raise ValueError("stream.start was already received")
                         context = _open_stream(runtime, session_id, control)
                         await websocket.send_json(
                             {
                                 "type": "stream.ready",
                                 "schema_version": PROTOCOL_VERSION,
                                 "session_id": session_id,
-                                "partial_results": runtime.settings.partial_captions,
+                                "partial_results": runtime.settings.partial_captions and context.live_diarizer is None,
                             }
                         )
                     elif message_type in {"audio.frame", "audio.chunk"}:
@@ -1398,9 +1461,7 @@ def create_app(
                         pending_header = control
                     elif message_type == "stream.pause":
                         if context is not None:
-                            await _send_chunks(
-                                websocket, runtime, context, context.chunker.flush("pause")
-                            )
+                            await _flush_stream_audio(websocket, runtime, context, "pause")
                             context.cancel_partial()
                             context.chunker.reset()
                             _pause_stream(runtime, session_id, context.stream_id)
@@ -1418,9 +1479,9 @@ def create_app(
                             )
                     elif message_type == "stream.stop":
                         if context is not None:
-                            await _send_chunks(
-                                websocket, runtime, context, context.chunker.flush("stop")
-                            )
+                            await _flush_stream_audio(websocket, runtime, context, "stop")
+                            if context.live_diarizer is not None:
+                                _close_live_diarization(runtime, session_id)
                             context.cancel_partial()
                             await _drain_background(websocket, runtime, context)
                             if _release_stream(runtime, session_id, context, graceful=False):
@@ -1455,7 +1516,15 @@ def create_app(
                         continue
                     _record_audio(runtime, session_id, context, pending_header, pcm)
                     _note_level(runtime, context, pcm)
-                    if pending_header["type"] == "audio.frame":
+                    if context.live_diarizer is not None:
+                        if "start_ms" not in pending_header:
+                            raise ValueError("live speakers requires source timestamps on every frame")
+                        turns = await context.live_diarizer.feed(
+                            pcm, round(float(pending_header["start_ms"])), sequence=pending_header.get("sequence"),
+                        )
+                        await _send_diart_turns(websocket, runtime, context, turns)
+                        await websocket.send_json({"type": "audio.accepted", "sequence": pending_header.get("sequence")})
+                    elif pending_header["type"] == "audio.frame":
                         context.anchor_to(pending_header)
                         if context.source is Source.SYSTEM and runtime.settings.echo_suppression:
                             runtime.echo.observe(
@@ -1490,7 +1559,14 @@ def create_app(
                     return
         except WebSocketDisconnect:
             return
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            if context is None or context.live_diarizer is None:
+                raise
+            _close_live_diarization(runtime, session_id, error=str(exc))
+            await websocket.send_json({"type": "error", "code": "live_diarization_failed", "message": str(exc)})
+            await websocket.close(code=1011)
         except HTTPException as exc:
+            _close_unclaimed_live_diarization(runtime, session_id, str(exc.detail))
             # `_ensure_started_session` is shared with the HTTP routes. On an
             # accepted WebSocket its HTTPException would make Starlette try to
             # send an HTTP response, dropping the connection with no diagnosis.
@@ -1499,10 +1575,15 @@ def create_app(
             )
             await websocket.close(code=1008)
         except (InvalidSessionTransition, KeyError, TypeError, ValueError) as exc:
+            _close_unclaimed_live_diarization(runtime, session_id, str(exc))
+            if context is not None and context.live_diarizer is not None:
+                _close_live_diarization(runtime, session_id, error=str(exc))
             await websocket.send_json({"type": "error", "code": "invalid_message", "message": str(exc)})
             await websocket.close(code=1003)
         finally:
             if context is not None:
+                if context.live_diarizer is not None:
+                    _close_live_diarization(runtime, session_id, error="Live speaker stream disconnected; start a new recording to retry")
                 context.cancel_partial()
                 # The connection went away without a stream.stop. That is not
                 # a Stop: the session is held for a grace period so the helper
@@ -1752,6 +1833,8 @@ def _vocabulary_view(runtime: ServiceRuntime) -> dict[str, Any]:
 
 
 def _model_in_use(runtime: ServiceRuntime) -> bool:
+    if runtime.native_starting:
+        return True
     process = runtime.native_process
     if process is not None and process.poll() is None:
         return True
@@ -1798,6 +1881,18 @@ def _open_stream(
         channel_name=channel_name if source is Source.SYSTEM else None,
         partial_interval_s=runtime.settings.partial_interval_ms / 1000.0,
     )
+    if source is Source.MICROPHONE and runtime.live_diarization_session_id == session_id:
+        audio = control.get("audio", {})
+        if (context.sample_rate != 16000 or int(audio.get("channels", 1)) != 1
+                or audio.get("encoding", "pcm_s16le") != "pcm_s16le"):
+            raise ValueError("live speakers requires mono 16 kHz pcm_s16le audio")
+        bridge = runtime.live_diarizers.get(session_id)
+        if bridge is None or runtime.live_diarization_state == "failed":
+            raise ValueError("live speakers is unavailable for this session; start a new recording")
+        if any(getattr(active, "live_diarizer", None) is bridge
+               for active in runtime.active_streams.get(session_id, {}).values()):
+            raise ValueError("live speakers already has a microphone stream")
+        context.live_diarizer = bridge
     with runtime.stream_lock:
         _ensure_started_session(
             runtime,
@@ -1812,6 +1907,8 @@ def _open_stream(
         runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
         runtime.dedup.reset(session_id, stream_id)
         runtime.stream_ends.pop((session_id, stream_id), None)
+        if context.live_diarizer is not None:
+            runtime.live_diarization_state = "running"
     return context
 
 
@@ -1878,7 +1975,8 @@ def _record_ui_event(runtime: ServiceRuntime, session_id: str, entry: dict[str, 
 
 
 async def _publish_event(
-    websocket: WebSocket, runtime: ServiceRuntime, event: TranscriptEvent
+    websocket: WebSocket, runtime: ServiceRuntime, event: TranscriptEvent,
+    *, speaker_metadata: dict[str, Any] | None = None,
 ) -> TranscriptEvent | None:
     """Correct, deduplicate, persist, and publish one finalized transcript event.
 
@@ -1912,8 +2010,11 @@ async def _publish_event(
         )
         return event
     runtime.stream_ends[key] = max(previous_end or 0, event.end_ms)
-    _record_ui_event(runtime, event.session_id, {**event.to_dict(), "type": "transcript"})
-    await websocket.send_json({"type": "transcript.final", "event": event.to_dict()})
+    # Experimental attribution belongs to the live view. The append-only
+    # transcript above keeps its text without provisional speaker claims.
+    display = {**event.to_dict(), **(speaker_metadata or {})}
+    _record_ui_event(runtime, event.session_id, {**display, "type": "transcript"})
+    await websocket.send_json({"type": "transcript.final", "event": display})
     return event
 
 
@@ -2108,6 +2209,8 @@ def _shutdown(runtime: ServiceRuntime) -> None:
         # Finalizing the sessions below is the whole point of this function, so a
         # failed helper stop must never abort it.
         runtime.native_capture_state = "failed"
+    for session_id in list(runtime.live_diarizers):
+        _close_live_diarization(runtime, session_id)
     for session in runtime.sessions.list():
         if session.state not in {SessionState.RUNNING, SessionState.PAUSED}:
             continue
@@ -2143,6 +2246,8 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
     if process is not None and exit_code is not None and runtime.native_capture_state != "ready":
         runtime.native_capture_state = "ready" if exit_code == 0 else "failed"
         _read_native_error(runtime, process)
+        if not runtime.active_streams.get(runtime.native_session_id or ""):
+            _close_live_diarization(runtime, runtime.native_session_id or "")
     session_id = runtime.native_session_id
     events = list(runtime.ui_events.get(session_id or "", ()))
     total = runtime.ui_events_total.get(session_id or "", 0)
@@ -2161,12 +2266,42 @@ def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, An
         "levels": _levels_view(runtime, session_id),
         "retention": _retention_view(runtime, session_id),
         "last_session": _last_session_view(runtime),
+        "live_diarization": _live_diarization_view(runtime),
         "translation": {
             "requested": bool(session_id and session_id in runtime.translate_sessions),
             "available": runtime.translation_available,
             "error": runtime.translation_error,
         },
     }
+
+
+def _live_diarization_view(runtime: ServiceRuntime) -> dict[str, Any]:
+    info = diart_availability(runtime.settings.live_diarization_runtime)
+    return {
+        "available": info["available"],
+        "requested": runtime.live_diarization_session_id is not None,
+        "state": runtime.live_diarization_state,
+        "error": runtime.live_diarization_error or info["error"],
+    }
+
+
+def _close_live_diarization(runtime: ServiceRuntime, session_id: str, *, error: str | None = None) -> None:
+    bridge = runtime.live_diarizers.pop(session_id, None)
+    if bridge is None:
+        return
+    bridge.close()
+    if runtime.live_diarization_session_id == session_id:
+        runtime.live_diarization_state = "failed" if error else "stopped"
+        runtime.live_diarization_error = error
+
+
+def _close_unclaimed_live_diarization(runtime: ServiceRuntime, session_id: str, error: str) -> None:
+    bridge = runtime.live_diarizers.get(session_id)
+    if bridge is not None and not any(
+        getattr(context, "live_diarizer", None) is bridge
+        for context in runtime.active_streams.get(session_id, {}).values()
+    ):
+        _close_live_diarization(runtime, session_id, error=error)
 
 
 def _last_session_view(runtime: ServiceRuntime) -> dict[str, Any] | None:
@@ -2210,12 +2345,17 @@ def _session_elapsed_ms(runtime: ServiceRuntime, session_id: str) -> int:
 
 def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None:
     process = runtime.native_process
+    session_id = runtime.native_session_id
     if process is None:
         runtime.native_capture_state = "ready"
         return
     if process.poll() is None:
         process.send_signal(signal.SIGINT)
         try:
+            if session_id in runtime.live_diarizers:
+                # A final bounded turn still needs Diart and shared Qwen. Let
+                # the socket acknowledge it before terminating the helper.
+                timeout = max(timeout, 90.0)
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.terminate()
@@ -2224,8 +2364,10 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
-    runtime.native_capture_state = "ready" if process.returncode == 0 else "failed"
-    _read_native_error(runtime, process)
+    if runtime.native_process is process:
+        runtime.native_capture_state = "ready" if process.returncode == 0 else "failed"
+        _read_native_error(runtime, process)
+    _close_live_diarization(runtime, session_id or "")
 
 
 def _start_native_stderr_reader(
@@ -2317,6 +2459,7 @@ def _record_audio(
 
 def _finalize_audio(runtime: ServiceRuntime, session: Session) -> None:
     session_id = session.config.session_id
+    _close_live_diarization(runtime, session_id)
     runtime.last_session_id = session_id
     runtime.session_started_at.pop(session_id, None)
     runtime.echo.forget(session_id)
@@ -2563,6 +2706,51 @@ async def _send_chunks(
     return published
 
 
+async def _flush_stream_audio(
+    websocket: WebSocket, runtime: ServiceRuntime, context: _StreamContext, reason: str,
+) -> None:
+    if context.live_diarizer is None:
+        await _send_chunks(websocket, runtime, context, context.chunker.flush(reason))
+    else:
+        await _send_diart_turns(websocket, runtime, context, await context.live_diarizer.flush())
+
+
+async def _send_diart_turns(
+    websocket: WebSocket, runtime: ServiceRuntime, context: _StreamContext, turns: Iterable[LiveTurn],
+) -> None:
+    """Transcribe bounded microphone contexts through the one shared Qwen.
+
+    Text times describe the audio Qwen actually heard. Speaker-turn bounds are
+    separate display metadata; no word alignment or durable identity is implied.
+    """
+    for turn in turns:
+        event, elapsed_ms = await _timed_transcription(
+            runtime, context.session_id, context,
+            {"start_ms": turn.audio_start_ms, "end_ms": turn.audio_end_ms}, turn.pcm,
+        )
+        if context.live_last_speakers != turn.speakers:
+            # Two speakers can each say "okay" in adjacent short turns. Audio
+            # padding overlaps, but that does not make the second reply a repeat.
+            runtime.dedup.reset(context.session_id, context.stream_id)
+        context.live_last_speakers = turn.speakers
+        names = []
+        for speaker in turn.speakers:
+            suffix = speaker.removeprefix("microphone:").removeprefix("speaker")
+            names.append(f"Speaker {int(suffix) + 1}" if suffix.isdecimal() else speaker)
+        metadata = {
+            "speaker": " + ".join(names) or None,
+            "speakers": list(turn.speakers),
+            "speaker_provisional": True,
+            "speaker_overlap": len(turn.speakers) > 1,
+            "turn_start_ms": turn.start_ms, "turn_end_ms": turn.end_ms,
+            "audio_start_ms": turn.audio_start_ms, "audio_end_ms": turn.audio_end_ms,
+        }
+        result = await _publish_event(websocket, runtime, replace(event, speaker=None), speaker_metadata=metadata)
+        if result is not None:
+            _maybe_schedule_translation(runtime, context, result)
+        await _report_lag(websocket, context, turn.end_ms - turn.start_ms, elapsed_ms)
+
+
 async def _timed_transcription(
     runtime: ServiceRuntime,
     session_id: str,
@@ -2576,7 +2764,7 @@ async def _timed_transcription(
     event = await _transcribe_pcm_chunk(
         runtime, session_id, context, header, pcm, segment_id=segment_id
     )
-    if runtime.live_speakers is not None and event.text.strip():
+    if context.live_diarizer is None and runtime.live_speakers is not None and event.text.strip():
         audio = context.start.get("audio", {})
         speaker = await asyncio.to_thread(
             runtime.live_speakers.identify,
