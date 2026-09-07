@@ -4,7 +4,7 @@ import itertools
 import random
 import unittest
 
-from voxink_dev.diart_turns import Span, TurnBuffer, context_window, partition
+from voxink_dev.diart_turns import Span, SpanSmoother, TurnBuffer, context_window, partition
 
 
 class PartitionTests(unittest.TestCase):
@@ -185,9 +185,70 @@ class ContextWindowTests(unittest.TestCase):
 
     def test_unavailable_audio_and_negative_context_settings_are_rejected(self):
         span = Span(500, 1_000, ("A",))
-        for kwargs in ({"available_ms": 999}, {"available_ms": 1_000, "pad_ms": -1}, {"available_ms": 1_000, "min_ms": -1}):
+        for kwargs in ({"available_ms": 999}, {"available_ms": 1_000, "pad_ms": -1},
+                       {"available_ms": 1_000, "min_ms": -1}, {"available_ms": 1_000, "floor_ms": -1},
+                       {"available_ms": 1_000, "floor_ms": 1_000}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 context_window(span, **kwargs)
+
+    def test_a_floor_keeps_the_window_off_audio_a_previous_turn_already_carried(self):
+        span = Span(1_000, 1_200, ("A",))
+        self.assertEqual(context_window(span, 8_000, floor_ms=1_000), (1_000, 3_000))
+        self.assertEqual(context_window(span, 8_000, min_ms=0, floor_ms=1_000), (1_000, 1_450))
+        # Without a floor the same short turn reaches back over its predecessor.
+        self.assertEqual(context_window(span, 8_000, min_ms=0), (750, 1_450))
+        self.assertEqual(context_window(span, 8_000, floor_ms=1_150), (1_150, 3_150))
+
+
+class SpanSmootherTests(unittest.TestCase):
+    def smooth(self, spans, **kwargs):
+        smoother = SpanSmoother(**kwargs)
+        result = [out for span in spans for out in smoother.feed(span)]
+        return result + smoother.flush()
+
+    def test_a_brief_gap_inside_one_speakers_turn_becomes_part_of_that_turn(self):
+        self.assertEqual(self.smooth([
+            Span(0, 1_000, ("A",)), Span(1_000, 1_400, ()), Span(1_400, 2_000, ("A",)),
+        ]), [Span(0, 1_000, ("A",)), Span(1_000, 1_400, ("A",)), Span(1_400, 2_000, ("A",))])
+
+    def test_a_brief_gap_between_two_speakers_ends_the_earlier_turn(self):
+        self.assertEqual(self.smooth([
+            Span(0, 1_000, ("A",)), Span(1_000, 1_400, ()), Span(1_400, 2_000, ("B",)),
+        ]), [Span(0, 1_000, ("A",)), Span(1_000, 1_400, ("A",)), Span(1_400, 2_000, ("B",))])
+
+    def test_silence_longer_than_a_pause_stays_unassigned_and_only_its_start_waits(self):
+        gap = [Span(1_000 + step * 500, 1_500 + step * 500, ()) for step in range(4)]
+        self.assertEqual(self.smooth([Span(0, 1_000, ("A",)), *gap, Span(3_000, 4_000, ("B",))]), [
+            Span(0, 1_000, ("A",)), Span(1_000, 2_000, ()), Span(2_000, 2_500, ()),
+            Span(2_500, 3_000, ()), Span(3_000, 4_000, ("B",)),
+        ])
+
+    def test_leading_silence_and_overlap_labels_pass_through_unchanged(self):
+        spans = [Span(0, 900, ()), Span(900, 1_200, ("A", "B")), Span(1_200, 1_400, ("B",))]
+        self.assertEqual(self.smooth(spans), spans)
+
+    def test_output_stays_a_contiguous_partition_of_the_input(self):
+        spans = [Span(0, 400, ("A",)), Span(400, 700, ()), Span(700, 900, ("A",)), Span(900, 1_000, ()),
+                 Span(1_000, 1_100, ("B",)), Span(1_100, 2_000, ()), Span(2_000, 2_400, ("B",))]
+        result = self.smooth(spans)
+        self.assertEqual((result[0].start_ms, result[-1].end_ms), (0, 2_400))
+        self.assertTrue(all(a.end_ms == b.start_ms for a, b in zip(result, result[1:])))
+        self.assertEqual(sum(s.end_ms - s.start_ms for s in result), 2_400)
+
+    def test_input_must_be_contiguous_and_the_pause_bound_positive(self):
+        smoother = SpanSmoother()
+        smoother.feed(Span(0, 500, ("A",)))
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            smoother.feed(Span(600, 900, ("A",)))
+        with self.assertRaises(ValueError):
+            SpanSmoother(max_pause_ms=0)
+
+    def test_a_pending_gap_is_emitted_with_its_turn_when_the_source_ends(self):
+        smoother = SpanSmoother()
+        self.assertEqual(smoother.feed(Span(0, 1_000, ("A",))), [Span(0, 1_000, ("A",))])
+        self.assertEqual(smoother.feed(Span(1_000, 1_200, ())), [])
+        self.assertEqual(smoother.flush(), [Span(1_000, 1_200, ("A",))])
+        self.assertEqual(smoother.flush(), [])
 
 
 if __name__ == "__main__":

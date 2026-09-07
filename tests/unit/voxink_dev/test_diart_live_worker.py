@@ -5,7 +5,9 @@ import io
 import json
 import unittest
 
-from voxink_dev.diart_live_worker import MAX_REQUEST_BYTES, RING_BYTES, STEP_BYTES, StreamingTurns, serve
+from voxink_dev.diart_live_worker import (
+    CONTEXT_PAD_MS, MAX_REQUEST_BYTES, RING_BYTES, SILENCE_RMS_DBFS, STEP_BYTES, StreamingTurns, rms_dbfs, serve,
+)
 from voxink_dev.diart_turns import Span
 
 
@@ -41,25 +43,63 @@ class StreamingTurnsTests(unittest.TestCase):
         self.assertEqual(predictor.resets, 1)
         self.assertEqual(stream.flush(), [])
 
-    def test_interjections_overlap_and_unknown_audio_are_retained_once_with_context(self):
+    def test_interjections_and_overlap_survive_while_a_brief_unknown_gap_joins_its_turn(self):
         tracks = [Span(0, 1_000, ("microphone:A",)), Span(1_000, 1_080, ("microphone:B",)),
                   Span(1_080, 1_800, ("microphone:A",)), Span(1_400, 1_480, ("microphone:B",)),
                   Span(1_880, 3_000, ("microphone:A",))]
         stream, _ = self.stream(tracks)
-        audio = b"".join(bytes([number, 0]) * 8_000 for number in range(6))
+        audio = b"".join(bytes([number, 16]) * 8_000 for number in range(6))
         result = []
         for number in range(6):
             result += stream.feed(audio[number * STEP_BYTES:(number + 1) * STEP_BYTES], 20_000 + number * 500)
         result += stream.flush()
+        # The 80 ms unknown gap at 1800 is A pausing, not a caption of its own,
+        # so it joins the turn around it; the 80 ms B interjection is still one.
         self.assertEqual([(r["start_ms"] - 20_000, r["end_ms"] - 20_000, r["speakers"]) for r in result], [
             (0, 1_000, ["microphone:A"]), (1_000, 1_080, ["microphone:B"]),
             (1_080, 1_400, ["microphone:A"]), (1_400, 1_480, ["microphone:A", "microphone:B"]),
-            (1_480, 1_800, ["microphone:A"]), (1_800, 1_880, []), (1_880, 3_000, ["microphone:A"]),
+            (1_480, 3_000, ["microphone:A"]),
         ])
         for item in result:
             lo, hi = item["audio_start_ms"] - 20_000, item["audio_end_ms"] - 20_000
             self.assertEqual(base64.b64decode(item["pcm"]), audio[lo * 32:hi * 32])
-            self.assertGreaterEqual(hi - lo, min(2_000, item["end_ms"] - 20_000))
+            self.assertLessEqual(lo, item["start_ms"] - 20_000)
+            self.assertGreaterEqual(hi, item["end_ms"] - 20_000)
+
+    def test_windows_share_no_more_than_the_padding_so_no_turn_is_transcribed_twice(self):
+        tracks = [Span(0, 700, ("microphone:A",)), Span(700, 760, ("microphone:B",)),
+                  Span(760, 3_000, ("microphone:A",))]
+        stream, _ = self.stream(tracks)
+        result = []
+        for number in range(6):
+            result += stream.feed(bytes([number, 16]) * 8_000, number * 500)
+        result += stream.flush()
+        self.assertEqual([r["speakers"] for r in result],
+                         [["microphone:A"], ["microphone:B"], ["microphone:A"]])
+        for before, after in zip(result, result[1:]):
+            # Only the trailing padding is ever shared. Reaching further is what
+            # made one sentence arrive as several near-identical captions.
+            self.assertEqual(before["audio_end_ms"] - after["audio_start_ms"], CONTEXT_PAD_MS)
+        for item in result:
+            self.assertLessEqual(item["audio_start_ms"], item["start_ms"])
+            self.assertGreaterEqual(item["audio_end_ms"], item["end_ms"])
+
+    def test_silent_unknown_audio_is_dropped_while_quiet_speech_and_labels_are_kept(self):
+        for tracks, expected in (([], 0), ([Span(0, 3_000, ("microphone:A",))], 1)):
+            stream, _ = self.stream(tracks)
+            result = []
+            for number in range(6):
+                result += stream.feed(bytes(STEP_BYTES), number * 500)
+            with self.subTest(tracks=len(tracks)):
+                self.assertEqual(len(result + stream.flush()), expected)
+        stream, _ = self.stream()
+        audible = b"".join(bytes([0, level]) * 8_000 for level in (1, 2, 3, 4, 5, 6))
+        result = []
+        for number in range(6):
+            result += stream.feed(audible[number * STEP_BYTES:(number + 1) * STEP_BYTES], number * 500)
+        turn, = result + stream.flush()
+        self.assertEqual(turn["speakers"], [])
+        self.assertGreater(rms_dbfs(base64.b64decode(turn["pcm"])), SILENCE_RMS_DBFS)
 
     def test_gaps_flush_previous_segment_and_never_include_other_segment_context(self):
         stream, predictor = self.stream([Span(0, 10_000, ("microphone:stable",))])
@@ -126,7 +166,7 @@ class ProtocolTests(unittest.TestCase):
     def test_request_reply_order_and_errors(self):
         predictor = Predictor()
         source = io.BytesIO(b"\n".join(json.dumps(item).encode() for item in [
-            {"id": 1, "op": "feed", "start_ms": 5_000, "pcm": base64.b64encode(bytes(640)).decode()},
+            {"id": 1, "op": "feed", "start_ms": 5_000, "pcm": base64.b64encode(b"\x11\x22" * 320).decode()},
             {"id": 2, "op": "flush"}, {"id": 3, "op": "invalid"}, {"id": 4, "op": "flush"},
         ]) + b"\n")
         output = io.StringIO()

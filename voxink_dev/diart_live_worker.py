@@ -8,14 +8,16 @@ absolute session milliseconds, including pauses in the incoming source.
 from __future__ import annotations
 
 import argparse
+import array
 import base64
 from contextlib import redirect_stdout
 import json
+import math
 import os
 from pathlib import Path
 import sys
 
-from .diart_turns import Span, TurnBuffer, context_window, partition
+from .diart_turns import Span, SpanSmoother, TurnBuffer, context_window, partition
 
 RATE = 16_000
 STEP = 8_000
@@ -23,6 +25,24 @@ STEP_BYTES = STEP * 2
 RING_BYTES = RATE * 2 * 15
 MAX_REQUEST_BYTES = 32_768
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+# Unassigned audio quieter than this is silence rather than speech the models
+# missed, and transcribing it only invents captions. Measured room noise sits
+# near -51 dBFS and speech near -38 dBFS. The gate is deliberately close to the
+# noise floor: in a louder room nothing is gated and behaviour is unchanged.
+SILENCE_RMS_DBFS = -47.0
+# Padding gives the recognizer a word's onset and tail. Reaching further would
+# consume the neighbouring turn: every millisecond a window borrows ahead is a
+# millisecond the next turn transcribes again, which is what made one sentence
+# arrive as several near-identical captions. Consecutive windows therefore
+# overlap by at most this padding, which the service deduplicator can strip.
+CONTEXT_PAD_MS = 250
+
+
+def rms_dbfs(pcm: bytes) -> float:
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    mean = sum(sample * sample for sample in samples) / len(samples) if samples else 0
+    return 10 * math.log10(mean / 32768 ** 2) if mean > 0 else -math.inf
 
 
 def validate_pcm(pcm: bytes, start_ms: int) -> None:
@@ -52,6 +72,9 @@ class StreamingTurns:
         self.ring = bytearray()
         self.ring_start_ms = 0
         self.turns = TurnBuffer(max_ms=4_000)
+        self.smoother = SpanSmoother()
+        # End of the last turn sent, so no window reaches back over a whole turn.
+        self.window_floor_ms = 0
 
     def feed(self, pcm: bytes, start_ms: int) -> list[dict]:
         validate_pcm(pcm, start_ms)
@@ -84,17 +107,36 @@ class StreamingTurns:
         ready = []
         if end_ms > self.committed_ms:
             for span in partition(self.committed_ms, end_ms, tracks, edge_tolerance_ms=10):
-                ready.extend(self._output(turn) for turn in self.turns.feed(span))
+                for smoothed in self.smoother.feed(span):
+                    ready.extend(self._emit(self.turns.feed(smoothed)))
             self.committed_ms = end_ms
         return ready
 
-    def _output(self, span: Span) -> dict:
-        lo, hi = context_window(span, self.received_ms)
+    def _emit(self, spans: list[Span]) -> list[dict]:
+        return [turn for turn in (self._output(span) for span in spans) if turn is not None]
+
+    def _slice(self, lo: int, hi: int) -> bytes:
         if lo < self.ring_start_ms:
             raise RuntimeError("Diart context exceeded the bounded PCM ring")
         pcm = bytes(self.ring[(lo - self.ring_start_ms) * 32:(hi - self.ring_start_ms) * 32])
         if len(pcm) != (hi - lo) * 32:
             raise RuntimeError("Diart context is outside available source audio")
+        return pcm
+
+    def _output(self, span: Span) -> dict | None:
+        """Bound one turn's recognizer audio, or drop a turn that carries none.
+
+        Every turn keeps its own audio, however brief; only the padding around
+        it may be shared with a neighbour.
+        """
+        if not span.speakers and rms_dbfs(self._slice(span.start_ms, span.end_ms)) <= SILENCE_RMS_DBFS:
+            # Skipped audio is never sent, so the floor does not move and the
+            # next turn can still use this silence as its leading context.
+            return None
+        lo, hi = context_window(span, self.received_ms, pad_ms=CONTEXT_PAD_MS, min_ms=0,
+                                floor_ms=self.window_floor_ms)
+        pcm = self._slice(lo, hi)
+        self.window_floor_ms = span.end_ms
         return {"pcm": base64.b64encode(pcm).decode("ascii"),
                 "start_ms": self.origin_ms + span.start_ms,
                 "end_ms": self.origin_ms + span.end_ms,
@@ -117,7 +159,9 @@ class StreamingTurns:
             ready.extend(self._predict(bytes(STEP_BYTES)))
         if self.committed_ms != self.received_ms:
             raise RuntimeError("Diart failed to drain the current source segment")
-        ready.extend(self._output(turn) for turn in self.turns.flush())
+        for span in self.smoother.flush():
+            ready.extend(self._emit(self.turns.feed(span)))
+        ready.extend(self._emit(self.turns.flush()))
         self.reset_predictor()
         self._clear()
         return ready

@@ -361,29 +361,40 @@ class LiveDiarizationUiTests(unittest.TestCase):
             websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 1060})
             _until(websocket, "stream.stopped")
 
-    def _repeated_reply_with_padding(self, second_speakers: tuple[str, ...]) -> list[dict]:
-        self.provider.texts = ["Okay.", "Okay."]
+    def _tiled_turns(self, texts: list[str], second_speakers: tuple[str, ...]) -> list[dict]:
+        """Two adjacent turns as the worker now bounds them: each window covers
+        its own turn and shares only the 250 ms of padding after the first."""
+        self.provider.texts = texts
         self.bridge.feed_results.append([
-            LiveTurn(VOICED * 60, 0, 1000, 0, 1200, ("microphone:speaker0",)),
-            LiveTurn(VOICED * 70, 1000, 2000, 800, 2200, second_speakers),
+            LiveTurn(VOICED * 63, 0, 1000, 0, 1250, ("microphone:speaker0",)),
+            LiveTurn(VOICED * 63, 1000, 2000, 1000, 2250, second_speakers),
         ])
         session_id = self.start_session()
         with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as websocket:
             websocket.send_json(_start_message(session_id, "microphone"))
             websocket.receive_json()
-            finals = [m["event"] for m in _live_frame(websocket, VOICED * 110, 0) if m["type"] == "transcript.final"]
-            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 2200})
+            finals = [m["event"] for m in _live_frame(websocket, VOICED * 113, 0) if m["type"] == "transcript.final"]
+            websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 2250})
             _until(websocket, "stream.stopped")
         self.assertEqual(self.provider.calls, 2)
         return finals
 
-    def test_distinct_speakers_can_repeat_a_brief_reply_despite_context_overlap(self) -> None:
-        finals = self._repeated_reply_with_padding(("microphone:speaker1",))
-        self.assertEqual([event["text"] for event in finals], ["Okay.", "Okay."])
+    def test_distinct_speakers_each_keep_their_own_reply(self) -> None:
+        finals = self._tiled_turns(["Okay.", "Sure."], ("microphone:speaker1",))
+        self.assertEqual([event["text"] for event in finals], ["Okay.", "Sure."])
         self.assertEqual([event["speaker"] for event in finals], ["Speaker 1", "Speaker 2"])
 
+    def test_a_sentence_heard_across_the_shared_padding_is_published_once(self) -> None:
+        # The reported defect: one sentence arriving as two captions, the second
+        # repeating the first. Speakers differ, so the deduplicator must still
+        # run over the audio the two windows share.
+        finals = self._tiled_turns(["burning a body.", "Burning a body doesn't destroy evidence."],
+                                   ("microphone:speaker1",))
+        self.assertEqual([event["text"] for event in finals],
+                         ["burning a body.", "doesn't destroy evidence."])
+
     def test_same_speaker_keeps_existing_context_overlap_deduplication(self) -> None:
-        finals = self._repeated_reply_with_padding(("microphone:speaker0",))
+        finals = self._tiled_turns(["Okay.", "Okay."], ("microphone:speaker0",))
         self.assertEqual([event["text"] for event in finals], ["Okay."])
 
     def test_system_audio_bypasses_diart_in_an_opted_in_session(self) -> None:

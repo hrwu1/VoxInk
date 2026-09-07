@@ -123,7 +123,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         audio, turns, samples = bytearray(), [], 0
         for index in range(125):
             count = [683, 682, 683][index % 3]
-            pcm = bytes([index, 0]) * count
+            pcm = bytes([index, 16]) * count  # Audible: silent unknown audio is not returned.
             turns.extend(await bridge.feed(pcm, 10_000 + round(samples / 16) + [0, 12, -12][index % 3], sequence=index))
             samples += count
             audio.extend(pcm)

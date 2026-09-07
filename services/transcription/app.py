@@ -417,7 +417,6 @@ class _StreamContext:
     chunker: EnergyVadChunker
     sample_rate: int
     live_diarizer: DiartBridge | None = None
-    live_last_speakers: tuple[str, ...] | None = None
     channel: str | None = None
     channel_name: str | None = None
     anchor_ms: float = 0.0
@@ -2727,17 +2726,15 @@ async def _send_diart_turns(
 
     Text times describe the audio Qwen actually heard. Speaker-turn bounds are
     separate display metadata; no word alignment or durable identity is implied.
+
+    Consecutive windows tile the source, so no audio is transcribed twice and
+    the deduplicator needs no speaker-aware reset here.
     """
     for turn in turns:
         event, elapsed_ms = await _timed_transcription(
             runtime, context.session_id, context,
             {"start_ms": turn.audio_start_ms, "end_ms": turn.audio_end_ms}, turn.pcm,
         )
-        if context.live_last_speakers != turn.speakers:
-            # Two speakers can each say "okay" in adjacent short turns. Audio
-            # padding overlaps, but that does not make the second reply a repeat.
-            runtime.dedup.reset(context.session_id, context.stream_id)
-        context.live_last_speakers = turn.speakers
         names = []
         for speaker in turn.speakers:
             suffix = speaker.removeprefix("microphone:").removeprefix("speaker")

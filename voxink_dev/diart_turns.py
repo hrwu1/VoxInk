@@ -7,7 +7,7 @@ implies waveform separation or verified word attribution.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 
@@ -81,14 +81,76 @@ class TurnBuffer:
         return result
 
 
-def context_window(span: Span, available_ms: int, *, pad_ms: int = 250, min_ms: int = 2_000) -> tuple[int, int]:
-    """Keep context around short speech; callers must mark its attribution unsure."""
-    if available_ms < span.end_ms or pad_ms < 0 or min_ms < 0:
+def context_window(span: Span, available_ms: int, *, pad_ms: int = 250, min_ms: int = 2_000,
+                   floor_ms: int = 0) -> tuple[int, int]:
+    """Keep context around short speech; callers must mark its attribution unsure.
+
+    `floor_ms` bounds how far back the window may reach, so a caller passing the
+    previous turn's end never re-sends a whole turn and consecutive windows
+    overlap by at most `pad_ms`. It also bounds the backward half of the `min_ms`
+    expansion, which is then taken from the audio ahead instead; that audio
+    belongs to the next turn, so a live caller wanting no repeated captions
+    passes `min_ms=0` and accepts a short window for a short turn.
+    """
+    if available_ms < span.end_ms or pad_ms < 0 or min_ms < 0 or floor_ms < 0:
         raise ValueError("invalid context bounds")
-    start = max(0, span.start_ms - pad_ms)
+    if floor_ms >= span.end_ms:
+        raise ValueError("context floor leaves no untranscribed audio in this span")
+    start = max(floor_ms, span.start_ms - pad_ms)
     end = min(available_ms, span.end_ms + pad_ms)
     missing = max(0, min_ms - (end - start))
-    start = max(0, start - (missing + 1) // 2)
+    start = max(floor_ms, start - (missing + 1) // 2)
     end = min(available_ms, max(end, start + min_ms))
-    start = max(0, min(start, end - min_ms))
+    start = max(floor_ms, min(start, end - min_ms))
     return start, end
+
+
+class SpanSmoother:
+    """Absorb brief unassigned gaps so one turn is not split into fragments.
+
+    Diart binarizes each step on its own, so a single turn usually arrives as
+    several spans separated by sub-second unassigned gaps, and a caller that
+    treats every span as a turn shows an unlabeled caption between two halves of
+    one sentence. A gap shorter than `max_pause_ms` therefore takes the speakers
+    of the turn it interrupts; a longer one stays unassigned and ends that turn.
+
+    Input and output are both contiguous partitions and no speech is dropped:
+    only the label of a gap changes. Deciding a gap needs the span after it, so
+    a turn's final span is emitted up to `max_pause_ms` later than it arrives.
+    """
+
+    def __init__(self, *, max_pause_ms: int = 750) -> None:
+        if max_pause_ms <= 0:
+            raise ValueError("max_pause_ms must be positive")
+        self.max_pause_ms = max_pause_ms
+        self.gap: Span | None = None
+        self.speakers: tuple[str, ...] = ()
+        self.cursor_ms = 0
+
+    def feed(self, span: Span) -> list[Span]:
+        if span.start_ms != self.cursor_ms:
+            raise ValueError("smoother input must be contiguous and monotonic")
+        self.cursor_ms = span.end_ms
+        if self.gap is None:
+            # Only speech can be interrupted: a gap outside a turn is silence.
+            if not span.speakers and self.speakers:
+                self.gap = span
+                return []
+            self.speakers = span.speakers
+            return [span]
+        if not span.speakers:
+            self.gap = replace(self.gap, end_ms=span.end_ms)
+            if self.gap.end_ms - self.gap.start_ms < self.max_pause_ms:
+                return []
+            ready, self.gap, self.speakers = [self.gap], None, ()
+            return ready
+        # The interrupted turn either resumes or ended at this gap; either way
+        # the pause belongs to it rather than to a caption of its own.
+        ready, self.gap = [replace(self.gap, speakers=self.speakers), span], None
+        self.speakers = span.speakers
+        return ready
+
+    def flush(self) -> list[Span]:
+        ready = [replace(self.gap, speakers=self.speakers)] if self.gap is not None else []
+        self.gap, self.speakers, self.cursor_ms = None, (), 0
+        return ready
