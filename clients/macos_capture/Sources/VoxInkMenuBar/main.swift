@@ -36,6 +36,8 @@ private struct FeedEvent: Decodable {
     let channelName: String?
     let language: String?
     let speaker: String?
+    let speakerProvisional: Bool?
+    let speakerOverlap: Bool?
 
     enum CodingKeys: String, CodingKey {
         case type, source, text, language, speaker
@@ -44,6 +46,25 @@ private struct FeedEvent: Decodable {
         case endMs = "end_ms"
         case isFinal = "is_final"
         case channelName = "channel_name"
+        case speakerProvisional = "speaker_provisional"
+        case speakerOverlap = "speaker_overlap"
+    }
+}
+
+/// Availability and running state of the experimental live diarizer, as the
+/// helper reports it to every client.
+private struct LiveDiarizationView: Decodable {
+    var available = false
+    var requested = false
+    var state = "disabled"
+    var error: String?
+}
+
+private struct CapabilitiesView: Decodable {
+    let liveDiarization: LiveDiarizationView?
+
+    enum CodingKeys: String, CodingKey {
+        case liveDiarization = "live_diarization"
     }
 }
 
@@ -54,11 +75,13 @@ private struct StatusView: Decodable {
     let nextCursor: Int
     let error: String?
     let levels: [String: Double]?
+    let liveDiarization: LiveDiarizationView?
 
     enum CodingKeys: String, CodingKey {
         case state, events, error, levels
         case sessionID = "session_id"
         case nextCursor = "next_cursor"
+        case liveDiarization = "live_diarization"
     }
 }
 
@@ -73,10 +96,18 @@ private final class ControlAPI {
         try await request("GET", "/v1/ui/capture/status?after=\(cursor)")
     }
 
+    func capabilities() async throws -> CapabilitiesView {
+        try await request("GET", "/v1/ui/capture/capabilities")
+    }
+
     func start(
-        sources: [String], language: String?, retainAudio: Bool = false, diarize: Bool = false
+        sources: [String], language: String?, retainAudio: Bool = false, diarize: Bool = false,
+        liveDiarization: Bool = false
     ) async throws -> StatusView {
-        var body: [String: Any] = ["sources": sources, "retain_audio": retainAudio, "diarize": diarize]
+        var body: [String: Any] = [
+            "sources": sources, "retain_audio": retainAudio, "diarize": diarize,
+            "live_diarization": liveDiarization,
+        ]
         if let language { body["language"] = language }
         return try await request("POST", "/v1/ui/capture/start", body: body)
     }
@@ -133,7 +164,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     /// on until turned off. Push to talk is dictation and never keeps audio.
     private let defaults: UserDefaults = {
         let defaults = UserDefaults.standard
-        defaults.register(defaults: ["keepAudio": true, "identifySpeakers": true])
+        defaults.register(defaults: ["keepAudio": true, "identifySpeakers": true, "liveSpeakers": false])
         return defaults
     }()
     private var keepAudio: Bool {
@@ -144,6 +175,13 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         get { defaults.bool(forKey: "identifySpeakers") }
         set { defaults.set(newValue, forKey: "identifySpeakers") }
     }
+    /// Experimental, so off until asked for, like the browser's checkbox.
+    private var liveSpeakers: Bool {
+        get { defaults.bool(forKey: "liveSpeakers") }
+        set { defaults.set(newValue, forKey: "liveSpeakers") }
+    }
+    private var liveDiarization = LiveDiarizationView()
+    private var readingCapabilities = false
     private var pollTimer: Timer?
     private var cursor = 0
     private var state = "ready"
@@ -170,11 +208,32 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildMenu()
         startPolling()
         installHotKey()
+        Task { await refreshCapabilities() }
     }
 
     // MARK: Menu
 
-    func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        // The status poll is idle between sessions, so an experiment runtime
+        // that appeared since launch is picked up when the menu is opened.
+        if !liveDiarization.available { Task { await refreshCapabilities() } }
+        rebuildMenu()
+    }
+
+    /// Availability is a property of the helper, not of a session, so it comes
+    /// from the capabilities endpoint the browser reads for the same checkbox.
+    private func refreshCapabilities() async {
+        guard !readingCapabilities else { return }
+        readingCapabilities = true
+        defer { readingCapabilities = false }
+        guard let view = try? await api.capabilities().liveDiarization else { return }
+        // Only availability is read here. The helper keeps reporting the last
+        // session's live state, which may belong to the browser rather than to
+        // this app, so session state comes from a session this app started.
+        liveDiarization.available = view.available
+        if !liveDiarization.requested { liveDiarization.error = view.error }
+        rebuildMenu()
+    }
 
     private func rebuildMenu() {
         menu.removeAllItems()
@@ -183,6 +242,11 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(title)
         if let lastError {
             let item = NSMenuItem(title: lastError, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        if let line = liveSpeakerStatusLine() {
+            let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
@@ -204,6 +268,23 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         audio.state = keepAudio ? .on : .off
         audio.isEnabled = idle
         menu.addItem(audio)
+        let live = NSMenuItem(
+            title: "Live speakers (experimental)", action: #selector(toggleLiveSpeakers), keyEquivalent: ""
+        )
+        live.target = self
+        live.state = liveDiarization.available && liveSpeakers ? .on : .off
+        live.isEnabled = idle && liveDiarization.available
+        if liveDiarization.available {
+            live.toolTip = "Label microphone speech while recording. Labels are provisional and are not written to the transcript."
+        } else {
+            // A disabled item explains itself, the way the browser's checkbox
+            // carries the helper's reason under it.
+            live.attributedTitle = Self.twoLineTitle(
+                live.title,
+                liveDiarization.error ?? "The Diart experiment runtime is unavailable on this helper"
+            )
+        }
+        menu.addItem(live)
         let speakers = NSMenuItem(
             title: keepAudio ? "Identify speakers after Stop" : "Identify speakers after Stop (needs kept audio)",
             action: #selector(toggleIdentifySpeakers), keyEquivalent: ""
@@ -253,6 +334,23 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     private var clickThroughEnabled = false
 
+    /// A menu item with its reason underneath, in the smaller secondary style
+    /// AppKit uses for such hints.
+    private static func twoLineTitle(_ title: String, _ detail: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(
+            string: title,
+            attributes: [.font: NSFont.menuFont(ofSize: 0)]
+        )
+        text.append(NSAttributedString(
+            string: "\n" + detail,
+            attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        ))
+        return text
+    }
+
     private func statusLine() -> String {
         switch state {
         case "recording":
@@ -263,6 +361,17 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         case "stopping": return "VoxInk — Finalizing…"
         case "failed": return "VoxInk — Needs attention"
         default: return pushToTalkArmed ? "VoxInk — Push to talk ready" : "VoxInk — Ready"
+        }
+    }
+
+    /// What the browser shows as a chip beside the captions, as one line.
+    private func liveSpeakerStatusLine() -> String? {
+        guard liveDiarization.requested, liveDiarization.state != "disabled" else { return nil }
+        switch liveDiarization.state {
+        case "starting": return "Live speakers: loading the model…"
+        case "failed": return "Live speakers: " + (liveDiarization.error ?? "failed")
+        case "stopped": return "Live speakers: labels were provisional"
+        default: return "Live speakers: on — labels are provisional"
         }
     }
 
@@ -284,17 +393,29 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         captionPanel.clear()
         syncPanelStatus()
         if showCaptions { captionPanel.showWindow() }
+        // Live diarization reads the microphone stream, so it is only asked
+        // for when one is being captured; the helper refuses it otherwise.
+        let wantsLiveSpeakers = liveSpeakers && liveDiarization.available && sources.contains("microphone")
+        liveDiarization.requested = wantsLiveSpeakers
+        liveDiarization.state = wantsLiveSpeakers ? "starting" : "disabled"
+        liveDiarization.error = nil
         do {
             let view = try await api.start(
                 sources: sources, language: nil, retainAudio: keepAudio,
-                diarize: keepAudio && identifySpeakers && sources.contains("microphone")
+                diarize: keepAudio && identifySpeakers && sources.contains("microphone"),
+                liveDiarization: wantsLiveSpeakers
             )
             cursor = view.nextCursor
             startedAt = Date()
             state = view.state
+            if let live = view.liveDiarization { liveDiarization = live }
         } catch {
             state = "failed"
             lastError = error.localizedDescription
+            if wantsLiveSpeakers {
+                liveDiarization.state = "failed"
+                liveDiarization.error = error.localizedDescription
+            }
         }
         syncPanelStatus()
         refreshStatusButton()
@@ -314,6 +435,8 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func toggleKeepAudio() { keepAudio.toggle() }
 
     @objc private func toggleIdentifySpeakers() { identifySpeakers.toggle() }
+
+    @objc private func toggleLiveSpeakers() { liveSpeakers.toggle() }
 
     @objc private func togglePause() {
         Task { await control(state == "paused" ? "resume" : "pause") }
@@ -387,6 +510,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func apply(_ view: StatusView) {
         cursor = view.nextCursor
+        if let live = view.liveDiarization { liveDiarization = live }
         captionPanel.setLevels(CaptionLevels(microphone: view.levels?["microphone"], system: view.levels?["system"]))
         if view.state != state {
             state = view.state
@@ -418,7 +542,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
                 endMilliseconds: event.endMs,
                 isFinal: event.isFinal ?? true,
                 channelName: event.channelName,
-                speakerName: event.speaker
+                speakerName: SpeakerLabel.compose(
+                    speaker: event.speaker, provisional: event.speakerProvisional ?? false,
+                    overlap: event.speakerOverlap ?? false
+                )
             ))
         }
     }

@@ -272,7 +272,15 @@ The menu bar item starts and stops capture, pauses, marks, shows or hides the
 floating captions, and opens the transcript folder. **Keep audio** and
 **Identify speakers after Stop** are the browser's checkboxes of the same
 names; they apply to the Start items, are on by default, persist across
-launches, and speaker identification needs kept microphone audio. **Enable push to talk**
+launches, and speaker identification needs kept microphone audio. **Live
+speakers (experimental)** is the browser's checkbox of the same name: it is off
+by default, persists across launches, is offered only when the Diart experiment
+runtime is available (the menu explains why in its tooltip when it is not), and
+is requested only for Start items that include the microphone. While it runs,
+the menu reports loading, on, or the failure, and the floating captions label
+each turn **Speaker 1 · provisional**, **… · overlap · provisional**, or
+**Unassigned · provisional**. Those labels are never written into the
+transcript. **Enable push to talk**
 holds a microphone session open; hold ⌃⌥Space to speak, release to have the
 finalized text pasted into the front application (with Accessibility access;
 otherwise it waits on the clipboard). The app is a control surface over the
