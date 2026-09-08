@@ -1,26 +1,49 @@
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from voxink_dev.cli import (
     _build_capture_plan,
+    _built_menubar_app,
     _native_capture_command,
+    _resolve_interface,
     _run_web_ui,
     build_parser,
+    main,
 )
 
 
 class CliParserTests(unittest.TestCase):
-    def test_browser_interface_is_the_default(self) -> None:
-        args = build_parser().parse_args([])
-        self.assertTrue(args.web)
+    def _interface(self, argv: list[str]) -> str:
+        return _resolve_interface(build_parser().parse_args(argv))
 
-    def test_terminal_interface_can_be_selected_explicitly(self) -> None:
-        args = build_parser().parse_args(["--terminal"])
-        self.assertFalse(args.web)
+    def test_menu_bar_interface_is_the_default(self) -> None:
+        self.assertEqual("menubar", self._interface([]))
+
+    def test_each_interface_can_be_selected_explicitly(self) -> None:
+        self.assertEqual("web", self._interface(["--web"]))
+        self.assertEqual("terminal", self._interface(["--terminal"]))
+        self.assertEqual("menubar", self._interface(["--menubar"]))
+
+    def test_named_sources_keep_the_route_those_flags_have_always_driven(self) -> None:
+        self.assertEqual("web", self._interface(["--source", "microphone"]))
+        self.assertEqual("web", self._interface(["--source", "system"]))
+        self.assertEqual(
+            "web",
+            self._interface(
+                ["--source", "applications", "--app", "com.apple.Safari"]
+            ),
+        )
+
+    def test_an_interface_flag_wins_over_named_sources(self) -> None:
+        self.assertEqual(
+            "menubar", self._interface(["--menubar", "--source", "system"])
+        )
 
     def test_audio_retention_is_enabled_by_default_with_an_opt_out(self) -> None:
         self.assertTrue(build_parser().parse_args([]).retain_audio)
@@ -193,6 +216,59 @@ class WebUiLauncherTests(unittest.TestCase):
             )
 
         self.assertIn("retain_audio=0", opened.call_args.args[0])
+
+
+class MenuBarLauncherTests(unittest.TestCase):
+    def test_only_a_built_application_is_reported(self) -> None:
+        with TemporaryDirectory() as directory:
+            missing = Path(directory) / "voxink-menubar"
+            self.assertIsNone(_built_menubar_app(missing))
+            missing.write_bytes(b"")
+            self.assertIsNone(_built_menubar_app(missing))
+            missing.chmod(0o755)
+            self.assertEqual(missing.resolve(), _built_menubar_app(missing))
+
+    def _main(self, argv: list[str], menubar_app: Path):
+        with (
+            patch("voxink_dev.cli.run_preflight") as preflight,
+            patch("voxink_dev.cli.DiagnosticLog"),
+            patch("voxink_dev.cli.HelperSupervisor") as supervisor,
+            patch("voxink_dev.cli._run_menubar", return_value=0) as menubar,
+            patch("voxink_dev.cli._run_web_ui", return_value=0) as web,
+            patch("builtins.print"),
+        ):
+            preflight.return_value = MagicMock(checked_files=1, free_bytes=0)
+            supervisor.return_value.start.return_value = {
+                "protocol_version": "1.0",
+                "provider": "local",
+            }
+            code = main([*argv, "--menubar-app", str(menubar_app)])
+        return code, menubar, web
+
+    def test_the_default_runs_the_menu_bar_application(self) -> None:
+        with TemporaryDirectory() as directory:
+            application = Path(directory) / "voxink-menubar"
+            application.write_bytes(b"")
+            application.chmod(0o755)
+            code, menubar, web = self._main([], application)
+        self.assertEqual(0, code)
+        menubar.assert_called_once()
+        web.assert_not_called()
+
+    def test_an_unbuilt_application_falls_back_to_the_browser(self) -> None:
+        with TemporaryDirectory() as directory:
+            code, menubar, web = self._main([], Path(directory) / "voxink-menubar")
+        self.assertEqual(0, code)
+        web.assert_called_once()
+        menubar.assert_not_called()
+
+    def test_an_explicit_request_reports_the_missing_build(self) -> None:
+        with TemporaryDirectory() as directory:
+            missing = Path(directory) / "voxink-menubar"
+            with patch("sys.stderr", new=StringIO()) as errors:
+                code = main(["--menubar", "--menubar-app", str(missing)])
+        self.assertEqual(2, code)
+        self.assertIn("build-macos-menubar", errors.getvalue())
 
 
 if __name__ == "__main__":

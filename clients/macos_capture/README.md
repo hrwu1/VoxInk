@@ -36,7 +36,8 @@ Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
 ## Menu-bar application
 
 `voxink-menubar` (built by `scripts/build-macos-menubar`) is a control
-surface over the helper's HTTP API, launched by `voxink-dev --menubar` with
+surface over the helper's HTTP API, launched by `voxink-dev` (its default
+interface) with
 `VOXINK_SERVICE_URL`, `VOXINK_AUTH_SECRET`, and `VOXINK_OUTPUT_ROOT` in its
 environment. It starts, pauses, marks, and stops capture (optionally keeping
 the audio and identifying speakers after Stop, remembered in UserDefaults;

@@ -57,22 +57,30 @@ python3.12 -m venv .venv
 The model weights must already exist locally at `models/Qwen3-ASR-1.7B/`.
 VoxInk never downloads model files while running.
 
-The browser recording interface is the default. Start the complete local
-workflow with:
+The menu-bar application is the default interface. Build it once, then start
+the complete local workflow with:
 
 ```sh
+./scripts/build-macos-menubar
 ./scripts/voxink-dev --device cpu
 ```
 
 The command verifies the Python environment and local model checksums, checks
 disk space, prefers private loopback port `8300` (and chooses the next available
 port through `8399` if it is busy), creates a per-launch credential, starts the helper,
-negotiates the protocol version, and opens a private recording console in the
-default browser. The page asks for microphone permission, streams audio only to
-the supervised loopback helper, displays finalized captions, and removes its
-one-time launch token from the browser address immediately. Ctrl-C in the
+negotiates the protocol version, and puts VoxInk in the menu bar. Ctrl-C in the
 launching Terminal closes the helper and finalizes open transcript files.
 Finalized transcripts default to `~/Documents/VoxInk/`.
+
+`--web` opens the private recording console in the default browser instead, and
+so does the bare command when the menu-bar application has not been built yet
+(it says so before it does). The page asks for microphone permission, streams
+audio only to the supervised loopback helper, displays finalized captions, and
+removes its one-time launch token from the browser address immediately.
+
+```sh
+./scripts/voxink-dev --web --device cpu
+```
 
 The browser's **Capture mode** menu supports microphone, all system audio,
 selected running applications, and both microphone/system combinations. Every
@@ -104,7 +112,7 @@ and select the Terminal interface explicitly:
 
 Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down both
 capture and the helper, and the saved transcript path is printed when capture
-exits. The former explicit `--web` spelling remains supported for compatibility.
+exits.
 
 ### Keeping the audio
 
@@ -199,8 +207,10 @@ Then the same `voxink-dev` supervisor can run every native source combination:
 ```
 
 Native workflows selected with command-line `--source` flags use the Swift
-floating-caption panel. The default browser workflow can select the same modes
-from its Capture mode menu. `voxink-dev` supplies the private loopback endpoint and per-launch
+floating-caption panel: naming sources keeps that route rather than starting
+the default menu-bar interface, which chooses its sources from its own Start
+items. The browser workflow can select the same modes from its Capture mode
+menu. `voxink-dev` supplies the private loopback endpoint and per-launch
 credential, monitors the native capture process and transcription helper, and
 shuts both down on Ctrl-C. macOS requests Microphone and/or Screen & System Audio
 Recording permission when each protected source is first used.
@@ -265,8 +275,11 @@ labels. Turn it off with `--no-echo-suppression`.
 ```sh
 ./scripts/build-macos-capture
 ./scripts/build-macos-menubar
-./scripts/voxink-dev --menubar
+./scripts/voxink-dev
 ```
+
+This is what `voxink-dev` runs by default; `--menubar` asks for it explicitly,
+which reports the missing build instead of falling back to the browser.
 
 The menu bar item starts and stops capture, pauses, marks, shows or hides the
 floating captions, and opens the transcript folder. **Keep audio** and

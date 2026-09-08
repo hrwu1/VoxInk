@@ -743,8 +743,9 @@ Deferred rather than in a priority tier.
 
 Confirmed by reading the tree and running the checks on 2026-09-02:
 
-- A one-command browser workflow through `./scripts/voxink-dev`, a menu-bar
-  application through `--menubar`, and a public `./scripts/voxink` command.
+- A one-command workflow through `./scripts/voxink-dev`, which starts the
+  menu-bar application by default, the browser workflow through `--web`, and a
+  public `./scripts/voxink` command.
 - System audio through Core Audio process taps, with ScreenCaptureKit as the
   fallback. A target-Mac muted-player run produced 837 frames, 99% nonzero
   bytes, and a finalized transcript. The same run through ScreenCaptureKit

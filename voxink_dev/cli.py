@@ -109,45 +109,83 @@ def build_parser() -> argparse.ArgumentParser:
     )
     interface = parser.add_mutually_exclusive_group()
     interface.add_argument(
+        "--menubar",
+        dest="interface",
+        action="store_const",
+        const="menubar",
+        help=(
+            "run the menu-bar application with floating captions and push to talk "
+            "(default, unless capture sources are named)"
+        ),
+    )
+    interface.add_argument(
         "--web",
-        dest="web",
-        action="store_true",
-        help="open the local browser control surface (default)",
+        dest="interface",
+        action="store_const",
+        const="web",
+        help="open the local browser control surface",
     )
     interface.add_argument(
         "--terminal",
-        dest="web",
-        action="store_false",
+        dest="interface",
+        action="store_const",
+        const="terminal",
         help="use the interactive Terminal microphone controls",
     )
-    interface.add_argument(
-        "--menubar",
-        dest="menubar",
-        action="store_true",
-        help="run the menu-bar application with floating captions and push to talk",
-    )
     parser.add_argument("--menubar-app", type=Path, default=DEFAULT_MENUBAR_APP, help=argparse.SUPPRESS)
-    parser.set_defaults(web=True, menubar=False)
     return parser
+
+
+def _resolve_interface(args: argparse.Namespace) -> str:
+    """The interface to run when the command line does not name one.
+
+    Naming capture sources selects the route those flags have always driven:
+    the browser for the microphone alone, native capture for system or
+    application audio. The menu-bar app takes its sources from its own Start
+    items, so it would silently ignore them.
+    """
+    if args.interface is not None:
+        return args.interface
+    if args.sources or args.applications:
+        return "web"
+    return "menubar"
+
+
+def _built_menubar_app(path: Path) -> Path | None:
+    """The built menu-bar application, or None when it has not been built."""
+    executable = path.expanduser().resolve()
+    if executable.is_file() and executable.stat().st_mode & 0o111:
+        return executable
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.list_apps:
         return _list_applications(args.native_capture)
-    if args.menubar:
-        # The menu-bar app is a control surface over the helper, like the
-        # browser: it needs the native helper for capture, not Python capture.
-        args.web = True
-        menubar = args.menubar_app.expanduser().resolve()
-        if not menubar.is_file() or not menubar.stat().st_mode & 0o111:
+    interface = _resolve_interface(args)
+    menubar_app = _built_menubar_app(args.menubar_app) if interface == "menubar" else None
+    if interface == "menubar" and menubar_app is None:
+        expected = args.menubar_app.expanduser().resolve()
+        if args.interface == "menubar":
             print(
                 "VoxInk cannot start:\n"
-                f"- The menu-bar application is not built: {menubar}\n"
+                f"- The menu-bar application is not built: {expected}\n"
                 "  Build it with: ./scripts/build-macos-menubar",
                 file=sys.stderr,
             )
             return 2
+        # The menu bar is only the default here, so the browser still gives a
+        # working session on a checkout where the app has not been built.
+        print(
+            f"The menu-bar application is not built ({expected}); "
+            "opening the browser instead.\n"
+            "Build it with ./scripts/build-macos-menubar to start in the menu bar."
+        )
+        interface = "web"
+    # The menu-bar app is a control surface over the helper, like the browser:
+    # both need the native helper for capture, not Python capture.
+    helper_capture = interface != "terminal"
     try:
         capture_plan = _build_capture_plan(args.sources, args.applications)
     except ValueError as exc:
@@ -166,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 verify_checksums=not args.skip_checksums,
                 python_capture=(
-                    not args.web and not capture_plan.uses_native_capture
+                    not helper_capture and not capture_plan.uses_native_capture
                 ),
             )
         )
@@ -190,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
             translation_model_path=args.translation_model,
             partial_captions=args.partial_captions,
             echo_suppression=args.echo_suppression,
-            native_capture_path=args.native_capture if args.web else None,
+            native_capture_path=args.native_capture if helper_capture else None,
             # Publishing the endpoint is what lets `voxink` attach to this
             # helper; the launcher owns it because it owns the helper's life.
             control_endpoint_path=endpoint_path(args.state_root),
@@ -203,11 +241,11 @@ def main(argv: list[str] | None = None) -> int:
             f"Helper ready on a private loopback port "
             f"(protocol {health['protocol_version']}, provider {health['provider']})."
         )
-        if args.menubar:
+        if menubar_app is not None:
             return _run_menubar(
-                supervisor, diagnostics, report.output_root, args.menubar_app.expanduser().resolve()
+                supervisor, diagnostics, report.output_root, menubar_app
             )
-        if args.web and not capture_plan.uses_native_capture:
+        if interface == "web" and not capture_plan.uses_native_capture:
             return _run_web_ui(
                 supervisor, health, diagnostics, report.output_root, args.retain_audio
             )
