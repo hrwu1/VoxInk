@@ -796,7 +796,8 @@ Goal: add the normal-recording Control + Option + R workflow described in §4.2.
 - [x] Build the native menu-bar app with `scripts/build-macos-menubar`.
 - [ ] Verify the native menu and global shortcut interactively (see limitation
   below); distinguish UI/control verification from actual audio capture.
-- [ ] Review, commit, and integrate the clean worktree.
+- [x] Review, commit, and fast-forward into `main` (`032cda59`); rebuild the
+  main development app and remove the temporary worktree.
 
 Completion requires passing relevant Swift tests/build, verified UI/control
 behavior or an explicit record of what the environment prevented, and updated
