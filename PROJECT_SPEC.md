@@ -86,9 +86,13 @@ introduced incrementally.
 #### Menu-bar recording shortcut
 
 Control + Shift + R starts a normal recording when idle and stops/finalizes
-it when recording or paused. It uses the last source successfully started from
-the menu bar (microphone by default), together with the saved recording options.
-The menu displays the shortcut beside its current Start or Stop action.
+it when recording or paused. It uses the source selected in the menu bar
+(microphone by default), together with the saved recording options.
+The menu has one Start Recording / Stop Recording control with the shortcut
+beside it, plus an Audio Source submenu for Microphone, System audio, or both.
+Selecting a source saves it immediately without starting capture; a checkmark
+and the submenu title show the selection. Source selection is disabled during
+a session, pending commands, and push-to-talk.
 Push-to-talk keeps Control + Option + Space; the recording shortcut is inactive
 while push-to-talk is enabled. Held keys and presses during a pending command
 must not queue additional actions. Registration failures must be visible in the
@@ -829,6 +833,29 @@ isolated app connected to a simulated helper, but no control request arrived.
 Native delivery of the replacement remains unverified by automation. The test
 app was stopped; the user's existing instance was preserved and needs a restart
 to load the rebuilt shortcut.
+
+#### Separate recording control and source (2026-09-09)
+
+Goal: separate Start/Stop from source selection using the existing saved source.
+
+- [x] Replace source-specific Start actions with one Start/Stop control and a
+  checked Audio Source submenu; persist selection without capture.
+- [x] Run Swift tests and rebuild the development app.
+- [x] Attempt native menu interaction and record environment limitations below.
+- [x] Review and commit the focused change.
+
+Completion requires independent source selection, the same source for menu and
+shortcut starts, disabled source changes during a session, and passing build
+and relevant tests. Audio capture and push-to-talk retain their existing paths.
+
+Validation: all 52 Swift tests passed, including saved-source restoration and
+recording state guards. `scripts/build-macos-menubar` and `git diff --check`
+passed. An isolated app launched against a simulated helper on port 8398;
+Computer Use timed out attaching to its bundle, and Finder's screenshot exposed
+only its window, not the status bar. Native menu presentation, source clicks,
+and Start/Stop interaction therefore remain unverified. No simulated capture
+commands were issued. The isolated app/helper were stopped; restart the rebuilt
+development app to load this change in the user's running instance.
 
 ### 16.2 P0: Target-Mac acceptance of capture paths
 

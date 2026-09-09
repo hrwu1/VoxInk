@@ -284,16 +284,18 @@ which reports the missing build instead of falling back to the browser.
 The menu bar item starts and stops capture, pauses, marks, shows or hides the
 floating captions, and opens the transcript folder. **Control + Shift + R**
 starts a normal recording from any app and stops/finalizes it on the next press
-(also when paused). It uses the last source successfully started from the menu
-bar, or microphone on first use, and the saved recording options. The menu shows
-`⌃⇧R` beside that Start source and Stop. Holding the keys or pressing during a
+(also when paused). The **Audio Source** submenu selects Microphone, System
+audio, or both without starting capture, and remembers the selection across
+launches (microphone on first use). Source selection is disabled during a session
+or push-to-talk. The **Start Recording / Stop Recording** control and `⌃⇧R` use
+that selection and the saved recording options. Holding the keys or pressing during a
 pending command does not queue extra actions. The shortcut is inactive while
 push-to-talk is enabled; turn push-to-talk off to record normally. VoxInk and its
 helper must already be running. If another app prevents shortcut registration,
 the menu reports it; resolve the conflict and restart VoxInk to retry.
 **Keep audio** and
 **Identify speakers after Stop** are the browser's checkboxes of the same
-names; they apply to the Start items, are on by default, persist across
+names; they apply to Start Recording, are on by default, persist across
 launches, and speaker identification needs kept microphone audio. **Live
 speakers (experimental)** is the browser's checkbox of the same name: it is off
 by default, persists across launches, is offered only when the Diart experiment

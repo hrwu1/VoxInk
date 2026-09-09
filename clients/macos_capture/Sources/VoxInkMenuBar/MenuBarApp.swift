@@ -266,14 +266,37 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         let idle = (state == "ready" || state == "failed") && !commandInFlight
+        let canStop = (state == "recording" || state == "paused") && !commandInFlight
+        let recordingTitle: String
+        switch state {
+        case "starting": recordingTitle = "Starting…"
+        case "stopping": recordingTitle = "Finalizing…"
+        case "recording", "paused": recordingTitle = "Stop Recording"
+        default: recordingTitle = "Start Recording"
+        }
+        let recording = NSMenuItem(
+            title: recordingTitle + (pushToTalkArmed ? "" : " (⌃⇧R)"),
+            action: canStop ? #selector(stopCapture) : #selector(startCapture), keyEquivalent: ""
+        )
+        recording.target = self
+        recording.isEnabled = canStop || (idle && !pushToTalkArmed)
+        menu.addItem(recording)
+        let selectedSources = recordingShortcut.sources
+        let sourceLabel = RecordingShortcut.sourceOptions.first { $0.sources == selectedSources }!.title
+        let source = NSMenuItem(title: "Audio Source: " + sourceLabel, action: nil, keyEquivalent: "")
+        source.isEnabled = idle && !pushToTalkArmed
+        let sourceMenu = NSMenu()
+        sourceMenu.autoenablesItems = false
         for (label, sources) in RecordingShortcut.sourceOptions {
-            let hint = sources == recordingShortcut.sources ? " (⌃⇧R)" : ""
-            let item = NSMenuItem(title: "Start: " + label + hint, action: #selector(startCapture(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: label, action: #selector(selectSource(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = sources
-            item.isEnabled = idle && !pushToTalkArmed
-            menu.addItem(item)
+            item.state = sources == selectedSources ? .on : .off
+            item.isEnabled = source.isEnabled
+            sourceMenu.addItem(item)
         }
+        source.submenu = sourceMenu
+        menu.addItem(source)
         let audio = NSMenuItem(title: "Keep audio", action: #selector(toggleKeepAudio), keyEquivalent: "")
         audio.target = self
         audio.state = keepAudio ? .on : .off
@@ -313,10 +336,6 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         mark.target = self
         mark.isEnabled = state == "recording" || state == "paused"
         menu.addItem(mark)
-        let stop = NSMenuItem(title: pushToTalkArmed ? "Stop" : "Stop (⌃⇧R)", action: #selector(stopCapture), keyEquivalent: "")
-        stop.target = self
-        stop.isEnabled = (state == "recording" || state == "paused") && !commandInFlight
-        menu.addItem(stop)
         menu.addItem(.separator())
         let ptt = NSMenuItem(
             title: pushToTalkArmed ? "Push to talk: hold ⌃⌥Space (on)" : "Enable push to talk (⌃⌥Space)",
@@ -392,9 +411,14 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: Actions
 
-    @objc private func startCapture(_ sender: NSMenuItem) {
+    @objc private func selectSource(_ sender: NSMenuItem) {
+        guard RecordingShortcut.action(state: state, pushToTalkArmed: pushToTalkArmed, busy: commandInFlight) == .start else { return }
         guard let sources = sender.representedObject as? [String] else { return }
-        Task { await begin(sources: sources) }
+        recordingShortcut.remember(sources: sources)
+    }
+
+    @objc private func startCapture() {
+        Task { await begin(sources: recordingShortcut.sources) }
     }
 
     private func begin(sources: [String]) async {
@@ -423,9 +447,6 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             cursor = view.nextCursor
             startedAt = Date()
             state = view.state
-            if view.state == "recording" || view.state == "starting" {
-                recordingShortcut.remember(sources: sources)
-            }
             if let live = view.liveDiarization { liveDiarization = live }
         } catch {
             state = "failed"
