@@ -267,7 +267,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         let idle = (state == "ready" || state == "failed") && !commandInFlight
         for (label, sources) in RecordingShortcut.sourceOptions {
-            let hint = sources == recordingShortcut.sources ? " (⌃⌥R)" : ""
+            let hint = sources == recordingShortcut.sources ? " (⌃⇧R)" : ""
             let item = NSMenuItem(title: "Start: " + label + hint, action: #selector(startCapture(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = sources
@@ -313,7 +313,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         mark.target = self
         mark.isEnabled = state == "recording" || state == "paused"
         menu.addItem(mark)
-        let stop = NSMenuItem(title: pushToTalkArmed ? "Stop" : "Stop (⌃⌥R)", action: #selector(stopCapture), keyEquivalent: "")
+        let stop = NSMenuItem(title: pushToTalkArmed ? "Stop" : "Stop (⌃⇧R)", action: #selector(stopCapture), keyEquivalent: "")
         stop.target = self
         stop.isEnabled = (state == "recording" || state == "paused") && !commandInFlight
         menu.addItem(stop)
@@ -734,13 +734,13 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             hotKeyErrors.append("Global shortcuts unavailable (error \(handlerStatus)). Restart VoxInk to retry.")
             return
         }
-        for (key, code, label) in [
-            (MenuBarHotKey.pushToTalk, kVK_Space, "⌃⌥Space"),
-            (MenuBarHotKey.recording, kVK_ANSI_R, "⌃⌥R"),
+        for (key, code, modifiers, label) in [
+            (MenuBarHotKey.pushToTalk, kVK_Space, controlKey | optionKey, "⌃⌥Space"),
+            (MenuBarHotKey.recording, kVK_ANSI_R, controlKey | shiftKey, "⌃⇧R"),
         ] {
             var reference: EventHotKeyRef?
             let status = RegisterEventHotKey(
-                UInt32(code), UInt32(controlKey | optionKey),
+                UInt32(code), UInt32(modifiers),
                 EventHotKeyID(signature: MenuBarHotKey.signature, id: key.rawValue),
                 GetApplicationEventTarget(), 0, &reference
             )

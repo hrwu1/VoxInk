@@ -85,7 +85,7 @@ introduced incrementally.
 
 #### Menu-bar recording shortcut
 
-Control + Option + R starts a normal recording when idle and stops/finalizes
+Control + Shift + R starts a normal recording when idle and stops/finalizes
 it when recording or paused. It uses the last source successfully started from
 the menu bar (microphone by default), together with the saved recording options.
 The menu displays the shortcut beside its current Start or Stop action.
@@ -788,7 +788,7 @@ after later changes.
 
 #### Recording shortcut implementation (2026-09-09)
 
-Goal: add the normal-recording Control + Option + R workflow described in §4.2.
+Goal: add the normal-recording shortcut described in §4.2.
 
 - [x] Inspect recording control, push-to-talk, and existing global registration.
 - [x] Add source persistence, guarded start/stop dispatch, and menu feedback.
@@ -812,6 +812,23 @@ the test process was alive in its normal AppKit event loop. Consequently native
 key delivery, menu presentation, and recording through the new shortcut remain
 unverified; this attempt is not an end-to-end pass. The existing VoxInk process
 was left running. Restart the rebuilt menu-bar app to load the change.
+
+Follow-up: the user confirmed recording worked, then identified a conflict.
+Rectangle's Center Two Thirds also uses Control + Option + R. The user selected
+Control + Shift + R as the replacement. Keep the recording behavior and
+Control + Option + Space push-to-talk binding unchanged.
+
+- [x] Change the recording registration and visible menu/documentation hints.
+- [x] Run Swift tests and rebuild the development app; report native UI results.
+- [x] Commit this binding change. Completion requires matching registration,
+  menu hints, and documentation, with passing tests/build.
+
+Replacement validation: all 52 Swift tests passed and the development app
+rebuilt successfully. Computer Use sent Control + Shift + R from Finder to an
+isolated app connected to a simulated helper, but no control request arrived.
+Native delivery of the replacement remains unverified by automation. The test
+app was stopped; the user's existing instance was preserved and needs a restart
+to load the rebuilt shortcut.
 
 ### 16.2 P0: Target-Mac acceptance of capture paths
 
