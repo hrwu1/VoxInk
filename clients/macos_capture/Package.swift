@@ -24,6 +24,10 @@ let package = Package(
             name: "VoxInkCaptureTests",
             dependencies: ["VoxInkCapture"]
         ),
+        .testTarget(
+            name: "VoxInkMenuBarTests",
+            dependencies: ["VoxInkMenuBar"]
+        ),
     ],
     swiftLanguageModes: [.v5]
 )

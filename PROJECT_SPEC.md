@@ -83,6 +83,17 @@ The following experiences share one underlying session engine:
 Only the common pipeline needs to be proven initially. These presets can be
 introduced incrementally.
 
+#### Menu-bar recording shortcut
+
+Control + Option + R starts a normal recording when idle and stops/finalizes
+it when recording or paused. It uses the last source successfully started from
+the menu bar (microphone by default), together with the saved recording options.
+The menu displays the shortcut beside its current Start or Stop action.
+Push-to-talk keeps Control + Option + Space; the recording shortcut is inactive
+while push-to-talk is enabled. Held keys and presses during a pending command
+must not queue additional actions. Registration failures must be visible in the
+menu, and neither shortcut launches the app or helper when they are closed.
+
 ### 4.3 Floating captions
 
 The initial caption window should:
@@ -774,6 +785,32 @@ Recorded checks on 2026-09-02:
 
 These counts are historical evidence, not a substitute for rerunning the suites
 after later changes.
+
+#### Recording shortcut implementation (2026-09-09)
+
+Goal: add the normal-recording Control + Option + R workflow described in §4.2.
+
+- [x] Inspect recording control, push-to-talk, and existing global registration.
+- [x] Add source persistence, guarded start/stop dispatch, and menu feedback.
+- [x] Test source restoration, repeat/transition guards, and hotkey routing.
+- [x] Build the native menu-bar app with `scripts/build-macos-menubar`.
+- [ ] Verify the native menu and global shortcut interactively (see limitation
+  below); distinguish UI/control verification from actual audio capture.
+- [ ] Review, commit, and integrate the clean worktree.
+
+Completion requires passing relevant Swift tests/build, verified UI/control
+behavior or an explicit record of what the environment prevented, and updated
+user documentation. Existing audio capture and transcription are reused.
+
+Validation: `swift test --package-path clients/macos_capture` passed 52 tests,
+including eight new menu-bar shortcut tests. The development app build passed.
+An isolated app was launched against a simulated helper on port 8398 without
+capturing audio. Computer Use timed out attaching to the app by both path and
+bundle ID. A shortcut sent through Finder produced no simulated helper commands;
+the test process was alive in its normal AppKit event loop. Consequently native
+key delivery, menu presentation, and recording through the new shortcut remain
+unverified; this attempt is not an end-to-end pass. The existing VoxInk process
+was left running. Restart the rebuilt menu-bar app to load the change.
 
 ### 16.2 P0: Target-Mac acceptance of capture paths
 

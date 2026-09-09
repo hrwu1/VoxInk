@@ -192,8 +192,12 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     private var pushToTalkArmed = false
     private var pushToTalkActive = false
     private var pushToTalkSince: Int64 = 0
-    private var hotKeyRef: EventHotKeyRef?
+    private lazy var recordingShortcut = RecordingShortcut(defaults: defaults)
+    private var commandInFlight = false
+    private var commandRevision = 0
+    private var hotKeyRefs: [EventHotKeyRef] = []
     private var hotKeyHandler: EventHandlerRef?
+    private var hotKeyErrors: [String] = []
 
     init(api: ControlAPI, environment: Environment) {
         self.api = api
@@ -212,6 +216,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         rebuildMenu()
         startPolling()
         installHotKey()
+        rebuildMenu()
         Task { await refreshCapabilities() }
     }
 
@@ -244,6 +249,11 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         let title = NSMenuItem(title: statusLine(), action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
+        for error in hotKeyErrors {
+            let item = NSMenuItem(title: error, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
         if let lastError {
             let item = NSMenuItem(title: lastError, action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -255,13 +265,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let idle = state == "ready" || state == "failed"
-        for (label, sources) in [
-            ("Start: Microphone", ["microphone"]),
-            ("Start: Microphone + System audio", ["microphone", "system"]),
-            ("Start: System audio", ["system"]),
-        ] {
-            let item = NSMenuItem(title: label, action: #selector(startCapture(_:)), keyEquivalent: "")
+        let idle = (state == "ready" || state == "failed") && !commandInFlight
+        for (label, sources) in RecordingShortcut.sourceOptions {
+            let hint = sources == recordingShortcut.sources ? " (⌃⌥R)" : ""
+            let item = NSMenuItem(title: "Start: " + label + hint, action: #selector(startCapture(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = sources
             item.isEnabled = idle && !pushToTalkArmed
@@ -300,15 +307,15 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         let pause = NSMenuItem(title: state == "paused" ? "Resume" : "Pause", action: #selector(togglePause), keyEquivalent: "")
         pause.target = self
-        pause.isEnabled = (state == "recording" || state == "paused") && !pushToTalkArmed
+        pause.isEnabled = (state == "recording" || state == "paused") && !pushToTalkArmed && !commandInFlight
         menu.addItem(pause)
         let mark = NSMenuItem(title: "Mark this moment", action: #selector(markMoment), keyEquivalent: "m")
         mark.target = self
         mark.isEnabled = state == "recording" || state == "paused"
         menu.addItem(mark)
-        let stop = NSMenuItem(title: "Stop", action: #selector(stopCapture), keyEquivalent: "")
+        let stop = NSMenuItem(title: pushToTalkArmed ? "Stop" : "Stop (⌃⌥R)", action: #selector(stopCapture), keyEquivalent: "")
         stop.target = self
-        stop.isEnabled = state == "recording" || state == "paused"
+        stop.isEnabled = (state == "recording" || state == "paused") && !commandInFlight
         menu.addItem(stop)
         menu.addItem(.separator())
         let ptt = NSMenuItem(
@@ -317,7 +324,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         )
         ptt.target = self
         ptt.state = pushToTalkArmed ? .on : .off
-        ptt.isEnabled = pushToTalkArmed || idle
+        ptt.isEnabled = (pushToTalkArmed || idle) && !commandInFlight
         menu.addItem(ptt)
         let captions = NSMenuItem(title: "Show floating captions", action: #selector(toggleCaptions), keyEquivalent: "")
         captions.target = self
@@ -391,6 +398,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func begin(sources: [String]) async {
+        guard RecordingShortcut.action(state: state, pushToTalkArmed: pushToTalkArmed, busy: commandInFlight) == .start else { return }
+        commandInFlight = true
+        commandRevision += 1
+        defer { commandInFlight = false }
         state = "starting"
         lastError = nil
         refreshStatusButton()
@@ -412,6 +423,9 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             cursor = view.nextCursor
             startedAt = Date()
             state = view.state
+            if view.state == "recording" || view.state == "starting" {
+                recordingShortcut.remember(sources: sources)
+            }
             if let live = view.liveDiarization { liveDiarization = live }
         } catch {
             state = "failed"
@@ -451,11 +465,23 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func control(_ action: String) async {
+        guard !commandInFlight else { return }
+        commandInFlight = true
+        commandRevision += 1
+        defer { commandInFlight = false }
+        let previousState = state
+        if action == "stop" {
+            state = "stopping"
+            syncPanelStatus()
+            refreshStatusButton()
+        }
         do {
             let view = try await api.control(action)
             apply(view)
         } catch {
+            state = previousState
             lastError = error.localizedDescription
+            syncPanelStatus()
         }
         refreshStatusButton()
     }
@@ -504,9 +530,12 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func poll() async {
-        guard state != "ready" || pushToTalkArmed else { return }
+        guard !commandInFlight, state != "ready" || pushToTalkArmed else { return }
+        let revision = commandRevision
         do {
-            apply(try await api.status(after: cursor))
+            let view = try await api.status(after: cursor)
+            guard !commandInFlight, revision == commandRevision else { return }
+            apply(view)
         } catch {
             // A helper that is restarting answers again on the next tick.
         }
@@ -563,6 +592,10 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     /// Start a microphone session and hold it paused; the key resumes and
     /// pauses it, so each press costs no helper start-up.
     private func armPushToTalk() async {
+        guard !commandInFlight, state == "ready" || state == "failed" else { return }
+        commandInFlight = true
+        commandRevision += 1
+        defer { commandInFlight = false }
         state = "starting"
         refreshStatusButton()
         do {
@@ -651,7 +684,23 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         keyUp?.post(tap: .cghidEventTap)
     }
 
-    // MARK: Carbon hot key (⌃⌥Space), pressed and released
+    // MARK: Global shortcuts
+
+    fileprivate func recordingKeyPressed() {
+        guard let action = recordingShortcut.press(
+            state: state, pushToTalkArmed: pushToTalkArmed, busy: commandInFlight
+        ) else { return }
+        Task {
+            // Recheck after scheduling: a menu action may have run meanwhile.
+            guard RecordingShortcut.action(
+                state: state, pushToTalkArmed: pushToTalkArmed, busy: commandInFlight
+            ) == action else { return }
+            switch action {
+            case .start: await begin(sources: recordingShortcut.sources)
+            case .stop: await control("stop")
+            }
+        }
+    }
 
     private func installHotKey() {
         var eventTypes = [
@@ -659,21 +708,48 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
         ]
         let controller = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+        let handlerStatus = InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
             guard let userData, let event else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            guard GetEventParameter(
+                event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID
+            ) == noErr,
+            let key = MenuBarHotKey(signature: hotKeyID.signature, id: hotKeyID.id)
+            else { return OSStatus(eventNotHandledErr) }
             let controller = Unmanaged<MenuBarController>.fromOpaque(userData).takeUnretainedValue()
             let kind = GetEventKind(event)
             Task { @MainActor in
-                if kind == UInt32(kEventHotKeyPressed) { controller.hotKeyPressed() }
-                if kind == UInt32(kEventHotKeyReleased) { controller.hotKeyReleased() }
+                switch (key, kind) {
+                case (.pushToTalk, UInt32(kEventHotKeyPressed)): controller.hotKeyPressed()
+                case (.pushToTalk, UInt32(kEventHotKeyReleased)): controller.hotKeyReleased()
+                case (.recording, UInt32(kEventHotKeyPressed)): controller.recordingKeyPressed()
+                case (.recording, UInt32(kEventHotKeyReleased)): controller.recordingShortcut.release()
+                default: break
+                }
             }
             return noErr
         }, eventTypes.count, &eventTypes, controller, &hotKeyHandler)
-        let hotKeyID = EventHotKeyID(signature: OSType(0x5658_494B), id: 1) // "VXIK"
-        RegisterEventHotKey(
-            UInt32(kVK_Space), UInt32(controlKey | optionKey), hotKeyID,
-            GetApplicationEventTarget(), 0, &hotKeyRef
-        )
+        guard handlerStatus == noErr else {
+            hotKeyErrors.append("Global shortcuts unavailable (error \(handlerStatus)). Restart VoxInk to retry.")
+            return
+        }
+        for (key, code, label) in [
+            (MenuBarHotKey.pushToTalk, kVK_Space, "⌃⌥Space"),
+            (MenuBarHotKey.recording, kVK_ANSI_R, "⌃⌥R"),
+        ] {
+            var reference: EventHotKeyRef?
+            let status = RegisterEventHotKey(
+                UInt32(code), UInt32(controlKey | optionKey),
+                EventHotKeyID(signature: MenuBarHotKey.signature, id: key.rawValue),
+                GetApplicationEventTarget(), 0, &reference
+            )
+            if status == noErr, let reference {
+                hotKeyRefs.append(reference)
+            } else {
+                hotKeyErrors.append("\(label) unavailable (error \(status)). Check other apps' shortcuts, then restart VoxInk.")
+            }
+        }
     }
 }
 

@@ -282,7 +282,16 @@ This is what `voxink-dev` runs by default; `--menubar` asks for it explicitly,
 which reports the missing build instead of falling back to the browser.
 
 The menu bar item starts and stops capture, pauses, marks, shows or hides the
-floating captions, and opens the transcript folder. **Keep audio** and
+floating captions, and opens the transcript folder. **Control + Option + R**
+starts a normal recording from any app and stops/finalizes it on the next press
+(also when paused). It uses the last source successfully started from the menu
+bar, or microphone on first use, and the saved recording options. The menu shows
+`⌃⌥R` beside that Start source and Stop. Holding the keys or pressing during a
+pending command does not queue extra actions. The shortcut is inactive while
+push-to-talk is enabled; turn push-to-talk off to record normally. VoxInk and its
+helper must already be running. If another app prevents shortcut registration,
+the menu reports it; resolve the conflict and restart VoxInk to retry.
+**Keep audio** and
 **Identify speakers after Stop** are the browser's checkboxes of the same
 names; they apply to the Start items, are on by default, persist across
 launches, and speaker identification needs kept microphone audio. **Live
