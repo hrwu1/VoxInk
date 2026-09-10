@@ -1,3 +1,3 @@
-"""Experimental local microphone capture client for VoxInk."""
+"""Portable microphone capture backend for the VoxInk helper."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

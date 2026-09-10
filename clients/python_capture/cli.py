@@ -1,125 +1,140 @@
-"""Interactive command-line entry point for live microphone capture."""
+"""The portable microphone capture backend.
+
+Speaks the same command line and signal contract as the Swift `voxink-capture`
+so the transcription helper can launch either without knowing which it has:
+
+- `--endpoint`, `--session-id`, `--mic`, `--mic-device`, `--language`,
+  `--retain-audio`, `--no-captions`, `--backend` are accepted; `--system-all`
+  and `--app` are refused because only the native macOS helper taps system
+  audio.
+- `--list-devices` prints `uid<TAB>name[<TAB>default]`; `--list-sources`
+  prints the sources this backend can capture, one per line.
+- SIGUSR1 pauses, SIGUSR2 resumes, SIGINT or SIGTERM stops and exits 0.
+- `VOXINK_AUTH_SECRET` authenticates the WebSocket.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import os
+import signal
 import sys
 
 from voxink_core.session_ids import new_session_id
 
-from .client import CaptureConfig, MicrophoneCaptureClient, MissingDependency
-from voxink_core.vad import VadConfig
+from .client import CaptureConfig, MicrophoneCaptureClient, MissingDependency, list_input_devices
+
+SOURCES = ("microphone",)
+SYSTEM_AUDIO_HINT = (
+    "system audio needs the native macOS capture helper; "
+    "build it with ./scripts/build-macos-capture"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Stream a microphone to local VoxInk")
-    parser.add_argument("--url", default=None, help="WebSocket URL (session ID is appended by default)")
+    parser = argparse.ArgumentParser(
+        prog="voxink-mic-capture",
+        description="Stream the microphone to a local VoxInk helper.",
+    )
+    parser.add_argument("--endpoint", default=None, help="session WebSocket URL")
     parser.add_argument("--session-id", default=None)
-    parser.add_argument("--stream-id", default="microphone-1")
-    parser.add_argument("--device", default=None, help="sounddevice input device ID or name")
-    parser.add_argument("--sample-rate", type=int, default=16_000)
-    parser.add_argument("--frame-ms", type=int, default=20)
+    parser.add_argument("--mic", action="store_true", help="capture the microphone (the default)")
     parser.add_argument(
-        "--stream-mode",
-        choices=("frames", "vad-chunks"),
-        default="vad-chunks",
-        help="vad-chunks transcribes live; frames is reserved for server-side VAD",
+        "--mic-device", default=None, metavar="UID", help="input device from --list-devices"
     )
-    parser.add_argument(
-        "--language",
-        choices=("en", "zh"),
-        default=None,
-        help="force a language; omit for automatic detection",
-    )
-    parser.add_argument(
-        "--retain-audio",
-        action="store_true",
-        help="also save the captured microphone audio as rotating WAV parts",
-    )
-    parser.add_argument(
-        "--vad-threshold",
-        type=float,
-        default=None,
-        help="pin the speech gate to an absolute RMS level; adapts to the input when unset",
-    )
-    parser.add_argument("--silence-ms", type=int, default=700)
-    parser.add_argument("--min-speech-ms", type=int, default=200)
-    parser.add_argument("--max-chunk-ms", type=int, default=15_000)
-    parser.add_argument("--pre-roll-ms", type=int, default=200)
-    parser.add_argument("--overlap-ms", type=int, default=200)
+    parser.add_argument("--language", choices=("en", "zh"), default=None)
+    parser.add_argument("--retain-audio", action="store_true")
+    parser.add_argument("--list-devices", action="store_true")
+    parser.add_argument("--list-sources", action="store_true")
+    # Native-only options: refused, or accepted and ignored, so one command
+    # line fits both backends.
+    parser.add_argument("--system-all", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--app", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--list-apps", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-captions", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--click-through", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--backend", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--sample-rate", type=int, default=16_000, help=argparse.SUPPRESS)
+    parser.add_argument("--frame-ms", type=int, default=20, help=argparse.SUPPRESS)
     return parser
 
 
-async def run(args: argparse.Namespace) -> int:
+def capture_config(args: argparse.Namespace) -> CaptureConfig:
+    """The capture this command line asks for, or ValueError when it cannot be served."""
+    if args.system_all or args.app:
+        raise ValueError(SYSTEM_AUDIO_HINT)
     session_id = args.session_id or new_session_id()
-    url = args.url or f"ws://127.0.0.1:8300/v1/sessions/{session_id}/stream"
-    device: str | int | None = args.device
+    device: str | int | None = args.mic_device
     if isinstance(device, str) and device.isdecimal():
         device = int(device)
-    vad = VadConfig(
+    return CaptureConfig(
+        websocket_url=args.endpoint or f"ws://127.0.0.1:8300/v1/sessions/{session_id}/stream",
+        session_id=session_id,
         sample_rate_hz=args.sample_rate,
         frame_duration_ms=args.frame_ms,
-        threshold_rms=args.vad_threshold,
-        silence_duration_ms=args.silence_ms,
-        min_speech_duration_ms=args.min_speech_ms,
-        max_chunk_duration_ms=args.max_chunk_ms,
-        pre_roll_ms=args.pre_roll_ms,
-        overlap_ms=args.overlap_ms,
-    )
-    client = MicrophoneCaptureClient(
-        CaptureConfig(
-            websocket_url=url,
-            session_id=session_id,
-            stream_id=args.stream_id,
-            sample_rate_hz=args.sample_rate,
-            frame_duration_ms=args.frame_ms,
-            device=device,
-            stream_mode=args.stream_mode,
-            language=args.language,
-            vad=vad,
-            retain_audio=args.retain_audio,
-            auth_token=os.environ.get("VOXINK_AUTH_SECRET"),
-        )
+        device=device,
+        language=args.language,
+        retain_audio=args.retain_audio,
+        auth_token=os.environ.get("VOXINK_AUTH_SECRET"),
     )
 
-    print(f"Session: {session_id}")
-    print(f"Endpoint: {url}")
-    print("Commands: start, pause, resume, stop, quit")
-    while True:
+
+async def run(client: MicrophoneCaptureClient) -> int:
+    """Capture until a stop signal; pause and resume on the helper's signals."""
+    loop = asyncio.get_running_loop()
+    stopped = asyncio.Event()
+
+    def control(action: str) -> None:
+        if action == "stop":
+            stopped.set()
+        else:
+            asyncio.ensure_future(getattr(client, action)())
+
+    handlers = {"SIGINT": "stop", "SIGTERM": "stop", "SIGUSR1": "pause", "SIGUSR2": "resume"}
+    for name, action in handlers.items():
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
         try:
-            command = (await asyncio.to_thread(input, "voxink> ")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            command = "quit"
-        try:
-            if command == "start":
-                await client.start()
-                print("capturing")
-            elif command == "pause":
-                await client.pause()
-                print("paused")
-            elif command == "resume":
-                await client.resume()
-                print("capturing")
-            elif command == "stop":
-                await client.stop()
-                print(f"stopped (dropped frames: {client.dropped_frames})")
-            elif command in {"quit", "exit"}:
-                await client.stop()
-                return 0
-            elif command:
-                print("unknown command; use start, pause, resume, stop, or quit")
-        except MissingDependency as exc:
-            print(f"error: {exc}", file=sys.stderr)
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            loop.add_signal_handler(number, control, action)
+        except (NotImplementedError, RuntimeError):
+            # Windows: only SIGINT, delivered as KeyboardInterrupt below.
+            pass
+
+    await client.start()
+    print(f"Capture started for session {client.config.session_id}. Press Ctrl-C to stop.", flush=True)
+    try:
+        await stopped.wait()
+    except KeyboardInterrupt:
+        pass
+    await client.stop()
+    print("Capture stopped.", flush=True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        return asyncio.run(run(args))
-    except ValueError as exc:
-        print(f"configuration error: {exc}", file=sys.stderr)
+    if args.list_sources:
+        for source in SOURCES:
+            print(source)
+        return 0
+    if args.list_apps:
+        print(SYSTEM_AUDIO_HINT, file=sys.stderr)
         return 2
+    try:
+        if args.list_devices:
+            for uid, name, is_default in list_input_devices():
+                print(f"{uid}\t{name}" + ("\tdefault" if is_default else ""))
+            return 0
+        client = MicrophoneCaptureClient(capture_config(args))
+        return asyncio.run(run(client))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except MissingDependency as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:  # the helper reports the last stderr line
+        print(f"capture_failed: {exc}", file=sys.stderr)
+        return 1

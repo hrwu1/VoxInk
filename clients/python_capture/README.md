@@ -1,38 +1,49 @@
-# VoxInk Python microphone capture
+# VoxInk portable microphone capture
 
-This is an experimental, dependency-light microphone adapter for bringing up
-the local service. It captures 16-bit mono PCM with `sounddevice`, then sends it
-to a WebSocket bound to localhost. Imports and unit tests work without either
-runtime dependency installed.
+This is the microphone capture backend that does not need a Swift build. The
+transcription helper launches it in place of the native `voxink-capture`
+wherever that executable is absent, which today means a checkout that has not
+run `./scripts/build-macos-capture` and, in principle, Windows and Linux. It
+captures 16-bit mono PCM with `sounddevice` and streams frames to the helper's
+WebSocket on localhost. Imports and unit tests work without either runtime
+dependency installed.
+
+It is microphone only. System and per-application audio stay in the native
+macOS helper, and this backend says so (`--list-sources` prints `microphone`;
+`--system-all` or `--app` exit 2 naming the native helper).
 
 Install the optional runtime packages in your environment:
 
 ```sh
-python -m pip install sounddevice websockets
+.venv/bin/python -m pip install -r requirements-capture.txt
 ```
 
-Run from the repository root:
+## Backend contract
+
+`scripts/voxink-mic-capture` and the Swift `voxink-capture` accept the same
+command line, so the helper builds one and runs whichever it was given:
 
 ```sh
-python -m clients.python_capture --stream-mode frames
+./scripts/voxink-mic-capture --list-devices     # uid<TAB>name[<TAB>default]
+./scripts/voxink-mic-capture --list-sources     # one supported source per line
+./scripts/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/ID/stream \
+    --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio] [--no-captions]
 ```
 
-The interactive commands are `start`, `pause`, `resume`, `stop`, and `quit`.
-The default endpoint is
-`ws://127.0.0.1:8300/v1/sessions/{session_id}/stream`. Use `--url` to override
-it. Run `python -m clients.python_capture --help` for VAD and device settings.
+- `VOXINK_AUTH_SECRET` in the environment authenticates the WebSocket; the
+  credential never appears on the command line.
+- Capture starts immediately. SIGUSR1 pauses, SIGUSR2 resumes, SIGINT or
+  SIGTERM stops the stream cleanly and exits 0.
+- Finalized captions go to stdout as `[MICROPHONE] text`; status lines go to
+  stderr as `code: message`, which the helper surfaces as a notice.
+- `--mic-device` takes the `uid` from `--list-devices`. `sounddevice` has no
+  stable identifiers, so the device index stands in for one.
 
-Audio retention is off by default. `--retain-audio` asks the service to save the
-captured microphone audio as rotating WAV parts next to the transcript.
-
-Language defaults to automatic detection. `--language en` or `--language zh`
-sends a manual override in `stream.start`; omitting the flag omits the field.
-
-`frames` mode has the lowest latency and leaves utterance formation to the
-service. `vad-chunks` uses the experimental client-side energy VAD, finalizing
-after 700 ms of silence or 15 seconds. It includes 200 ms of pre-roll and
-overlap by default. These values are deliberately configurable and need tuning
-against real English and Chinese audio.
+Frames are sent as captured; the helper's energy VAD (`voxink_core/vad.py`)
+forms utterances, exactly as it does for the native backend. Audio retention
+is off unless `--retain-audio` is passed. Language defaults to automatic
+detection; `--language en` or `--language zh` sends a manual override in
+`stream.start`.
 
 ## WebSocket contract (schema version 1)
 
@@ -141,8 +152,9 @@ each `audio.frame`. Overlapping audio that the model transcribes twice is
 deduplicated before a segment is persisted, so a chunk that repeats only its
 predecessor's overlap is answered with `audio.accepted` and never written.
 
-The client currently prints all server JSON unchanged.
+This backend prints only finalized transcript text; the helper's status feed
+is what the interfaces read.
 
-The endpoint must remain bound to `127.0.0.1`; the client is intentionally a
-microphone-only adapter, so system-audio capture can remain in the native macOS
+The endpoint must remain bound to `127.0.0.1`; this backend is intentionally
+microphone-only, so system-audio capture can remain in the native macOS
 component.

@@ -1,3 +1,4 @@
-# Optional dependencies for `python -m clients.python_capture`.
+# Optional dependencies for the portable microphone capture backend
+# (scripts/voxink-mic-capture), used where the Swift voxink-capture is not built.
 sounddevice
 websockets
