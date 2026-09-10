@@ -381,7 +381,7 @@ def _run_web_ui(
 ) -> int:
     if not health.get("ui_available"):
         raise SupervisorError(
-            "the local UI build is missing; run the frontend build:local script"
+            "the local UI build is missing; run build:local in voxink_web"
         )
     # The fragment never reaches the helper, and the recorder strips it from the
     # address bar as soon as it has read both values.

@@ -280,7 +280,7 @@ class ApiTests(unittest.TestCase):
 
     def test_ui_html_is_not_cached_but_hashed_assets_keep_normal_caching(self) -> None:
         project_root = Path(self.temporary.name) / "project"
-        ui_root = project_root / "frontend" / "static-dist"
+        ui_root = project_root / "voxink_web" / "static-dist"
         assets = ui_root / "assets"
         assets.mkdir(parents=True)
         (ui_root / "index.html").write_text("<html>Current recorder</html>")

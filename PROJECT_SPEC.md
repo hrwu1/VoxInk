@@ -787,7 +787,7 @@ Recorded checks on 2026-09-02:
 
 - `.venv/bin/python -m unittest discover -s tests`: 603 passing tests.
 - `swift test` in `clients/macos_capture`: 15 passing tests.
-- `npm test` in `frontend`: 6 passing tests; `npm run build:local` succeeded.
+- `npm test` in `voxink_web`: 6 passing tests; `npm run build:local` succeeded.
 
 These counts are historical evidence, not a substitute for rerunning the suites
 after later changes.

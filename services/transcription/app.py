@@ -578,7 +578,7 @@ def create_app(
                 "channels": True,
                 "grants": True,
             },
-            "ui_available": (PROJECT_ROOT / "frontend" / "static-dist" / "index.html").is_file(),
+            "ui_available": (PROJECT_ROOT / "voxink_web" / "static-dist" / "index.html").is_file(),
         }
 
     @app.post("/v1/ui/bootstrap")
@@ -1609,7 +1609,7 @@ def create_app(
                     runtime.dedup.reset(context.session_id, context.stream_id)
                     runtime.stream_ends.pop((context.session_id, context.stream_id), None)
 
-    ui_root = PROJECT_ROOT / "frontend" / "static-dist"
+    ui_root = PROJECT_ROOT / "voxink_web" / "static-dist"
     if (ui_root / "index.html").is_file():
         app.mount("/ui", StaticFiles(directory=ui_root, html=True), name="local-ui")
 

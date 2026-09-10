@@ -658,10 +658,10 @@ Run all fast Python tests:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Frontend unit tests (every `frontend/tests/*.test.ts`) and the static build:
+Frontend unit tests (every `voxink_web/tests/*.test.ts`) and the static build:
 
 ```sh
-cd frontend && pnpm install --offline && npm test && npm run build:local
+cd voxink_web && pnpm install --offline && npm test && npm run build:local
 ```
 
 Run the real local model smoke test:
