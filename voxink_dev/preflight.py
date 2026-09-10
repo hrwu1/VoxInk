@@ -30,8 +30,7 @@ DEFAULT_NATIVE_CAPTURE = (
 DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "scripts" / "voxink-mic-capture"
 DEFAULT_MENUBAR_APP = (
     PROJECT_ROOT
-    / "clients"
-    / "macos_capture"
+    / "voxink_menubar"
     / ".build"
     / "VoxInkMenuBarDev.app"
     / "Contents"

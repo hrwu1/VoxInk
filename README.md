@@ -296,7 +296,10 @@ labels. Turn it off with `--no-echo-suppression`.
 ```
 
 This is what `voxink-dev` runs by default; `--menubar` asks for it explicitly,
-which reports the missing build instead of falling back to the browser.
+which reports the missing build instead of falling back to the browser. The
+app is its own Swift package in `voxink_menubar/`, a control surface beside
+`voxink_cli` and `voxink_mcp`; it depends on the capture package only for the
+floating caption panel.
 
 The menu bar item starts and stops capture, pauses, marks, shows or hides the
 floating captions, and opens the transcript folder. **Control + Shift + R**

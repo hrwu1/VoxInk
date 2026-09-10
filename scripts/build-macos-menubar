@@ -1,10 +1,10 @@
 #!/bin/zsh
-# Build the development menu-bar application beside the capture helper.
+# Build the development menu-bar application from its own package.
 set -euo pipefail
 
 script_dir=${0:A:h}
 project_root=${script_dir:h}
-package_root="$project_root/clients/macos_capture"
+package_root="$project_root/voxink_menubar"
 app_root="$package_root/.build/VoxInkMenuBarDev.app"
 
 swift build --package-path "$package_root" --product voxink-menubar
@@ -12,7 +12,7 @@ swift_bin_dir=$(swift build --package-path "$package_root" --show-bin-path)
 
 mkdir -p "$app_root/Contents/MacOS"
 install -m 755 "$swift_bin_dir/voxink-menubar" "$app_root/Contents/MacOS/voxink-menubar"
-install -m 644 "$package_root/Resources/MenuBar-Info.plist" "$app_root/Contents/Info.plist"
+install -m 644 "$package_root/Resources/Info.plist" "$app_root/Contents/Info.plist"
 codesign --force --sign - --identifier dev.voxink.menubar "$app_root"
 
 echo "Built $app_root"

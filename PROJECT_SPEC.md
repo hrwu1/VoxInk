@@ -423,11 +423,13 @@ such as FLAC should be evaluated for long-running sessions.
 ```text
 VoxInk
 ├── clients/
-│   ├── macos_capture/          # Native capture backend, caption panel, menu bar
+│   ├── macos_capture/          # Native capture backend and caption panel
 │   └── python_capture/         # Portable microphone backend (no Swift build)
 ├── services/
 │   └── transcription/          # Local HTTP/WebSocket transcription service
 ├── voxink_cli/                 # Public `voxink` command and shared control client
+├── voxink_mcp/                 # MCP server over the same control client
+├── voxink_menubar/             # Native menu-bar control surface (Swift package)
 ├── voxink_core/
 │   ├── providers/              # Qwen and future provider adapters
 │   └── persistence/            # Markdown/audio writers and rotation

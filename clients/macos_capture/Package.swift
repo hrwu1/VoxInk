@@ -8,7 +8,6 @@ let package = Package(
     products: [
         .library(name: "VoxInkCapture", targets: ["VoxInkCapture"]),
         .executable(name: "voxink-capture", targets: ["VoxInkCaptureCLI"]),
-        .executable(name: "voxink-menubar", targets: ["VoxInkMenuBar"]),
     ],
     targets: [
         .target(name: "VoxInkCapture"),
@@ -16,17 +15,9 @@ let package = Package(
             name: "VoxInkCaptureCLI",
             dependencies: ["VoxInkCapture"]
         ),
-        .executableTarget(
-            name: "VoxInkMenuBar",
-            dependencies: ["VoxInkCapture"]
-        ),
         .testTarget(
             name: "VoxInkCaptureTests",
             dependencies: ["VoxInkCapture"]
-        ),
-        .testTarget(
-            name: "VoxInkMenuBarTests",
-            dependencies: ["VoxInkMenuBar"]
         ),
     ],
     swiftLanguageModes: [.v5]
