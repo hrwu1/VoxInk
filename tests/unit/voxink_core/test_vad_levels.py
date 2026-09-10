@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from clients.python_capture.vad import EnergyVadChunker, VadConfig
+from voxink_core.vad import EnergyVadChunker, VadConfig
 from tests.fixtures import audio
 
 SAMPLES_PER_FRAME = audio.SAMPLE_RATE_HZ * audio.FRAME_MS // 1000

@@ -30,7 +30,7 @@ from fastapi.websockets import WebSocketDisconnect
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from clients.python_capture.vad import AudioChunk, EnergyVadChunker, VadConfig
+from voxink_core.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
 from voxink_core.audit import AUDIT_FILENAME, AuditLog
 from voxink_core.diarization.jobs import DiarizationJobManager

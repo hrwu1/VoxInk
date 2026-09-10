@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from clients.python_capture.vad import EnergyVadChunker, VadConfig
+from voxink_core.vad import EnergyVadChunker, VadConfig
 from voxink_core.diarization.transcript import read_blocks
 from voxink_core.models import SessionConfig, Source, TranscriptEvent
 from voxink_core.persistence.audio import AudioRetentionWriter, track_name

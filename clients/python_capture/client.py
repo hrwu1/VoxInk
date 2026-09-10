@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from . import __version__
-from .vad import AudioChunk, EnergyVadChunker, VadConfig
+from voxink_core.vad import AudioChunk, EnergyVadChunker, VadConfig
 
 
 class MissingDependency(RuntimeError):

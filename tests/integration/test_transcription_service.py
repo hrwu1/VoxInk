@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from clients.python_capture.vad import EnergyVadChunker, VadConfig
+from voxink_core.vad import EnergyVadChunker, VadConfig
 from services.transcription.app import (
     ServiceSettings,
     _finalize_audio,

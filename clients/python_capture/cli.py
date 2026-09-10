@@ -10,7 +10,7 @@ import sys
 from voxink_core.session_ids import new_session_id
 
 from .client import CaptureConfig, MicrophoneCaptureClient, MissingDependency
-from .vad import VadConfig
+from voxink_core.vad import VadConfig
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1,7 +1,7 @@
 from array import array
 import unittest
 
-from clients.python_capture.vad import EnergyVadChunker, VadConfig, pcm_s16le_rms
+from voxink_core.vad import EnergyVadChunker, VadConfig, pcm_s16le_rms
 
 
 def pcm_frame(amplitude: int, samples: int) -> bytes:
