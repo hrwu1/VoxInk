@@ -102,17 +102,33 @@ it explains when that runtime is unavailable. It works with **Save audio** off.
 Post-Stop **Identify speakers** remains a separate option for retained audio.
 Provisional live labels are not written into the canonical transcript.
 
-For interactive Terminal microphone controls, install the capture dependencies
-and select the Terminal interface explicitly:
+For typed controls in the launching Terminal, select the Terminal interface
+explicitly:
 
 ```sh
-.venv/bin/python -m pip install -r requirements-capture.txt
 ./scripts/voxink-dev --terminal --device cpu
 ```
 
-Enter `start`, `pause`, `resume`, `stop`, or `quit`. Ctrl-C shuts down both
-capture and the helper, and the saved transcript path is printed when capture
-exits.
+Enter `start`, `pause`, `resume`, `stop`, `mark [note]`, or `quit`. The
+Terminal is a control surface like the menu bar and the browser: each command
+goes to the helper's local API, the helper launches the capture backend, and
+captions print as they arrive. Name `--source` values to record system or
+application audio from the Terminal. Ctrl-C or `quit` stops an open capture
+and the helper, and the saved transcript path is printed on the way out.
+
+Every interface records through a capture backend the helper launches. The
+Swift `voxink-capture` (built by `./scripts/build-macos-capture`) serves the
+microphone, all system audio, and selected applications. Where it is not
+built, `voxink-dev` says so and the helper launches the portable Python
+backend instead (`scripts/voxink-mic-capture`), which serves the microphone
+only and needs the capture dependencies:
+
+```sh
+.venv/bin/python -m pip install -r requirements-capture.txt
+```
+
+With that backend the browser and Terminal offer microphone modes only, and a
+system source is refused with the build instruction.
 
 ### Keeping the audio
 
@@ -221,8 +237,9 @@ Run only the startup checks with:
 ./scripts/voxink-dev --preflight-only
 ```
 
-The checks match the interface you select, so add `--terminal` when you intend
-to use the Terminal controls; only then are the capture dependencies verified.
+The checks match the capture backend the helper will launch: the Swift build
+where it exists, otherwise the portable Python backend and its `sounddevice`
+dependency.
 
 Private operational diagnostics are stored under
 `~/Library/Application Support/VoxInk/logs/`. They contain process state and
@@ -524,17 +541,20 @@ curl -X POST http://127.0.0.1:8300/v1/transcriptions \
 The response contains a normalized transcript event, and the finalized text is
 also written under `~/Documents/VoxInk/batch-demo/`.
 
-### Direct live Python microphone debugging
+### Direct portable microphone capture
 
-With the direct service running and the credential still exported:
+With the direct service running and the credential still exported, the
+portable backend streams the microphone until Ctrl-C:
 
 ```sh
-.venv/bin/python -m clients.python_capture
+./scripts/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/demo/stream --session-id demo
 ```
 
-Enter `start`, `pause`, `resume`, `stop`, or `quit`. The default `vad-chunks`
-mode sends finalized utterance chunks; `--stream-mode frames` sends continuous
-frames and uses the service's VAD.
+It accepts the same command line and signals as the Swift `voxink-capture`
+(`--list-devices`, `--list-sources`, `--mic-device`, `--language`,
+`--retain-audio`; SIGUSR1 pauses, SIGUSR2 resumes, SIGINT stops), which is what
+lets the helper launch either. It sends frames; the helper's VAD forms
+utterances.
 
 ## Native macOS capture
 

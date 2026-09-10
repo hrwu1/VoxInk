@@ -64,8 +64,14 @@ class _CaptionFollower:
                 self._write(event_line(event))
             self.state = view.get("state")
             if self.state in CAPTURE_SETTLED_STATES:
-                error = view.get("error")
-                self._write(f"capture {self.state}" + (f": {error}" if error else ""))
+                # `error` holds the backend's last stderr line even after a clean
+                # exit, where it is a summary rather than a failure.
+                detail = ""
+                if self.state == "failed":
+                    detail = view.get("error") or ""
+                    if view.get("exit_code") is not None:
+                        detail = f"{detail} (backend exit code {view['exit_code']})".strip()
+                self._write(f"capture {self.state}" + (f": {detail}" if detail else ""))
                 return
             if final:
                 return

@@ -30,6 +30,9 @@ tap backend, every `--app` becomes its own stream (`system-<bundle-id>`) whose
 `stream.start` carries `channel` and `channel_name`; ScreenCaptureKit mixes
 the selected applications into one `system-1` stream.
 
+`--list-sources` prints the sources this backend serves (`microphone` and
+`system`); the helper asks every capture backend this, and the portable Python
+one in `clients/python_capture` answers `microphone` alone.
 Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
 `--language en|zh` fixes the language the service transcribes in.
 

@@ -107,6 +107,7 @@ class MicrophoneCaptureClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started_ns: int | None = None
         self._sequence = 0
+        self._closing = False
         self.dropped_frames = 0
 
     @property
@@ -127,6 +128,7 @@ class MicrophoneCaptureClient:
         headers = None
         if self.config.auth_token:
             headers = {"Authorization": f"Bearer {self.config.auth_token}"}
+        self._closing = False
         self._websocket = await websockets.connect(
             self.config.websocket_url, additional_headers=headers
         )
@@ -180,6 +182,9 @@ class MicrophoneCaptureClient:
         await self._send_json(
             {"type": "stream.stop", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
         )
+        # The helper may drop the socket without a close frame once the
+        # stream has stopped; the receiver must not report that as an error.
+        self._closing = True
         await self._websocket.close()
         if self._receiver_task is not None:
             await _ignore_cancel(self._receiver_task)
@@ -238,7 +243,7 @@ class MicrophoneCaptureClient:
                 if isinstance(event, dict):
                     self.on_event(event)
         except Exception as exc:
-            if self.running:
+            if self.running and not self._closing:
                 _status("stream_error", str(exc))
 
     def _start_message(self) -> dict[str, Any]:
