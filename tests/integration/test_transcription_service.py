@@ -467,6 +467,88 @@ class ApiTests(unittest.TestCase):
             response.json()["applications"],
         )
 
+    def _microphone_only_backend(self) -> Path:
+        """A capture backend that, like the portable Python one, serves only the microphone."""
+        executable = Path(self.temporary.name) / "voxink-mic-capture"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--list-sources" ]; then echo microphone; exit 0; fi\n'
+            "sleep 30\n"
+        )
+        executable.chmod(0o755)
+        return executable
+
+    def test_a_microphone_only_backend_offers_no_system_modes(self) -> None:
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="ui-secret",
+                native_capture_path=self._microphone_only_backend(),
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with TestClient(app) as client:
+            capabilities = client.get("/v1/ui/capture/capabilities", headers=headers).json()
+            self.assertTrue(capabilities["native_capture_available"])
+            self.assertEqual(["microphone"], capabilities["modes"])
+            with patch("services.transcription.app.subprocess.Popen") as spawned:
+                refused = client.post(
+                    "/v1/ui/capture/start",
+                    headers=headers,
+                    json={"sources": ["microphone", "system"], "applications": [], "retain_audio": False},
+                )
+            self.assertEqual(422, refused.status_code, refused.text)
+            self.assertIn("build-macos-capture", refused.json()["detail"])
+            spawned.assert_not_called()
+
+    def test_a_microphone_only_backend_still_records_the_microphone(self) -> None:
+        process = MagicMock()
+        process.pid = 1234
+        process.returncode = 0
+        process.stderr = None
+        process.poll.return_value = None
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="ui-secret",
+                native_capture_path=self._microphone_only_backend(),
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with TestClient(app) as client:
+            # The probe runs the real backend once; later requests reuse its answer.
+            self.assertEqual(
+                ["microphone"],
+                client.get("/v1/ui/capture/capabilities", headers=headers).json()["modes"],
+            )
+            with patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned:
+                started = client.post(
+                    "/v1/ui/capture/start",
+                    headers=headers,
+                    json={"sources": ["microphone"], "applications": [], "retain_audio": False},
+                )
+                self.assertEqual(200, started.status_code, started.text)
+                spawned.assert_called_once()
+                command = spawned.call_args.args[0]
+                self.assertIn("--mic", command)
+                self.assertNotIn("--system-all", command)
+            with patch("services.transcription.app._stop_native_capture"):
+                client.post("/v1/ui/capture/stop", headers=headers)
+
+    def test_a_backend_that_cannot_list_sources_is_assumed_to_serve_both(self) -> None:
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        app = create_app(
+            ServiceSettings(output_root=self.output_root, native_capture_path=executable),
+            provider=self.provider,
+        )
+        with TestClient(app) as client:
+            modes = client.get("/v1/ui/capture/capabilities").json()["modes"]
+        self.assertIn("system", modes)
+
     def test_manual_session_lifecycle(self) -> None:
         created = self.client.post(
             "/v1/sessions",

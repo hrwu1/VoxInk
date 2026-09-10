@@ -126,6 +126,12 @@ class LiveDiarizationUiTests(unittest.TestCase):
         self.spawned = self.enterContext(patch(
             "services.transcription.app.subprocess.Popen", side_effect=spawn,
         ))
+        # The empty stand-in cannot answer --list-sources; say it serves both
+        # so the probe is not counted as a capture start.
+        self.enterContext(patch(
+            "services.transcription.app._capture_sources",
+            return_value=frozenset({"microphone", "system"}),
+        ))
         app = create_app(ServiceSettings(
             output_root=self.output_root,
             state_root=root / "state",

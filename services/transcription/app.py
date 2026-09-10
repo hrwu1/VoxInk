@@ -372,6 +372,9 @@ class ServiceRuntime:
         self.native_notice: str | None = None
         self.native_stderr: deque[str] = deque(maxlen=200)
         self.native_stderr_reader: threading.Thread | None = None
+        # What the capture backend answered to --list-sources, keyed by the
+        # executable's identity so a rebuild is asked again.
+        self.capture_sources: tuple[tuple[str, int, int], frozenset[str]] | None = None
         self.shutting_down = False
         # Sessions the UI asked to diarize or translate. The capture helper
         # builds the session from its own stream message and knows nothing
@@ -688,11 +691,12 @@ def create_app(
     async def capture_capabilities() -> dict[str, Any]:
         native = runtime.settings.native_capture_path
         available = bool(native and native.is_file() and os.access(native, os.X_OK))
+        sources = await asyncio.to_thread(_capture_sources, runtime)
         return {
             "native_capture_available": available,
             "modes": ["microphone"] + (
                 ["system", "applications", "microphone_system", "microphone_applications"]
-                if available
+                if available and "system" in sources
                 else []
             ),
             "backends": list(SYSTEM_AUDIO_BACKENDS),
@@ -739,6 +743,14 @@ def create_app(
             )
         if options.applications and not applications:
             raise HTTPException(status_code=422, detail="selected-application capture needs an application")
+        if Source.SYSTEM in sources and "system" not in await asyncio.to_thread(_capture_sources, runtime):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "system audio needs the native macOS capture helper; "
+                    "run ./scripts/build-macos-capture and restart VoxInk"
+                ),
+            )
         # What this capture needs permission for, in the language of grants.
         needed = []
         if Source.MICROPHONE in sources:
@@ -1780,7 +1792,7 @@ async def _run_native_listing(executable: Path, flag: str) -> list[str]:
 def _input_devices() -> list[dict[str, Any]]:
     """Report input devices, or an empty list where the audio backend is absent.
 
-    `sounddevice` is only needed by the Python capture client, so a helper
+    `sounddevice` is only needed by the portable Python backend, so a helper
     running native capture alone must still answer this instead of failing.
     """
     try:
@@ -2242,6 +2254,43 @@ def _native_capture_executable(runtime: ServiceRuntime) -> Path:
             detail="native capture is unavailable; run ./scripts/build-macos-capture and restart VoxInk",
         )
     return executable
+
+
+_ALL_CAPTURE_SOURCES = frozenset({"microphone", "system"})
+
+
+def _capture_sources(runtime: ServiceRuntime) -> frozenset[str]:
+    """The sources the capture backend can serve, from its `--list-sources`.
+
+    The portable Python backend answers `microphone`; the Swift one answers
+    both. A backend that cannot answer (an older build, or none configured)
+    is taken to serve both so nothing that worked is refused.
+    """
+    executable = runtime.settings.native_capture_path
+    if executable is None or not executable.is_file() or not os.access(executable, os.X_OK):
+        return _ALL_CAPTURE_SOURCES
+    try:
+        stat = executable.stat()
+    except OSError:
+        return _ALL_CAPTURE_SOURCES
+    key = (str(executable), stat.st_mtime_ns, stat.st_size)
+    cached = runtime.capture_sources
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    sources = _ALL_CAPTURE_SOURCES
+    try:
+        completed = subprocess.run(
+            [str(executable), "--list-sources"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if completed.returncode == 0:
+            listed = {line.strip() for line in str(completed.stdout).splitlines()} - {""}
+            if listed:
+                sources = frozenset(listed & _ALL_CAPTURE_SOURCES)
+    except Exception:  # noqa: BLE001 - any failure means "cannot say"
+        pass
+    runtime.capture_sources = (key, sources)
+    return sources
 
 
 def _native_capture_view(runtime: ServiceRuntime, *, after: int) -> dict[str, Any]:

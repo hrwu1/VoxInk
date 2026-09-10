@@ -8,6 +8,7 @@ private struct Options {
     var applicationBundleIdentifiers = Set<String>()
     var listApplications = false
     var listDevices = false
+    var listSources = false
     var captions = true
     var clickThroughCaptions = false
     var retainAudio = false
@@ -26,6 +27,7 @@ private struct Options {
             case "--system-all": options.allSystemAudio = true
             case "--list-apps": options.listApplications = true
             case "--list-devices": options.listDevices = true
+            case "--list-sources": options.listSources = true
             case "--no-captions": options.captions = false
             case "--click-through": options.clickThroughCaptions = true
             case "--retain-audio": options.retainAudio = true
@@ -65,6 +67,7 @@ private struct CLIError: LocalizedError {
     Usage:
       voxink-capture --list-apps
       voxink-capture --list-devices
+      voxink-capture --list-sources
       voxink-capture [--mic] [--mic-device UID] [--system-all | --app BUNDLE_ID ...]
                       [--backend auto|tap|screencapturekit] [--language en|zh]
                       [--endpoint ws://127.0.0.1:8300/v1/sessions/SESSION_ID/stream]
@@ -94,6 +97,13 @@ private struct VoxInkCaptureCommand {
                 for application in applications {
                     print("\(application.bundleIdentifier)\t\(application.name)\tpid=\(application.processID)")
                 }
+                return
+            }
+            if options.listSources {
+                // The helper asks every capture backend this; the portable
+                // Python one answers "microphone" alone.
+                print("microphone")
+                print("system")
                 return
             }
             if options.listDevices {

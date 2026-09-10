@@ -132,6 +132,8 @@ export function useVoxInkRecorder() {
   const [message, setMessage] = useState('Open through voxink-dev to connect');
   const [mode, setModeState] = useState<CaptureMode>('microphone');
   const [nativeAvailable, setNativeAvailable] = useState(false);
+  // The helper's backend may be microphone-only (the portable Python one).
+  const [systemAvailable, setSystemAvailable] = useState(false);
   const [partialCaptions, setPartialCaptions] = useState(false);
   const [translationAvailable, setTranslationAvailable] = useState(false);
   const [translate, setTranslateState] = useState(false);
@@ -246,10 +248,11 @@ export function useVoxInkRecorder() {
       .then((response) => response.json())
       .then((payload) => {
         const capabilities = payload as {
-          native_capture_available?: boolean; partial_captions?: boolean; translation_available?: boolean;
-          live_diarization?: LiveDiarization;
+          native_capture_available?: boolean; modes?: string[]; partial_captions?: boolean;
+          translation_available?: boolean; live_diarization?: LiveDiarization;
         };
         setNativeAvailable(Boolean(capabilities.native_capture_available));
+        setSystemAvailable(Array.isArray(capabilities.modes) && capabilities.modes.includes('system'));
         setPartialCaptions(Boolean(capabilities.partial_captions));
         setTranslationAvailable(Boolean(capabilities.translation_available));
         if (capabilities.live_diarization) setLiveDiarization(capabilities.live_diarization);
@@ -259,6 +262,7 @@ export function useVoxInkRecorder() {
         // A stale token or a restarted helper would otherwise leave every native
         // mode disabled with nothing said about why.
         setNativeAvailable(false);
+        setSystemAvailable(false);
         setMessage('Cannot read local capture capabilities; native modes are unavailable');
       });
   }, [authorizedFetch, launch, refreshDevices]);
@@ -670,7 +674,7 @@ export function useVoxInkRecorder() {
     retainAudio, setRetainAudio,
     identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization, nameSpeaker,
     liveSpeakers, setLiveSpeakers, liveDiarization,
-    nativeAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
+    nativeAvailable, systemAvailable, applications, selectedApplications, toggleApplication, refreshApplications,
     devices, selectedDevice, setSelectedDevice, refreshDevices,
     language, setLanguage, translate, setTranslate, translationAvailable, partialCaptions,
     models, activeModel, selectModel, modelSwitching,

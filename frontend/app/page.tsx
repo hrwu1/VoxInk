@@ -342,10 +342,10 @@ export default function Home() {
                   onChange={(event) => recorder.setMode(event.target.value as CaptureMode)}
                 >
                   <option value="microphone">Microphone</option>
-                  <option value="system" disabled={!recorder.nativeAvailable}>All system audio</option>
-                  <option value="applications" disabled={!recorder.nativeAvailable}>Selected applications</option>
-                  <option value="microphone_system" disabled={!recorder.nativeAvailable}>Microphone + system</option>
-                  <option value="microphone_applications" disabled={!recorder.nativeAvailable}>Microphone + applications</option>
+                  <option value="system" disabled={!recorder.systemAvailable}>All system audio</option>
+                  <option value="applications" disabled={!recorder.systemAvailable}>Selected applications</option>
+                  <option value="microphone_system" disabled={!recorder.systemAvailable}>Microphone + system</option>
+                  <option value="microphone_applications" disabled={!recorder.systemAvailable}>Microphone + applications</option>
                 </select>
               </label>
               <label className="model-control" title={selectedModel?.description}>
