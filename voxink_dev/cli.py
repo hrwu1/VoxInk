@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -14,6 +15,7 @@ import webbrowser
 
 from .preflight import (
     DEFAULT_MENUBAR_APP,
+    DEFAULT_MICROPHONE_CAPTURE,
     DEFAULT_MODEL_PATH,
     DEFAULT_NATIVE_CAPTURE,
     DEFAULT_OUTPUT_ROOT,
@@ -22,10 +24,12 @@ from .preflight import (
     PreflightOptions,
     run_preflight,
 )
-from voxink_cli.discovery import endpoint_path
+from voxink_cli.client import ControlClient, RequestContext
+from voxink_cli.discovery import ControlEndpoint, endpoint_path
 from voxink_core.session_ids import new_session_id
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
+from .terminal import run_terminal
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="interface",
         action="store_const",
         const="terminal",
-        help="use the interactive Terminal microphone controls",
+        help="type start, pause, resume, stop, and mark in this Terminal",
     )
     parser.add_argument("--menubar-app", type=Path, default=DEFAULT_MENUBAR_APP, help=argparse.SUPPRESS)
     return parser
@@ -149,6 +153,19 @@ def _resolve_interface(args: argparse.Namespace) -> str:
     if args.sources or args.applications:
         return "web"
     return "menubar"
+
+
+def _capture_backend(native: Path) -> tuple[Path, bool]:
+    """The capture executable the helper launches, and whether it is the Python one.
+
+    The Swift helper serves every source, so it is used wherever it is built.
+    Otherwise the portable microphone backend keeps a checkout without a Swift
+    build, or a platform without Swift, able to record the microphone.
+    """
+    executable = native.expanduser().resolve()
+    if executable.is_file() and os.access(executable, os.X_OK):
+        return executable, False
+    return DEFAULT_MICROPHONE_CAPTURE, True
 
 
 def _built_menubar_app(path: Path) -> Path | None:
@@ -183,9 +200,15 @@ def main(argv: list[str] | None = None) -> int:
             "Build it with ./scripts/build-macos-menubar to start in the menu bar."
         )
         interface = "web"
-    # The menu-bar app is a control surface over the helper, like the browser:
-    # both need the native helper for capture, not Python capture.
-    helper_capture = interface != "terminal"
+    # Every interface is a control surface over the helper, which launches the
+    # capture backend itself.
+    backend, portable = _capture_backend(args.native_capture)
+    if portable:
+        print(
+            "The native capture helper is not built; recording the microphone "
+            "through the portable Python backend. Build ./scripts/build-macos-capture "
+            "for system audio."
+        )
     try:
         capture_plan = _build_capture_plan(args.sources, args.applications)
     except ValueError as exc:
@@ -199,13 +222,9 @@ def main(argv: list[str] | None = None) -> int:
                 state_root=args.state_root,
                 sources=capture_plan.modes,
                 retain_audio=args.retain_audio,
-                native_capture=(
-                    args.native_capture if capture_plan.uses_native_capture else None
-                ),
+                native_capture=backend,
                 verify_checksums=not args.skip_checksums,
-                python_capture=(
-                    not helper_capture and not capture_plan.uses_native_capture
-                ),
+                python_capture=portable,
             )
         )
     except PreflightError as exc:
@@ -228,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             translation_model_path=args.translation_model,
             partial_captions=args.partial_captions,
             echo_suppression=args.echo_suppression,
-            native_capture_path=args.native_capture if helper_capture else None,
+            native_capture_path=backend,
             # Publishing the endpoint is what lets `voxink` attach to this
             # helper; the launcher owns it because it owns the helper's life.
             control_endpoint_path=endpoint_path(args.state_root),
@@ -249,31 +268,22 @@ def main(argv: list[str] | None = None) -> int:
             return _run_web_ui(
                 supervisor, health, diagnostics, report.output_root, args.retain_audio
             )
+        if interface == "terminal":
+            return _run_terminal(
+                supervisor, diagnostics, report.output_root, capture_plan, args.retain_audio
+            )
         endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
-        if capture_plan.uses_native_capture:
-            command = _native_capture_command(
-                args.native_capture,
-                endpoint,
-                session_id,
-                capture_plan,
-                args.retain_audio,
-            )
-            print(
-                "Starting native macOS capture. Approve Microphone and/or "
-                "Screen & System Audio Recording access if prompted."
-            )
-        else:
-            command = [
-                sys.executable,
-                "-m",
-                "clients.python_capture",
-                "--url",
-                endpoint,
-                "--session-id",
-                session_id,
-            ]
-            if args.retain_audio:
-                command.append("--retain-audio")
+        command = _native_capture_command(
+            args.native_capture,
+            endpoint,
+            session_id,
+            capture_plan,
+            args.retain_audio,
+        )
+        print(
+            "Starting native macOS capture. Approve Microphone and/or "
+            "Screen & System Audio Recording access if prompted."
+        )
         return _run_capture_process(
             supervisor,
             command,
@@ -386,6 +396,35 @@ def _run_capture_process(
     else:
         print("Session stopped before any transcript text was finalized.")
     return int(capture.returncode or 0)
+
+
+def _run_terminal(
+    supervisor: HelperSupervisor,
+    diagnostics: DiagnosticLog,
+    output_root: Path,
+    plan: CapturePlan,
+    retain_audio: bool,
+) -> int:
+    """Run the Terminal command loop; it drives the helper like the other surfaces."""
+    endpoint = ControlEndpoint(base_url=supervisor.base_url, auth_secret=supervisor.auth_secret)
+
+    def connect() -> ControlClient:
+        # One request id per call, as the public CLI issues, so the audit
+        # trail tells commands apart.
+        return ControlClient(endpoint, RequestContext.create())
+
+    diagnostics.emit("terminal.started", component="terminal")
+    print(f"Transcripts will be saved under: {output_root}")
+    try:
+        return run_terminal(
+            connect,
+            sources=plan.session_sources,
+            applications=plan.applications,
+            retain_audio=retain_audio,
+            output_root=output_root,
+        )
+    finally:
+        diagnostics.emit("terminal.stopped", component="terminal")
 
 
 def _run_menubar(

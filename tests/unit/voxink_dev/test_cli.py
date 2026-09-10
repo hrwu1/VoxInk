@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from voxink_dev.cli import (
     _build_capture_plan,
     _built_menubar_app,
+    _capture_backend,
     _native_capture_command,
     _resolve_interface,
     _run_web_ui,
@@ -235,6 +236,7 @@ class MenuBarLauncherTests(unittest.TestCase):
             patch("voxink_dev.cli.HelperSupervisor") as supervisor,
             patch("voxink_dev.cli._run_menubar", return_value=0) as menubar,
             patch("voxink_dev.cli._run_web_ui", return_value=0) as web,
+            patch("voxink_dev.cli._run_terminal", return_value=0) as terminal,
             patch("builtins.print"),
         ):
             preflight.return_value = MagicMock(checked_files=1, free_bytes=0)
@@ -243,6 +245,9 @@ class MenuBarLauncherTests(unittest.TestCase):
                 "provider": "local",
             }
             code = main([*argv, "--menubar-app", str(menubar_app)])
+        self.terminal = terminal
+        self.preflight_options = preflight.call_args.args[0]
+        self.helper_config = supervisor.call_args.args[0]
         return code, menubar, web
 
     def test_the_default_runs_the_menu_bar_application(self) -> None:
@@ -269,6 +274,78 @@ class MenuBarLauncherTests(unittest.TestCase):
                 code = main(["--menubar", "--menubar-app", str(missing)])
         self.assertEqual(2, code)
         self.assertIn("build-macos-menubar", errors.getvalue())
+
+
+class CaptureBackendTests(unittest.TestCase):
+    def test_a_built_swift_helper_is_preferred(self) -> None:
+        with TemporaryDirectory() as directory:
+            native = Path(directory) / "voxink-capture"
+            native.write_bytes(b"")
+            native.chmod(0o755)
+            self.assertEqual((native.resolve(), False), _capture_backend(native))
+
+    def test_the_portable_python_backend_stands_in_for_a_missing_build(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, portable = _capture_backend(Path(directory) / "voxink-capture")
+        self.assertTrue(portable)
+        self.assertEqual("voxink-mic-capture", backend.name)
+        self.assertTrue(backend.is_file(), backend)
+
+    def _main(self, argv: list[str], native: Path):
+        with (
+            patch("voxink_dev.cli.run_preflight") as preflight,
+            patch("voxink_dev.cli.DiagnosticLog"),
+            patch("voxink_dev.cli.HelperSupervisor") as supervisor,
+            patch("voxink_dev.cli._run_menubar", return_value=0),
+            patch("voxink_dev.cli._run_web_ui", return_value=0),
+            patch("voxink_dev.cli._run_terminal", return_value=0) as terminal,
+            patch("builtins.print") as printed,
+        ):
+            preflight.return_value = MagicMock(checked_files=1, free_bytes=0)
+            supervisor.return_value.start.return_value = {
+                "protocol_version": "1.0",
+                "provider": "local",
+            }
+            code = main([*argv, "--native-capture", str(native)])
+        return code, preflight.call_args.args[0], supervisor.call_args.args[0], terminal, printed
+
+    def test_the_terminal_interface_drives_the_helper_which_launches_the_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            native = Path(directory) / "voxink-capture"
+            native.write_bytes(b"")
+            native.chmod(0o755)
+            code, preflight, helper, terminal, printed = self._main(["--terminal"], native)
+        self.assertEqual(0, code)
+        terminal.assert_called_once()
+        self.assertEqual(native.resolve(), helper.native_capture_path)
+        self.assertEqual(native.resolve(), preflight.native_capture)
+        self.assertFalse(preflight.python_capture)
+        plan = terminal.call_args.args[3]
+        self.assertEqual(("microphone",), plan.session_sources)
+        self.assertFalse(any("portable" in str(call) for call in printed.call_args_list))
+
+    def test_without_the_swift_build_the_helper_gets_the_python_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            code, preflight, helper, terminal, printed = self._main(
+                ["--terminal"], Path(directory) / "voxink-capture"
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("voxink-mic-capture", helper.native_capture_path.name)
+        self.assertTrue(preflight.python_capture)
+        self.assertTrue(any("portable Python backend" in str(call) for call in printed.call_args_list))
+
+    def test_named_sources_reach_the_terminal_loop(self) -> None:
+        with TemporaryDirectory() as directory:
+            native = Path(directory) / "voxink-capture"
+            native.write_bytes(b"")
+            native.chmod(0o755)
+            _, _, _, terminal, _ = self._main(
+                ["--terminal", "--source", "microphone", "--source", "applications", "--app", "us.zoom.xos"],
+                native,
+            )
+        plan = terminal.call_args.args[3]
+        self.assertEqual(("microphone", "system"), plan.session_sources)
+        self.assertEqual(("us.zoom.xos",), plan.applications)
 
 
 if __name__ == "__main__":

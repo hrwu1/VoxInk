@@ -25,6 +25,9 @@ DEFAULT_NATIVE_CAPTURE = (
     / "MacOS"
     / "voxink-capture"
 )
+# The portable microphone backend the helper launches where the Swift one is
+# not built. It needs `sounddevice` and captures the microphone only.
+DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "scripts" / "voxink-mic-capture"
 DEFAULT_MENUBAR_APP = (
     PROJECT_ROOT
     / "clients"
@@ -61,6 +64,7 @@ class PreflightOptions:
     retain_audio: bool = False
     native_capture: Path | None = None
     verify_checksums: bool = True
+    # True when `native_capture` is the portable Python backend.
     python_capture: bool = True
 
 
@@ -121,7 +125,12 @@ def run_preflight(
 
     if any(source in {"system", "applications"} for source in options.sources):
         native = options.native_capture
-        if native is None or not native.is_file() or not os.access(native, os.X_OK):
+        if (
+            options.python_capture
+            or native is None
+            or not native.is_file()
+            or not os.access(native, os.X_OK)
+        ):
             failures.append(
                 "System audio requires an executable native capture helper. "
                 "Run ./scripts/build-macos-capture or pass --native-capture PATH."

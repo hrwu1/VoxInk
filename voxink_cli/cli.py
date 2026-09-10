@@ -357,7 +357,7 @@ def _capture_view(view: dict[str, Any]) -> Result:
         "retention": view.get("retention", {}),
     }
     lines = [f"capture {data['state']}" + (f" (session {data['session_id']})" if data["session_id"] else "")]
-    lines.extend(_event_line(event) for event in data["events"])
+    lines.extend(event_line(event) for event in data["events"])
     warnings: tuple[str, ...] = ()
     stopped = data["retention"].get("stopped_reason")
     if stopped:
@@ -400,7 +400,7 @@ def _capture_watch(args: argparse.Namespace, client: ControlClient) -> Iterator[
         view = client.capture_status(after=cursor)
         cursor = view.get("next_cursor", cursor)
         for event in view.get("events", []):
-            yield Result({"cursor": cursor, "event": event}, text=_event_line(event))
+            yield Result({"cursor": cursor, "event": event}, text=event_line(event))
         state = view.get("state")
         if state in CAPTURE_SETTLED_STATES:
             yield Result(
@@ -417,7 +417,8 @@ def _capture_watch(args: argparse.Namespace, client: ControlClient) -> Iterator[
         time.sleep(WATCH_INTERVAL_SECONDS)
 
 
-def _event_line(event: dict[str, Any]) -> str:
+def event_line(event: dict[str, Any]) -> str:
+    """One human-readable line per capture event; the Terminal interface prints the same."""
     kind = event.get("type", "transcript")
     if kind == "translation":
         return f"    ({event.get('language', '')}) {event.get('text', '')}".rstrip()

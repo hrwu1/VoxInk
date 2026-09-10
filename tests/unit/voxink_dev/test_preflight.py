@@ -69,6 +69,37 @@ class PreflightTests(unittest.TestCase):
             run_preflight(options, import_available=lambda _: True)
 
     @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
+    def test_the_python_backend_cannot_serve_system_audio(self) -> None:
+        backend = self.root / "voxink-mic-capture"
+        backend.write_text("#!/bin/sh\n")
+        backend.chmod(0o755)
+        options = PreflightOptions(
+            model_path=self.model,
+            output_root=self.root / "output",
+            state_root=self.root / "state",
+            sources=("microphone", "system"),
+            native_capture=backend,
+            python_capture=True,
+        )
+        with self.assertRaisesRegex(PreflightError, "build-macos-capture"):
+            run_preflight(options, import_available=lambda _: True)
+
+    @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
+    def test_the_swift_backend_serves_system_audio(self) -> None:
+        backend = self.root / "voxink-capture"
+        backend.write_text("#!/bin/sh\n")
+        backend.chmod(0o755)
+        options = PreflightOptions(
+            model_path=self.model,
+            output_root=self.root / "output",
+            state_root=self.root / "state",
+            sources=("microphone", "system"),
+            native_capture=backend,
+            python_capture=False,
+        )
+        self.assertEqual(1, run_preflight(options, import_available=lambda _: True).checked_files)
+
+    @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
     def test_browser_capture_does_not_require_python_audio_packages(self) -> None:
         options = PreflightOptions(
             model_path=self.model,
