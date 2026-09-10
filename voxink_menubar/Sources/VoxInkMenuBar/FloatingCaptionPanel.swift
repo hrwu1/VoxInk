@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import VoxInkCapture
 
 public struct CaptionItem: Identifiable, Equatable, Sendable {
     public let id: String

@@ -222,14 +222,14 @@ Then the same `voxink-dev` supervisor can run every native source combination:
   --app com.apple.Safari
 ```
 
-Native workflows selected with command-line `--source` flags use the Swift
-floating-caption panel: naming sources keeps that route rather than starting
-the default menu-bar interface, which chooses its sources from its own Start
-items. The browser workflow can select the same modes from its Capture mode
-menu. `voxink-dev` supplies the private loopback endpoint and per-launch
-credential, monitors the native capture process and transcription helper, and
-shuts both down on Ctrl-C. macOS requests Microphone and/or Screen & System Audio
-Recording permission when each protected source is first used.
+Naming sources on the command line selects the Terminal interface, the one
+interface that takes its sources from the flags; the menu bar and the browser
+choose theirs from their own controls. Every route records through the helper,
+which launches the capture backend; the floating caption panel belongs to the
+menu-bar app, and the Terminal prints captions as lines. `voxink-dev` supplies
+the private loopback endpoint and per-launch credential, monitors the helper,
+and shuts everything down on Ctrl-C. macOS requests Microphone and/or Screen &
+System Audio Recording permission when each protected source is first used.
 
 Run only the startup checks with:
 

@@ -36,11 +36,10 @@ one in `clients/python_capture` answers `microphone` alone.
 Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
 `--language en|zh` fixes the language the service transcribes in.
 
-## Floating caption panel
-
-The `VoxInkCapture` library also ships the always-on-top caption panel the
-capture executable shows. The menu-bar application in `voxink_menubar` depends
-on this package for that panel alone.
+The executable is headless: the helper launches it, and the interfaces draw
+captions from the helper's status feed (the floating panel lives with the
+menu-bar app in `voxink_menubar`, which depends on this package for the
+shared wire types).
 
 Build and test:
 
@@ -78,11 +77,6 @@ The adapter polls ScreenCaptureKit and rebuilds its filter when matching process
 IDs change, so apps that quit and restart reconnect automatically. If none of the
 selected apps is running, capture waits and emits an `applications_waiting`
 status event.
-
-The floating caption panel is enabled by default for capture commands. Pass
-`--click-through` to let pointer events reach the windows beneath it, or
-`--no-captions` for terminal-only operation. See "Floating caption panel"
-below for what it shows.
 
 ## Local service contract
 
@@ -126,7 +120,7 @@ for the service's `stream.stopped` acknowledgement before closing the socket.
 The service finalizes its last VAD chunk while stopping, so closing immediately
 would discard the final caption of the session. The receiver decodes
 `transcript.partial` and `transcript.final` messages into `TranscriptWireEvent`;
-a host UI can map these directly to `CaptionItem`. Local capture diagnostics are
+a host UI can map these into its own caption model. Local capture diagnostics are
 delivered through a separate status callback because sending them as unknown
 WebSocket messages would violate the service contract.
 
@@ -182,44 +176,8 @@ filter and with `SCStreamConfiguration.excludesCurrentProcessAudio`. Selected-ap
 capture also refuses to include the current process. This prevents feedback when
 the eventual VoxInk UI produces sounds.
 
-## Floating caption panel
-
-`FloatingCaptionPanelController` is the AppKit/SwiftUI overlay used by the CLI
-and the menu-bar app. It is an always-on-top, frosted dark panel that can be
-made click-through, dragged by its header, and resized from its edges; its
-frame and text size are remembered between launches, and on first launch it
-sits bottom-centre above the Dock.
-
-The header shows the session state (Starting, Live with elapsed time, Paused,
-Finishing, Ready) and a small level bar per source fed through `setLevels`
-(the menu-bar app forwards the `levels` field of each status poll). Hovering
-reveals a toolbar: mark this moment (shown when the host sets `onMark`, which
-the menu-bar app routes to the mark endpoint), smaller and larger text, copy
-the visible transcript, and hide the panel (the host's `onHide` callback
-keeps its own toggle in sync). The body is a scrolling stream of the newest 80
-entries grouped into turns: a turn begins whenever the source changes
-(microphone, system audio, or a named application) or a mark arrives, and
-carries one small label with the time of its first caption. When the service
-recognizes a remembered voice live, the caption's `speaker` becomes the turn
-label and a change of name starts a new turn. The experimental live diarizer
-sends the same field with `speaker_provisional`, and `SpeakerLabel.compose`
-turns it into "Speaker 1 · provisional" (or "… · overlap · provisional", or
-"Unassigned · provisional" for speech it could not attribute) so a session-local
-guess never reads like a remembered name. Long sentences
-wrap in full; partial captions are dimmed and replaced in place by stable
-event ID; translations sit under their caption; marks are amber rows. The
-stream follows new captions until you scroll up, when a "Latest" chip
-appears to jump back down. After five seconds without a caption or mark
-(`idleCollapseDelay`) the panel shrinks into a small bubble at its bottom
-centre that shows only the status dot; hovering or clicking the bubble, or
-the next caption, brings the panel back in the same place. It stays open
-while the pointer is over it or while you have scrolled back. Hosts feed it through `show(_:)`, `showMark`,
-`attachTranslation`, and `setStatus`; `show` never presents the window, so
-hosts call `showWindow` when they want it on screen. The CLI prints received
-transcript events and maps them into the panel.
-
 ## Current scope
 
-This milestone is a capture CLI/library plus a minimal floating-panel prototype, not a complete UI. It does
+This is a capture library and headless executable, not a UI. It does
 not mix mic and system tracks or write audio files. Both streams can run at once,
 and downstream code can independently persist, transcribe, or combine them.

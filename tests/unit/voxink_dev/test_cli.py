@@ -11,7 +11,6 @@ from voxink_dev.cli import (
     _build_capture_plan,
     _built_menubar_app,
     _capture_backend,
-    _native_capture_command,
     _resolve_interface,
     _run_web_ui,
     build_parser,
@@ -31,11 +30,11 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual("terminal", self._interface(["--terminal"]))
         self.assertEqual("menubar", self._interface(["--menubar"]))
 
-    def test_named_sources_keep_the_route_those_flags_have_always_driven(self) -> None:
-        self.assertEqual("web", self._interface(["--source", "microphone"]))
-        self.assertEqual("web", self._interface(["--source", "system"]))
+    def test_named_sources_select_the_terminal_which_honours_them(self) -> None:
+        self.assertEqual("terminal", self._interface(["--source", "microphone"]))
+        self.assertEqual("terminal", self._interface(["--source", "system"]))
         self.assertEqual(
-            "web",
+            "terminal",
             self._interface(
                 ["--source", "applications", "--app", "com.apple.Safari"]
             ),
@@ -59,12 +58,10 @@ class CliParserTests(unittest.TestCase):
         plan = _build_capture_plan(args.sources, args.applications)
         self.assertEqual(("microphone", "system"), plan.modes)
         self.assertEqual(("microphone", "system"), plan.session_sources)
-        self.assertTrue(plan.uses_native_capture)
 
     def test_microphone_is_the_default_capture_plan(self) -> None:
         plan = _build_capture_plan(None, [])
         self.assertEqual(("microphone",), plan.modes)
-        self.assertFalse(plan.uses_native_capture)
 
     def test_selected_applications_require_bundle_identifiers(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least one --app"):
@@ -79,60 +76,6 @@ class CliParserTests(unittest.TestCase):
             _build_capture_plan(
                 ["system", "applications"], ["com.apple.Safari"]
             )
-
-    def test_native_command_carries_endpoint_sources_and_applications(self) -> None:
-        plan = _build_capture_plan(
-            ["microphone", "applications"],
-            ["com.apple.Safari", "us.zoom.xos"],
-        )
-        command = _native_capture_command(
-            Path("/tmp/voxink-capture"),
-            "ws://127.0.0.1:4321/v1/sessions/demo/stream",
-            "demo",
-            plan,
-        )
-        self.assertEqual(
-            [
-                str(Path("/tmp/voxink-capture").resolve()),
-                "--endpoint",
-                "ws://127.0.0.1:4321/v1/sessions/demo/stream",
-                "--session-id",
-                "demo",
-                "--retain-audio",
-                "--mic",
-                "--app",
-                "com.apple.Safari",
-                "--app",
-                "us.zoom.xos",
-            ],
-            command,
-        )
-
-    def test_native_command_forwards_audio_retention(self) -> None:
-        plan = _build_capture_plan(["system"], [])
-        endpoint = "ws://127.0.0.1:4321/v1/sessions/demo/stream"
-        self.assertIn(
-            "--retain-audio",
-            _native_capture_command(Path("/tmp/voxink-capture"), endpoint, "demo", plan),
-        )
-        self.assertNotIn(
-            "--retain-audio",
-            _native_capture_command(
-                Path("/tmp/voxink-capture"), endpoint, "demo", plan, False
-            ),
-        )
-
-    def test_all_system_audio_maps_to_native_system_flag(self) -> None:
-        plan = _build_capture_plan(["system"], [])
-        command = _native_capture_command(
-            Path("/tmp/voxink-capture"),
-            "ws://127.0.0.1:4321/v1/sessions/demo/stream",
-            "demo",
-            plan,
-        )
-        self.assertIn("--system-all", command)
-        self.assertNotIn("--mic", command)
-
 
 class WebUiLauncherTests(unittest.TestCase):
     def test_opens_one_time_bootstrap_without_exposing_service_credential(self) -> None:
@@ -340,7 +283,7 @@ class CaptureBackendTests(unittest.TestCase):
             native.write_bytes(b"")
             native.chmod(0o755)
             _, _, _, terminal, _ = self._main(
-                ["--terminal", "--source", "microphone", "--source", "applications", "--app", "us.zoom.xos"],
+                ["--source", "microphone", "--source", "applications", "--app", "us.zoom.xos"],
                 native,
             )
         plan = terminal.call_args.args[3]

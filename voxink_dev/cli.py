@@ -6,7 +6,6 @@ import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import time
@@ -26,7 +25,6 @@ from .preflight import (
 )
 from voxink_cli.client import ControlClient, RequestContext
 from voxink_cli.discovery import ControlEndpoint, endpoint_path
-from voxink_core.session_ids import new_session_id
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
 from .terminal import run_terminal
@@ -37,10 +35,6 @@ class CapturePlan:
     modes: tuple[str, ...]
     session_sources: tuple[str, ...]
     applications: tuple[str, ...]
-
-    @property
-    def uses_native_capture(self) -> bool:
-        return any(mode in {"system", "applications"} for mode in self.modes)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,7 +85,6 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: vocabulary.txt in the output directory)"
         ),
     )
-    parser.add_argument("--session-id")
     parser.add_argument(
         "--translation-model",
         type=Path,
@@ -143,15 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_interface(args: argparse.Namespace) -> str:
     """The interface to run when the command line does not name one.
 
-    Naming capture sources selects the route those flags have always driven:
-    the browser for the microphone alone, native capture for system or
-    application audio. The menu-bar app takes its sources from its own Start
-    items, so it would silently ignore them.
+    Naming capture sources selects the Terminal, the one interface that takes
+    its sources from the command line. The menu bar and the browser choose
+    theirs from their own controls and would silently ignore the flags.
     """
     if args.interface is not None:
         return args.interface
     if args.sources or args.applications:
-        return "web"
+        return "terminal"
     return "menubar"
 
 
@@ -214,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"VoxInk cannot start:\n- {exc}", file=sys.stderr)
         return 2
+    if (args.sources or args.applications) and interface != "terminal":
+        where = "menu bar's Audio Source menu" if interface == "menubar" else "browser's Capture mode menu"
+        print(f"Named sources apply to the Terminal interface; choose them in the {where}.")
     try:
         report = run_preflight(
             PreflightOptions(
@@ -236,7 +231,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.preflight_only:
         return 0
-    session_id = args.session_id or new_session_id()
     diagnostics = DiagnosticLog(report.log_root)
     supervisor = HelperSupervisor(
         HelperConfig(
@@ -264,32 +258,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_menubar(
                 supervisor, diagnostics, report.output_root, menubar_app
             )
-        if interface == "web" and not capture_plan.uses_native_capture:
+        if interface == "web":
             return _run_web_ui(
                 supervisor, health, diagnostics, report.output_root, args.retain_audio
             )
-        if interface == "terminal":
-            return _run_terminal(
-                supervisor, diagnostics, report.output_root, capture_plan, args.retain_audio
-            )
-        endpoint = f"ws://127.0.0.1:{supervisor.port}/v1/sessions/{session_id}/stream"
-        command = _native_capture_command(
-            args.native_capture,
-            endpoint,
-            session_id,
-            capture_plan,
-            args.retain_audio,
-        )
-        print(
-            "Starting native macOS capture. Approve Microphone and/or "
-            "Screen & System Audio Recording access if prompted."
-        )
-        return _run_capture_process(
-            supervisor,
-            command,
-            diagnostics,
-            report.output_root,
-            session_id,
+        return _run_terminal(
+            supervisor, diagnostics, report.output_root, capture_plan, args.retain_audio
         )
     except (OSError, SupervisorError, subprocess.TimeoutExpired) as exc:
         diagnostics.emit("supervisor.failed", level="error", component="supervisor")
@@ -318,32 +292,6 @@ def _build_capture_plan(
     return CapturePlan(modes, session_sources, applications)
 
 
-def _native_capture_command(
-    executable: Path,
-    endpoint: str,
-    session_id: str,
-    plan: CapturePlan,
-    retain_audio: bool = True,
-) -> list[str]:
-    command = [
-        str(executable.expanduser().resolve()),
-        "--endpoint",
-        endpoint,
-        "--session-id",
-        session_id,
-    ]
-    if retain_audio:
-        command.append("--retain-audio")
-    if "microphone" in plan.modes:
-        command.append("--mic")
-    if "system" in plan.modes:
-        command.append("--system-all")
-    if "applications" in plan.modes:
-        for bundle_identifier in plan.applications:
-            command.extend(("--app", bundle_identifier))
-    return command
-
-
 def _list_applications(executable: Path) -> int:
     executable = executable.expanduser().resolve()
     if not executable.is_file() or not executable.stat().st_mode & 0o111:
@@ -359,43 +307,6 @@ def _list_applications(executable: Path) -> int:
     except OSError as exc:
         print(f"VoxInk cannot list applications: {exc}", file=sys.stderr)
         return 1
-
-
-def _run_capture_process(
-    supervisor: HelperSupervisor,
-    command: list[str],
-    diagnostics: DiagnosticLog,
-    output_root: Path,
-    session_id: str,
-) -> int:
-    capture = subprocess.Popen(command, env=supervisor.capture_environment())
-    diagnostics.emit("capture.started", component="capture", pid=capture.pid)
-    try:
-        try:
-            while capture.poll() is None:
-                helper = supervisor.process
-                if helper is None or helper.poll() is not None:
-                    raise SupervisorError("transcription helper exited unexpectedly")
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            capture.send_signal(signal.SIGINT)
-            capture.wait(timeout=10)
-    finally:
-        if capture.poll() is None:
-            capture.terminate()
-            capture.wait(timeout=5)
-        diagnostics.emit(
-            "capture.stopped",
-            component="capture",
-            pid=capture.pid,
-            return_code=capture.returncode,
-        )
-    transcripts = sorted((output_root / session_id).glob("transcript-part-*.md"))
-    if transcripts:
-        print(f"Transcript saved: {transcripts[-1]}")
-    else:
-        print("Session stopped before any transcript text was finalized.")
-    return int(capture.returncode or 0)
 
 
 def _run_terminal(

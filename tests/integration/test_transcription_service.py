@@ -344,7 +344,6 @@ class ApiTests(unittest.TestCase):
                 self.assertIn("--app", command)
                 self.assertIn("com.apple.Safari", command)
                 self.assertIn("--retain-audio", command)
-                self.assertIn("--no-captions", command)
                 self.assertNotIn("--system-all", command)
 
                 self.assertEqual(200, client.post("/v1/ui/capture/pause", headers=headers).status_code)

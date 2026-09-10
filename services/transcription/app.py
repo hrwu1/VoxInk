@@ -807,7 +807,7 @@ def create_app(
             raise HTTPException(status_code=503, detail="local helper port is unavailable")
         endpoint = f"ws://127.0.0.1:{port}/v1/sessions/{session_id}/stream"
         command = [
-            str(executable), "--endpoint", endpoint, "--session-id", session_id, "--no-captions"
+            str(executable), "--endpoint", endpoint, "--session-id", session_id
         ]
         if options.retain_audio:
             command.append("--retain-audio")

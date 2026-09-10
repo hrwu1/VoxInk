@@ -27,7 +27,7 @@ command line, so the helper builds one and runs whichever it was given:
 ./scripts/voxink-mic-capture --list-devices     # uid<TAB>name[<TAB>default]
 ./scripts/voxink-mic-capture --list-sources     # one supported source per line
 ./scripts/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/ID/stream \
-    --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio] [--no-captions]
+    --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio]
 ```
 
 - `VOXINK_AUTH_SECRET` in the environment authenticates the WebSocket; the

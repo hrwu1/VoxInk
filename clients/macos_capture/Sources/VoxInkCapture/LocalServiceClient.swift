@@ -81,23 +81,6 @@ public struct TranscriptWireEvent: Codable, Sendable {
         case speakerProvisional = "speaker_provisional"
         case speakerOverlap = "speaker_overlap"
     }
-
-    public var captionItem: CaptionItem {
-        CaptionItem(
-            id: segmentID,
-            source: source,
-            text: text,
-            startMilliseconds: startMilliseconds,
-            endMilliseconds: endMilliseconds,
-            isFinal: isFinal,
-            channelName: channelName ?? channel,
-            translation: translation,
-            speakerName: SpeakerLabel.compose(
-                speaker: speaker, provisional: speakerProvisional ?? false,
-                overlap: speakerOverlap ?? false
-            )
-        )
-    }
 }
 
 /// How a turn's speaker is written above it.

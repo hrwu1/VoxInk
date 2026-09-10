@@ -4,7 +4,7 @@ Speaks the same command line and signal contract as the Swift `voxink-capture`
 so the transcription helper can launch either without knowing which it has:
 
 - `--endpoint`, `--session-id`, `--mic`, `--mic-device`, `--language`,
-  `--retain-audio`, `--no-captions`, `--backend` are accepted; `--system-all`
+  `--retain-audio`, `--backend` are accepted; `--system-all`
   and `--app` are refused because only the native macOS helper taps system
   audio.
 - `--list-devices` prints `uid<TAB>name[<TAB>default]`; `--list-sources`
@@ -52,8 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--system-all", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--app", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--list-apps", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--no-captions", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--click-through", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--backend", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--sample-rate", type=int, default=16_000, help=argparse.SUPPRESS)
     parser.add_argument("--frame-ms", type=int, default=20, help=argparse.SUPPRESS)

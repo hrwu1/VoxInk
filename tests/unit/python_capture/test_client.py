@@ -53,7 +53,7 @@ class CommandLineContractTests(unittest.TestCase):
         config = self._config(
             [
                 "--endpoint", "ws://127.0.0.1:4321/v1/sessions/demo/stream",
-                "--session-id", "demo", "--no-captions", "--retain-audio",
+                "--session-id", "demo", "--retain-audio",
                 "--mic-device", "3", "--language", "en", "--backend", "auto", "--mic",
             ]
         )
