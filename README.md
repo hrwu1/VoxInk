@@ -102,19 +102,22 @@ it explains when that runtime is unavailable. It works with **Save audio** off.
 Post-Stop **Identify speakers** remains a separate option for retained audio.
 Provisional live labels are not written into the canonical transcript.
 
-For typed controls in the launching Terminal, select the Terminal interface
+For typed controls in the launching Terminal, select the CLI interface
 explicitly:
 
 ```sh
-./scripts/voxink-dev --terminal --device cpu
+./scripts/voxink-dev --cli --device cpu
 ```
 
-Enter `start`, `pause`, `resume`, `stop`, `mark [note]`, or `quit`. The
-Terminal is a control surface like the menu bar and the browser: each command
-goes to the helper's local API, the helper launches the capture backend, and
-captions print as they arrive. Name `--source` values to record system or
-application audio from the Terminal. Ctrl-C or `quit` stops an open capture
-and the helper, and the saved transcript path is printed on the way out.
+This opens the `voxink shell`: every line you type is a `voxink` command
+(`capture start --source system`, `speakers list`, `help`), and bare `start`,
+`pause`, `resume`, `stop`, `mark [note]`, and `status` stand for their
+`capture` commands. Captions print between prompts as they arrive. Name
+`--source` values to choose what a bare `start` records. `quit` or Ctrl-C
+stops an open capture and the helper, and the saved transcript path is
+printed on the way out. The same shell opened by hand in another window
+(`./scripts/voxink shell`) attaches to the running helper and leaves the
+capture running when it exits.
 
 Every interface records through a capture backend the helper launches. The
 Swift `voxink-capture` (built by `./scripts/build-macos-capture`) serves the
@@ -139,7 +142,7 @@ with retention disabled:
 
 ```sh
 ./scripts/voxink-dev
-./scripts/voxink-dev --terminal
+./scripts/voxink-dev --cli
 ./scripts/voxink-dev --no-retain-audio
 ```
 
@@ -222,11 +225,11 @@ Then the same `voxink-dev` supervisor can run every native source combination:
   --app com.apple.Safari
 ```
 
-Naming sources on the command line selects the Terminal interface, the one
-interface that takes its sources from the flags; the menu bar and the browser
-choose theirs from their own controls. Every route records through the helper,
-which launches the capture backend; the floating caption panel belongs to the
-menu-bar app, and the Terminal prints captions as lines. `voxink-dev` supplies
+Naming sources on the command line selects the CLI shell, the one interface
+that takes its sources from the flags; the menu bar and the browser choose
+theirs from their own controls. Every route records through the helper, which
+launches the capture backend; the floating caption panel belongs to the
+menu-bar app, and the shell prints captions as lines. `voxink-dev` supplies
 the private loopback endpoint and per-launch credential, monitors the helper,
 and shuts everything down on Ctrl-C. macOS requests Microphone and/or Screen &
 System Audio Recording permission when each protected source is first used.

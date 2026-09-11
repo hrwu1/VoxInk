@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TextIO
 
 from .client import DEFAULT_TIMEOUT, GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
+from .shell import StartDefaults, run_shell
 from .envelope import (
     EXIT_OK,
     SCHEMA_VERSION,
@@ -341,17 +342,27 @@ def _capture_control(action: str) -> Handler:
         view = client.control_capture(action)
         if action == "stop" and getattr(args, "wait", False):
             view = _wait_for_settled(client, args)
-        return _capture_view(view)
+        return _capture_view(view, after=getattr(args, "after", 0))
 
     return handler
 
 
-def _capture_view(view: dict[str, Any]) -> Result:
+def _capture_view(view: dict[str, Any], *, after: int = 0) -> Result:
+    """Render a capture view, showing only events at or past the caller's cursor.
+
+    Cursors are absolute, so a caller that has already read up to `after`
+    (the shell's caption follower, a script that ran `capture status`) is not
+    shown the same captions again.
+    """
+    events = list(view.get("events", []))
+    next_cursor = view.get("next_cursor", 0)
+    first_index = next_cursor - len(events)
+    events = events[max(0, after - first_index):]
     data = {
         "state": view.get("state"),
         "session_id": view.get("session_id"),
-        "events": view.get("events", []),
-        "next_cursor": view.get("next_cursor", 0),
+        "events": events,
+        "next_cursor": next_cursor,
         "exit_code": view.get("exit_code"),
         "error": view.get("error"),
         "retention": view.get("retention", {}),
@@ -367,7 +378,9 @@ def _capture_view(view: dict[str, Any]) -> Result:
             + ("because the disk is nearly full." if stopped == "low_disk" else "at the session limit.")
             + " The transcript is still being written.",
         )
-    if data["error"]:
+    # `error` carries the backend's last stderr line even after a clean exit,
+    # where it is a summary; it is a failure only when the state says so.
+    if data["error"] and data["state"] == "failed":
         lines.append(f"error: {data['error']}")
     return Result(data, warnings, text="\n".join(lines))
 
@@ -415,6 +428,38 @@ def _capture_watch(args: argparse.Namespace, client: ControlClient) -> Iterator[
                 details={"state": state, "cursor": cursor},
             )
         time.sleep(WATCH_INTERVAL_SECONDS)
+
+
+def _shell(args: argparse.Namespace, client: ControlClient) -> Result:
+    """Run the interactive shell; every typed line goes through `main`."""
+    passthrough: list[str] = []
+    if args.endpoint_file is not None:
+        passthrough += ["--endpoint-file", str(args.endpoint_file)]
+    if args.token_file is not None:
+        passthrough += ["--token-file", str(args.token_file)]
+    if args.format != "text":
+        passthrough += ["--format", args.format]
+    if args.timeout != DEFAULT_TIMEOUT:
+        passthrough += ["--timeout", str(args.timeout)]
+
+    def connect() -> ControlClient:
+        # A fresh request id per poll, as a one-shot call would carry.
+        return ControlClient(
+            client.endpoint, RequestContext.create(timeout=client.context.timeout), token=client.token
+        )
+
+    code = run_shell(
+        lambda argv: main([*passthrough, *argv]),
+        connect,
+        event_line=event_line,
+        defaults=StartDefaults(
+            tuple(dict.fromkeys(args.sources or ["microphone"])),
+            tuple(dict.fromkeys(args.applications)),
+            args.retain_audio,
+        ),
+        stop_on_exit=args.stop_on_exit,
+    )
+    return Result({"exit_code": code})
 
 
 def event_line(event: dict[str, Any]) -> str:
@@ -985,11 +1030,39 @@ def build_parser() -> argparse.ArgumentParser:
         ("stop", "Stop the running capture."),
     ):
         subparser = leaf(capture, action, help_text)
+        subparser.add_argument(
+            "--after", type=int, default=0, help="show only events from this cursor on"
+        )
         if action == "stop":
             subparser.add_argument(
                 "--wait", action="store_true", help="wait until capture has fully stopped"
             )
         subparser.set_defaults(handler=_capture_control(action), command=f"capture.{action}")
+
+    shell = group("shell", "Type voxink commands at a prompt, with live captions.")
+    shell.add_argument(
+        "--source",
+        dest="sources",
+        action="append",
+        choices=("microphone", "system", "applications"),
+        help="what a bare `start` records; repeat to combine (default: microphone)",
+    )
+    shell.add_argument(
+        "--app", dest="applications", action="append", default=[], metavar="BUNDLE_ID",
+        help="application a bare `start` captures; repeat for several",
+    )
+    shell.add_argument(
+        "--retain-audio",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="whether a bare `start` keeps the audio (default: enabled)",
+    )
+    shell.add_argument(
+        "--stop-on-exit",
+        action="store_true",
+        help="stop an open capture when the shell exits (voxink-dev sets this)",
+    )
+    shell.set_defaults(handler=_shell, command="shell")
 
     sessions = group("sessions", "Inspect capture sessions.")
     leaf(sessions, "list", "List sessions the helper holds open.").set_defaults(

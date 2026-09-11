@@ -539,6 +539,7 @@ the current process layout:
 | `voxink config` | Read schemas and validated settings and update permitted settings. |
 | `voxink diagnostics` | Read sanitized state and produce a privacy-reviewed diagnostic bundle. |
 | `voxink permissions` | Inspect pending requests and existing agent grants and revoke grants. |
+| `voxink shell` | The command as an interactive Terminal interface: each typed line is a `voxink` command line, captions print between prompts. `voxink-dev --cli` opens it. |
 
 The first implementation slice includes capability/readiness discovery,
 capture input discovery, the complete capture lifecycle, session and artifact

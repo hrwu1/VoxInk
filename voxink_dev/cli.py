@@ -23,11 +23,10 @@ from .preflight import (
     PreflightOptions,
     run_preflight,
 )
-from voxink_cli.client import ControlClient, RequestContext
-from voxink_cli.discovery import ControlEndpoint, endpoint_path
+from voxink_cli.cli import main as voxink_main
+from voxink_cli.discovery import endpoint_path
 from .supervisor import HelperConfig, HelperSupervisor, SupervisorError
 from .diagnostics import DiagnosticLog
-from .terminal import run_terminal
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the local browser control surface",
     )
     interface.add_argument(
-        "--terminal",
+        "--cli",
         dest="interface",
         action="store_const",
-        const="terminal",
-        help="type start, pause, resume, stop, and mark in this Terminal",
+        const="cli",
+        help="open the voxink shell in this Terminal (type start, stop, mark, or any voxink command)",
     )
     parser.add_argument("--menubar-app", type=Path, default=DEFAULT_MENUBAR_APP, help=argparse.SUPPRESS)
     return parser
@@ -136,14 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_interface(args: argparse.Namespace) -> str:
     """The interface to run when the command line does not name one.
 
-    Naming capture sources selects the Terminal, the one interface that takes
+    Naming capture sources selects the CLI shell, the one interface that takes
     its sources from the command line. The menu bar and the browser choose
     theirs from their own controls and would silently ignore the flags.
     """
     if args.interface is not None:
         return args.interface
     if args.sources or args.applications:
-        return "terminal"
+        return "cli"
     return "menubar"
 
 
@@ -206,9 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"VoxInk cannot start:\n- {exc}", file=sys.stderr)
         return 2
-    if (args.sources or args.applications) and interface != "terminal":
+    if (args.sources or args.applications) and interface != "cli":
         where = "menu bar's Audio Source menu" if interface == "menubar" else "browser's Capture mode menu"
-        print(f"Named sources apply to the Terminal interface; choose them in the {where}.")
+        print(f"Named sources apply to the CLI shell; choose them in the {where}.")
     try:
         report = run_preflight(
             PreflightOptions(
@@ -262,8 +261,9 @@ def main(argv: list[str] | None = None) -> int:
             return _run_web_ui(
                 supervisor, health, diagnostics, report.output_root, args.retain_audio
             )
-        return _run_terminal(
-            supervisor, diagnostics, report.output_root, capture_plan, args.retain_audio
+        return _run_cli(
+            supervisor, diagnostics, report.output_root, capture_plan, args.retain_audio,
+            args.state_root,
         )
     except (OSError, SupervisorError, subprocess.TimeoutExpired) as exc:
         diagnostics.emit("supervisor.failed", level="error", component="supervisor")
@@ -309,33 +309,32 @@ def _list_applications(executable: Path) -> int:
         return 1
 
 
-def _run_terminal(
+def _run_cli(
     supervisor: HelperSupervisor,
     diagnostics: DiagnosticLog,
     output_root: Path,
     plan: CapturePlan,
     retain_audio: bool,
+    state_root: Path,
 ) -> int:
-    """Run the Terminal command loop; it drives the helper like the other surfaces."""
-    endpoint = ControlEndpoint(base_url=supervisor.base_url, auth_secret=supervisor.auth_secret)
+    """Open the `voxink shell` in this Terminal; it drives the helper like the other surfaces.
 
-    def connect() -> ControlClient:
-        # One request id per call, as the public CLI issues, so the audit
-        # trail tells commands apart.
-        return ControlClient(endpoint, RequestContext.create())
-
-    diagnostics.emit("terminal.started", component="terminal")
+    The shell attaches through the endpoint file the supervisor published, the
+    same way a `voxink` command in another window would, and stops an open
+    capture on quit because this launcher is about to stop the helper.
+    """
+    argv = ["shell", "--stop-on-exit", "--endpoint-file", str(endpoint_path(state_root))]
+    for mode in plan.modes:
+        argv += ["--source", mode]
+    for bundle_id in plan.applications:
+        argv += ["--app", bundle_id]
+    argv.append("--retain-audio" if retain_audio else "--no-retain-audio")
+    diagnostics.emit("cli.started", component="cli")
     print(f"Transcripts will be saved under: {output_root}")
     try:
-        return run_terminal(
-            connect,
-            sources=plan.session_sources,
-            applications=plan.applications,
-            retain_audio=retain_audio,
-            output_root=output_root,
-        )
+        return voxink_main(argv)
     finally:
-        diagnostics.emit("terminal.stopped", component="terminal")
+        diagnostics.emit("cli.stopped", component="cli")
 
 
 def _run_menubar(

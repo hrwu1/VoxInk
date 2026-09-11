@@ -5,6 +5,8 @@ plane. Nothing here implements capture, transcription, persistence, model
 management, or recovery; every product capability is reached through
 `ControlClient`, which future MCP or SDK adapters call directly instead of
 shelling out and parsing terminal text.
+
+`voxink shell` is the same command as an interactive Terminal interface.
 """
 
 from .envelope import SCHEMA_VERSION, ErrorCode, Failure
