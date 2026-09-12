@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, TextIO
 
 from voxink_cli.client import GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext, read_grant_token
+from voxink_cli.capture_options import normalize_capture_selection
 from voxink_cli.envelope import ErrorCode, Failure
 
 
@@ -288,12 +289,10 @@ class Session:
         language: str | None = None,
         translate: bool = False,
     ) -> dict[str, Any]:
-        applications = list(applications or [])
-        if "applications" in sources and not applications:
-            raise Failure(ErrorCode.INVALID_REQUEST, "the applications source needs bundle identifiers")
+        selection = normalize_capture_selection(sources, applications or [])
         started = self.client().start_capture(
-            sources=["system" if source == "applications" else source for source in dict.fromkeys(sources)],
-            applications=applications,
+            sources=selection.wire_sources,
+            applications=list(selection.applications),
             retain_audio=retain_audio,
             language=language,
             translate=translate,

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TextIO
 
 from .client import DEFAULT_TIMEOUT, GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
+from .capture_options import normalize_capture_selection
 from .shell import StartDefaults, run_shell
 from .envelope import (
     EXIT_OK,
@@ -283,22 +284,11 @@ def _applications_list(args: argparse.Namespace, client: ControlClient) -> Resul
 
 
 def _capture_start(args: argparse.Namespace, client: ControlClient) -> Result:
-    sources = list(dict.fromkeys(args.sources or ["system"]))
-    applications = list(dict.fromkeys(args.applications or []))
-    if "applications" in sources and not applications:
-        raise Failure(
-            ErrorCode.INVALID_REQUEST,
-            "--source applications requires at least one --app BUNDLE_ID",
-        )
-    if applications and "applications" not in sources:
-        raise Failure(ErrorCode.INVALID_REQUEST, "--app requires --source applications")
-    if "system" in sources and "applications" in sources:
-        raise Failure(
-            ErrorCode.INVALID_REQUEST,
-            "choose all system audio or selected applications, not both",
-        )
+    selection = normalize_capture_selection(args.sources or ["system"], args.applications or [])
+    sources = list(selection.sources)
+    applications = list(selection.applications)
     started = client.start_capture(
-        sources=["system" if source == "applications" else source for source in sources],
+        sources=selection.wire_sources,
         applications=applications,
         retain_audio=args.retain_audio,
         microphone_device=getattr(args, "device", None),
