@@ -15,6 +15,11 @@ from voxink_cli.discovery import ControlEndpoint
 from voxink_cli.envelope import ErrorCode, Failure
 
 
+CONTROL_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "fixtures" / "control-contract.json").read_text(encoding="utf-8")
+)
+
+
 class _Response:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
@@ -125,6 +130,25 @@ class ControlClientTests(unittest.TestCase):
 
         self.assertEqual(ErrorCode.MODEL_BUSY, busy.exception.code)
         self.assertEqual(ErrorCode.INVALID_TRANSITION, transition.exception.code)
+
+    def test_shared_service_error_fixtures_preserve_public_codes_and_details(self) -> None:
+        for name, expected in (("lifecycle", ErrorCode.INVALID_TRANSITION), ("permission", ErrorCode.APPROVAL_REQUIRED)):
+            case = CONTROL_CONTRACT["errors"][name]
+            error = HTTPError(
+                "http://127.0.0.1:8300/v1/ui/capture/resume", case["status"], "failed", {},
+                io.BytesIO(json.dumps(case["body"]).encode()),
+            )
+            with self.subTest(case=name), self.assertRaises(Failure) as caught:
+                self._call(error)
+            failure = caught.exception
+            detail = case["body"]["detail"]
+            self.assertEqual(failure.code, expected)
+            self.assertEqual(failure.message, detail["message"] if isinstance(detail, dict) else detail)
+            self.assertEqual(failure.details["http_status"], case["status"])
+            self.assertEqual(failure.request_id, "req_test")
+            if isinstance(detail, dict):
+                self.assertEqual(failure.details, {**{key: value for key, value in detail.items() if key not in {"code", "message"}}, "http_status": case["status"]})
+                self.assertNotIn(detail["claim_secret"], failure.message)
 
     def test_an_error_without_a_json_body_still_carries_a_message(self) -> None:
         with self.assertRaises(Failure) as caught:

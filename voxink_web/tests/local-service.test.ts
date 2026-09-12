@@ -1,26 +1,46 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { createAuthorizedFetch, LocalServiceError } from '../app/local-service.ts';
 
+const contract = JSON.parse(readFileSync(new URL('../../tests/fixtures/control-contract.json', import.meta.url), 'utf8'));
+
 test('string service errors retain the human-readable detail', () => {
-  const error = new LocalServiceError(409, { detail: 'Capture is already running' });
-  assert.equal(error.message, 'Capture is already running');
+  const { status, body } = contract.errors.lifecycle;
+  const error = new LocalServiceError(status, body);
+  assert.equal(error.message, 'cannot resume a stopped session');
   assert.equal(error.status, 409);
   assert.equal(error.code, null);
 });
 
 test('permission errors preserve their code and remediation without rendering secrets', () => {
   const detail = {
-    code: 'approval_required', message: 'Owner approval is required.',
+    ...contract.errors.permission.body.detail,
     remediation: 'Open Agent Access to approve this request.',
-    missing_scopes: ['transcripts.read'], claim_secret: 'synthetic-secret',
   };
-  const error = new LocalServiceError(403, { detail });
-  assert.equal(error.message, 'Owner approval is required. Open Agent Access to approve this request.');
+  const error = new LocalServiceError(contract.errors.permission.status, { detail });
+  assert.equal(error.message, "this needs the owner's approval: transcripts.read Open Agent Access to approve this request.");
   assert.equal(error.code, 'approval_required');
   assert.deepEqual(error.detail, detail);
-  assert.ok(!error.message.includes('synthetic-secret'));
+  assert.ok(!error.message.includes(detail.claim_secret));
+});
+
+test('transport decodes the same string and permission fixtures as the CLI', async () => {
+  for (const [name, expectedCode] of [['lifecycle', null], ['permission', 'approval_required']] as const) {
+    const { status, body } = contract.errors[name];
+    const request = createAuthorizedFetch('synthetic-token', async () => new Response(JSON.stringify(body), { status }));
+    await assert.rejects(request('/v1/ui/capture/resume'), (error) => {
+      assert.ok(error instanceof LocalServiceError);
+      assert.equal(error.status, status);
+      // The browser preserves explicit codes; the CLI additionally classifies
+      // legacy string-only 409 errors as invalid_transition.
+      assert.equal(error.code, expectedCode);
+      assert.equal(error.message, typeof body.detail === 'string' ? body.detail : body.detail.message);
+      assert.deepEqual(error.detail, body.detail);
+      return true;
+    });
+  }
 });
 
 test('validation arrays identify the fields that need correction', () => {

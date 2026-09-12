@@ -1,0 +1,41 @@
+{
+  "transcript_final": {
+    "type": "transcript.final",
+    "event": {
+      "session_id": "fixture-session",
+      "segment_id": "fixture-segment-1",
+      "stream_id": "microphone-1",
+      "source": "microphone",
+      "start_ms": 1200,
+      "end_ms": 2400,
+      "text": "Shared fixture: hello, 世界.",
+      "is_final": true,
+      "language": "en",
+      "language_confidence": null,
+      "speaker": null,
+      "words": null,
+      "channel": null,
+      "channel_name": null,
+      "translation": null,
+      "translation_language": null
+    }
+  },
+  "errors": {
+    "lifecycle": {
+      "status": 409,
+      "body": { "detail": "cannot resume a stopped session" }
+    },
+    "permission": {
+      "status": 403,
+      "body": {
+        "detail": {
+          "code": "approval_required",
+          "message": "this needs the owner's approval: transcripts.read",
+          "missing_scopes": ["transcripts.read"],
+          "request_id": "grantreq_fixture",
+          "claim_secret": "synthetic-claim-secret"
+        }
+      }
+    }
+  }
+}

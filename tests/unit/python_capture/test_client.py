@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from io import StringIO
 import json
+from pathlib import Path
 import signal
 import time
 import unittest
@@ -10,6 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from clients.python_capture.cli import build_parser, capture_config, main, run
 from clients.python_capture.client import CapturedFrame, CaptureConfig, MicrophoneCaptureClient
+from voxink_core.models import TranscriptEvent
+
+
+CONTROL_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "fixtures" / "control-contract.json").read_text(encoding="utf-8")
+)
 
 
 def _start_message(**overrides) -> dict:
@@ -287,9 +294,13 @@ class CaptureLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.client.start()
         stopping = asyncio.create_task(self.client.stop())
         await asyncio.wait_for(self.socket.stop_sent.wait(), 1)
-        self.socket.receive({"type": "transcript.final", "event": {"source": "microphone", "text": "the final tail"}})
+        final = CONTROL_CONTRACT["transcript_final"]
+        # Keep the cross-language fixture aligned with the producer's event
+        # serialization, including nullable fields and Unicode text.
+        self.assertEqual(TranscriptEvent.from_dict(final["event"]).to_dict(), final["event"])
+        self.socket.receive(final)
         await asyncio.sleep(0)
-        self.assertIn("[MICROPHONE] the final tail", self.output.getvalue())
+        self.assertIn("[MICROPHONE] Shared fixture: hello, 世界.", self.output.getvalue())
         self.assertFalse(stopping.done())
         self.assertFalse(self.socket.closed)
         self.socket.receive({"type": "stream.stopped", "session_id": "demo"})

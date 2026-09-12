@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { applyFeedEvents, liveSpeakerLabel, sourceLabel } from '../app/caption-feed.ts';
 
+const contract = JSON.parse(readFileSync(new URL('../../tests/fixtures/control-contract.json', import.meta.url), 'utf8'));
+
 const partial = { type: 'transcript', segment_id: 's1', source: 'microphone', text: 'hello th', start_ms: 0, end_ms: 800, is_final: false };
 const final = { ...partial, text: 'Hello there.', end_ms: 1200, is_final: true };
+
+test('the shared service final retains its text and timing in the browser feed', () => {
+  const envelope = contract.transcript_final;
+  assert.equal(envelope.type, 'transcript.final');
+  // The service publishes the same inner event to browser status, adding the
+  // feed discriminator; the capture WebSocket retains the outer envelope.
+  const event = { ...envelope.event, type: 'transcript' };
+  const [caption] = applyFeedEvents([], [{ ...event, text: 'Shared fixture:', is_final: false }, event]);
+  assert.equal(caption.id, 'fixture-segment-1');
+  assert.equal(caption.text, 'Shared fixture: hello, 世界.');
+  assert.equal(caption.startMs, 1200);
+  assert.equal(caption.endMs, 2400);
+  assert.equal(caption.isFinal, true);
+  assert.equal(sourceLabel(caption), 'MIC');
+});
 
 test('a final replaces the partial shown under the same segment id', () => {
   const captions = applyFeedEvents([], [partial, final]);
