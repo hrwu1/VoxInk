@@ -828,6 +828,22 @@ Recorded checks on 2026-09-02:
 These counts are historical evidence, not a substitute for rerunning the suites
 after later changes.
 
+#### Structural symmetry corrections (2026-09-12)
+
+The nine priority findings in `.claude/plans/code-structure-review.md` are
+implemented and merged: operation permissions, credential selection, portable
+capture lifecycle, canonical header encoding, MCP validation, cross-interface
+capture state, shared capture selection, event/error decoding, and focused
+service/browser/runtime responsibility separation.
+
+Verification: 838 Python tests passed on merged `main`; 32 native capture,
+17 menu-bar, and 26 browser unit tests passed. TypeScript, scoped ESLint, and
+the local static build passed. Actual browser checks against a synthetic local
+capture helper verified external controls, session replacement, timer behavior,
+browser controls, and readable permission errors. These checks did not exercise
+real microphone/system capture or establish model quality. Broader structural
+recommendations and existing release gates remain open as documented.
+
 #### Recording shortcut implementation (2026-09-09)
 
 Goal: add the normal-recording shortcut described in §4.2.
