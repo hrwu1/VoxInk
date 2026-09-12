@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { applyFeedEvents, type Caption, type FeedEvent } from './caption-feed';
-import { elapsedSeconds, freezeElapsed } from './elapsed-timer';
+import { elapsedSeconds } from './elapsed-timer';
+import { INITIAL_CAPTURE, reduceCapture, type CaptureAction, type CaptureStatus } from './capture-state';
 import type { LocalConnection } from './use-local-connection';
 
 export type { Caption } from './caption-feed';
-export type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping' | 'failed';
+export type { RecorderState } from './capture-state';
 export type CaptureMode = 'microphone' | 'system' | 'applications' | 'microphone_system' | 'microphone_applications';
 export type CaptionLanguage = 'auto' | 'en' | 'zh';
 export type CaptureApplication = { bundleId: string; name: string };
@@ -22,9 +23,7 @@ export type LocalModel = {
   active: boolean;
 };
 
-type NativeStatus = {
-  state: 'ready' | 'recording' | 'paused' | 'stopping' | 'failed';
-  session_id?: string | null;
+type NativeStatus = CaptureStatus & {
   events: FeedEvent[];
   next_cursor: number;
   exit_code: number | null;
@@ -117,7 +116,9 @@ function parseDiarization(status: DiarizationStatus): Diarization {
 
 export function useVoxInkRecorder(connection: LocalConnection) {
   const { authorizedFetch, isLive } = connection;
-  const [state, setState] = useState<RecorderState>('ready');
+  const [capture, setCapture] = useState(INITIAL_CAPTURE);
+  const captureRef = useRef(INITIAL_CAPTURE);
+  const state = capture.state;
   const [seconds, setSeconds] = useState(0);
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [retainAudioOverride, setRetainAudioState] = useState<boolean | null>(null);
@@ -147,41 +148,22 @@ export function useVoxInkRecorder(connection: LocalConnection) {
   const [activeModel, setActiveModel] = useState('Qwen3-ASR-1.7B');
   const [modelSwitching, setModelSwitching] = useState(false);
   const [lastSession, setLastSession] = useState<LastSession | null>(null);
-  const [active, setActive] = useState(false);
-  // Network replies from an earlier session/start must never reopen capture
-  // after Stop, restore old captions, or unlock a newer loading session.
-  const sessionGeneration = useRef(0);
-  const startPending = useRef(false);
-  const stopPending = useRef(false);
-  const nativeCursor = useRef(0);
   const retentionNotice = useRef<string | null>(null);
   const translationNotice = useRef<string | null>(null);
   const helperNotice = useRef<string | null>(null);
-  const completedElapsedMs = useRef(0);
-  const runningSinceMs = useRef<number | null>(null);
+  const requestFailed = useRef(false);
+
+  const updateCapture = useCallback((action: CaptureAction) => {
+    const next = reduceCapture(captureRef.current, action);
+    captureRef.current = next;
+    setCapture(next);
+    setSeconds(elapsedSeconds(next.completedMs, next.runningSinceMs, action.nowMs));
+    return next;
+  }, []);
 
   const refreshElapsed = useCallback(() => {
-    setSeconds(elapsedSeconds(completedElapsedMs.current, runningSinceMs.current, performance.now()));
-  }, []);
-
-  const resetElapsed = useCallback(() => {
-    completedElapsedMs.current = 0;
-    runningSinceMs.current = null;
-    setSeconds(0);
-  }, []);
-
-  const beginElapsed = useCallback(() => {
-    if (runningSinceMs.current === null) runningSinceMs.current = performance.now();
-    refreshElapsed();
-  }, [refreshElapsed]);
-
-  const pauseElapsed = useCallback(() => {
-    const nowMs = performance.now();
-    completedElapsedMs.current = freezeElapsed(
-      completedElapsedMs.current, runningSinceMs.current, nowMs,
-    );
-    runningSinceMs.current = null;
-    setSeconds(elapsedSeconds(completedElapsedMs.current, null, nowMs));
+    const current = captureRef.current;
+    setSeconds(elapsedSeconds(current.completedMs, current.runningSinceMs, performance.now()));
   }, []);
 
   const refreshApplications = useCallback(async () => {
@@ -282,15 +264,44 @@ export function useVoxInkRecorder(connection: LocalConnection) {
   }, [seconds]);
 
   const fail = useCallback((error: unknown) => {
-    pauseElapsed();
-    setActive(false); setState('failed');
+    requestFailed.current = true;
+    updateCapture({ type: 'failure', generation: captureRef.current.generation, nowMs: performance.now() });
     setMessage(error instanceof Error ? error.message : 'The local session stopped unexpectedly');
-  }, [pauseElapsed]);
+  }, [updateCapture]);
 
-  const applyNativeStatus = useCallback((status: NativeStatus) => {
-    if (status.events.length) setCaptions((current) => applyFeedEvents(current, status.events));
+  const applyNativeStatus = useCallback((
+    status: NativeStatus, generation: number, source: 'poll' | 'command' = 'poll',
+  ) => {
+    const previous = captureRef.current;
+    const next = updateCapture({ type: 'status', status, generation, source, nowMs: performance.now() });
+    if (next === previous) return;
+    const replaced = previous.sessionId !== next.sessionId;
+    if (replaced) {
+      retentionNotice.current = null;
+      translationNotice.current = null;
+      helperNotice.current = null;
+      diarizedSessionId.current = next.sessionId;
+      setDiarization(IDLE_DIARIZATION);
+    }
+    if (replaced || status.events.length) {
+      setCaptions((current) => applyFeedEvents(replaced ? [] : current, status.events));
+    }
+    // Reconciliation may immediately return an invalid command to Ready.
+    // Leave its actionable error visible until another command/session runs.
+    const preserveError = requestFailed.current && next.state === 'ready' && source === 'poll';
+    if (!preserveError) requestFailed.current = false;
+    if (!preserveError && (previous.state !== next.state || replaced)) {
+      const messages = {
+        ready: next.sessionId ? 'Transcript finalized and saved locally' : '',
+        starting: 'Starting audio capture…',
+        recording: 'Listening locally — words appear as you speak',
+        paused: 'Session paused',
+        stopping: 'Finalizing the last utterance…',
+        failed: status.error || `Capture stopped unexpectedly${status.exit_code == null ? '' : ` (exit ${status.exit_code})`}`,
+      };
+      setMessage(messages[next.state]);
+    }
     if (status.live_diarization) setLiveDiarization(status.live_diarization);
-    nativeCursor.current = status.next_cursor;
     if (status.last_session) {
       setLastSession({
         sessionId: status.last_session.session_id,
@@ -322,33 +333,34 @@ export function useVoxInkRecorder(connection: LocalConnection) {
       helperNotice.current = notice;
       setMessage(notice.slice(notice.indexOf(': ') + 2) || notice);
     }
-    // Keep controls locked until the Stop request has completed its cleanup.
-    // A poll can observe the helper exit before that request returns.
-    if (stopPending.current) return;
-    if (status.state === 'failed') {
-      pauseElapsed();
-      setActive(false); setState('failed');
-      setMessage(status.error || `Capture stopped unexpectedly${status.exit_code === null ? '' : ` (exit ${status.exit_code})`}`);
-    } else if (status.state === 'ready') {
-      pauseElapsed();
-      setActive(false); setState('ready'); setMessage('Transcript finalized and saved locally');
-    }
-  }, [pauseElapsed]);
+  }, [updateCapture]);
 
   useEffect(() => {
-    if (!active || !isLive) return;
-    const generation = sessionGeneration.current;
+    if (!isLive) return;
     let cancelled = false;
     let inFlight = false;
     const poll = async () => {
-      if (inFlight) return;
+      if (inFlight || captureRef.current.pending) return;
       inFlight = true;
+      // Read the current generation for every request, so polling remains live
+      // after local commands and externally replaced sessions.
+      const current = captureRef.current;
+      const generation = current.generation;
       try {
-        const response = await authorizedFetch(`/v1/ui/capture/status?after=${nativeCursor.current}`);
-        const status = await response.json() as NativeStatus;
-        if (!cancelled && generation === sessionGeneration.current) applyNativeStatus(status);
+        const query = new URLSearchParams({ after: String(current.cursor) });
+        if (current.sessionId) query.set('session_id', current.sessionId);
+        let response = await authorizedFetch(`/v1/ui/capture/status?${query}`);
+        let status = await response.json() as NativeStatus;
+        // Older helpers do not scope cursors to session ids. Re-read a replaced
+        // feed from zero, even when its cursor already exceeds the old cursor.
+        if (current.cursor && status.session_id !== current.sessionId) {
+          if (cancelled || generation !== captureRef.current.generation) return;
+          response = await authorizedFetch('/v1/ui/capture/status?after=0');
+          status = await response.json() as NativeStatus;
+        }
+        if (!cancelled) applyNativeStatus(status, generation);
       } catch (error) {
-        if (!cancelled && generation === sessionGeneration.current) {
+        if (!cancelled && generation === captureRef.current.generation) {
           setMessage(error instanceof Error ? error.message : 'Cannot read native capture status');
         }
       } finally {
@@ -358,7 +370,7 @@ export function useVoxInkRecorder(connection: LocalConnection) {
     const timer = window.setInterval(() => void poll(), 500);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [active, applyNativeStatus, authorizedFetch, isLive]);
+  }, [applyNativeStatus, authorizedFetch, isLive]);
 
   // Ask once whether diarization can run here. The weights are a separate
   // licence-gated download, so "supported" and "installed" are different
@@ -380,11 +392,11 @@ export function useVoxInkRecorder(connection: LocalConnection) {
 
   const refreshDiarization = useCallback(async () => {
     const sessionId = diarizedSessionId.current;
-    const generation = sessionGeneration.current;
+    const generation = captureRef.current.generation;
     if (!isLive || !sessionId) return;
     const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
     const status = await response.json() as DiarizationStatus;
-    if (generation === sessionGeneration.current && sessionId === diarizedSessionId.current) {
+    if (generation === captureRef.current.generation && sessionId === diarizedSessionId.current) {
       setDiarization(parseDiarization(status));
     }
   }, [authorizedFetch, isLive]);
@@ -407,19 +419,28 @@ export function useVoxInkRecorder(connection: LocalConnection) {
     const timer = window.setInterval(() => void poll(), DIARIZATION_POLL_MS);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [diarization.state, isLive, refreshDiarization, state]);
+  }, [capture.sessionId, diarization.state, isLive, refreshDiarization, state]);
 
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
-    if (startPending.current || stopPending.current) return;
-    const generation = ++sessionGeneration.current;
-    if (!isLive) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
-    startPending.current = true;
-    setActive(false);
-    setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
+    if (captureRef.current.pending || !['ready', 'failed'].includes(captureRef.current.state)) return;
+    requestFailed.current = false;
+    const starting = updateCapture({ type: 'command', command: 'start', nowMs: performance.now() });
+    const generation = starting.generation;
+    setCaptions([]);
     diarizedSessionId.current = null;
     setDiarization(IDLE_DIARIZATION);
+    retentionNotice.current = null;
     translationNotice.current = null;
+    helperNotice.current = null;
+    if (!isLive) {
+      updateCapture({
+        type: 'status', source: 'command', generation, nowMs: performance.now(),
+        status: { state: 'recording', session_id: null, next_cursor: 0 },
+      });
+      setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio');
+      return;
+    }
     // Speakers are only findable in audio that was kept, so the two travel
     // together. The control is disabled without retention, and this makes the
     // request agree with what the UI already shows.
@@ -446,65 +467,53 @@ export function useVoxInkRecorder(connection: LocalConnection) {
         }),
       });
       const status = await response.json() as NativeStatus;
-      if (generation !== sessionGeneration.current) return;
-      if (status.events.length) setCaptions((current) => applyFeedEvents(current, status.events));
-      if (status.live_diarization) setLiveDiarization(status.live_diarization);
-      nativeCursor.current = status.next_cursor;
+      if (generation !== captureRef.current.generation) return;
+      applyNativeStatus(status, generation, 'command');
       diarizedSessionId.current = wantsSpeakers ? status.session_id ?? null : null;
       setDiarization(wantsSpeakers
         ? { ...IDLE_DIARIZATION, state: 'waiting_for_stop' }
         : IDLE_DIARIZATION);
-      beginElapsed();
-      setActive(true); setState('recording');
-      setMessage(partialCaptions ? 'Listening locally — words appear as you speak' : 'Listening locally with macOS capture');
     } catch (error) {
-      if (generation !== sessionGeneration.current) return;
+      if (generation !== captureRef.current.generation) return;
       if (wantsLiveSpeakers) setLiveDiarization((current) => ({
         ...current, state: 'failed', error: error instanceof Error ? error.message : 'Cannot start live speakers',
       }));
       fail(error);
-    } finally {
-      if (generation === sessionGeneration.current) startPending.current = false;
     }
-  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, isLive, liveDiarization.available, liveSpeakers, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
+  }, [applyNativeStatus, authorizedFetch, diarizationAvailable, fail, identifySpeakers, language, isLive, liveDiarization.available, liveSpeakers, mode, modelSwitching, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable, updateCapture]);
 
-  const control = useCallback(async (
-    action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
-  ) => {
-    if (stopPending.current) return;
-    const cancellingStart = action === 'stop' && startPending.current;
-    if (cancellingStart) {
-      ++sessionGeneration.current;
-      startPending.current = false;
+  const control = useCallback(async (action: 'pause' | 'resume' | 'stop') => {
+    const current = captureRef.current;
+    if (current.pending && !(action === 'stop' && current.pending === 'start')) return;
+    requestFailed.current = false;
+    const cancellingStart = action === 'stop' && current.pending === 'start';
+    const pending = updateCapture({ type: 'command', command: action, nowMs: performance.now() });
+    const generation = pending.generation;
+    if (!isLive) {
+      updateCapture({
+        type: 'status', source: 'command', generation, nowMs: performance.now(),
+        status: { state: action === 'stop' ? 'ready' : pending.state, session_id: null, next_cursor: 0 },
+      });
+      setMessage('Preview ready');
+      return;
     }
-    const generation = sessionGeneration.current;
-    if (action !== 'resume') pauseElapsed();
-    else beginElapsed();
-    if (!isLive) { setState(action === 'stop' ? 'ready' : next); setMessage('Preview ready'); return; }
-    if (action === 'stop') stopPending.current = true;
-    setState(action === 'stop' ? 'stopping' : next);
-    setMessage(cancellingStart ? 'Cancelling startup…' : action === 'stop' ? 'Finalizing the last utterance…' : note);
+    setMessage(cancellingStart ? 'Cancelling startup…' : action === 'stop' ? 'Finalizing the last utterance…' : action === 'pause' ? 'Pausing capture…' : 'Resuming capture…');
     try {
       const response = await authorizedFetch(`/v1/ui/capture/${action}`, { method: 'POST' });
       const status = await response.json() as NativeStatus;
-      if (generation !== sessionGeneration.current) return;
-      if (action === 'stop') stopPending.current = false;
-      applyNativeStatus(cancellingStart ? { ...status, events: [], next_cursor: 0 } : status);
+      if (generation !== captureRef.current.generation) return;
+      applyNativeStatus(cancellingStart ? { ...status, events: [], next_cursor: 0 } : status, generation, 'command');
       if (cancellingStart && status.state === 'ready') setMessage('Startup cancelled — ready to record');
-      if (action !== 'stop') setMessage(note);
+      else if (action === 'pause' && status.state === 'paused') setMessage('Session paused');
+      else if (action === 'resume' && status.state === 'recording') setMessage('Listening locally — words appear as you speak');
     } catch (error) {
-      if (generation === sessionGeneration.current) {
-        if (action === 'stop') stopPending.current = false;
-        fail(error);
-      }
+      if (generation === captureRef.current.generation) fail(error);
     }
-  }, [applyNativeStatus, authorizedFetch, beginElapsed, fail, isLive, pauseElapsed]);
+  }, [applyNativeStatus, authorizedFetch, fail, isLive, updateCapture]);
 
-  const pause = useCallback(() => control('pause', 'paused', 'Session paused'), [control]);
-  const resume = useCallback(
-    () => control('resume', 'recording', 'Listening locally with macOS capture'), [control],
-  );
-  const stop = useCallback(() => control('stop', 'stopping', ''), [control]);
+  const pause = useCallback(() => control('pause'), [control]);
+  const resume = useCallback(() => control('resume'), [control]);
+  const stop = useCallback(() => control('stop'), [control]);
 
   const mark = useCallback(async (label = '') => {
     if (state !== 'recording' && state !== 'paused') return;
@@ -626,7 +635,6 @@ export function useVoxInkRecorder(connection: LocalConnection) {
       const selected = await response.json() as { id: string };
       setActiveModel(selected.id);
       setModels((current) => current.map((item) => ({ ...item, active: item.id === selected.id })));
-      setState('ready');
       setMessage('Local model selected — ready to record');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Cannot change the local model');
