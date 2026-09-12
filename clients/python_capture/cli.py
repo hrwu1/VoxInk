@@ -79,15 +79,19 @@ def capture_config(args: argparse.Namespace) -> CaptureConfig:
 
 
 async def run(client: MicrophoneCaptureClient) -> int:
-    """Capture until a stop signal; pause and resume on the helper's signals."""
+    """Capture until stopped or failed; always release the microphone and socket."""
     loop = asyncio.get_running_loop()
     stopped = asyncio.Event()
+    controls: set[asyncio.Task[None]] = set()
+    installed: list[int] = []
 
     def control(action: str) -> None:
         if action == "stop":
             stopped.set()
         else:
-            asyncio.ensure_future(getattr(client, action)())
+            task = asyncio.create_task(getattr(client, action)())
+            controls.add(task)
+            task.add_done_callback(controls.discard)
 
     handlers = {"SIGINT": "stop", "SIGTERM": "stop", "SIGUSR1": "pause", "SIGUSR2": "resume"}
     for name, action in handlers.items():
@@ -96,19 +100,31 @@ async def run(client: MicrophoneCaptureClient) -> int:
             continue
         try:
             loop.add_signal_handler(number, control, action)
+            installed.append(number)
         except (NotImplementedError, RuntimeError):
             # Windows: only SIGINT, delivered as KeyboardInterrupt below.
             pass
 
-    await client.start()
-    print(f"Capture started for session {client.config.session_id}. Press Ctrl-C to stop.", flush=True)
+    waiters: list[asyncio.Task[None]] = []
     try:
-        await stopped.wait()
+        await client.start()
+        print(f"Capture started for session {client.config.session_id}. Press Ctrl-C to stop.", flush=True)
+        waiters = [asyncio.create_task(stopped.wait()), asyncio.create_task(client.wait_failed())]
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
     except KeyboardInterrupt:
         pass
-    await client.stop()
+    finally:
+        pending = [*waiters, *controls]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            await client.stop()
+        finally:
+            for number in installed:
+                loop.remove_signal_handler(number)
     print("Capture stopped.", flush=True)
-    return 0
+    return 1 if client.failure is not None else 0
 
 
 def main(argv: list[str] | None = None) -> int:

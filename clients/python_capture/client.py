@@ -93,6 +93,10 @@ def list_input_devices() -> list[tuple[str, str, bool]]:
 
 
 class MicrophoneCaptureClient:
+    DRAIN_TIMEOUT_SECONDS = 5.0
+    TRANSPORT_TIMEOUT_SECONDS = 2.0
+    STOP_ACK_TIMEOUT_SECONDS = 2.0
+
     def __init__(self, config: CaptureConfig, on_event: EventHandler | None = None) -> None:
         self.config = config
         self.on_event = on_event or _print_event
@@ -108,87 +112,171 @@ class MicrophoneCaptureClient:
         self._started_ns: int | None = None
         self._sequence = 0
         self._closing = False
+        self._control_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._failed = asyncio.Event()
+        self._stop_acknowledged = asyncio.Event()
+        self.failure: Exception | None = None
         self.dropped_frames = 0
 
     @property
     def running(self) -> bool:
-        return self._websocket is not None
+        return self._websocket is not None and self.failure is None and not self._closing
 
     @property
     def paused(self) -> bool:
         return self.running and not self._accept_audio.is_set()
 
     async def start(self) -> None:
-        if self.running:
-            return
-        sounddevice = require_sounddevice()
-        websockets = require_websockets()
-        self._loop = asyncio.get_running_loop()
-        self._started_ns = time.monotonic_ns()
-        headers = None
-        if self.config.auth_token:
-            headers = {"Authorization": f"Bearer {self.config.auth_token}"}
-        self._closing = False
-        self._websocket = await websockets.connect(
-            self.config.websocket_url, additional_headers=headers
-        )
-        await self._send_json(self._start_message())
+        async with self._control_lock:
+            if self.running:
+                return
+            # Reusing a failed client must first release its old resources.
+            await self._close()
+            sounddevice = require_sounddevice()
+            websockets = require_websockets()
+            self._loop = asyncio.get_running_loop()
+            self._started_ns = time.monotonic_ns()
+            self._sequence = 0
+            self.failure = None
+            self._failed.clear()
+            self._stop_acknowledged.clear()
+            self._closing = False
+            headers = None
+            if self.config.auth_token:
+                headers = {"Authorization": f"Bearer {self.config.auth_token}"}
+            try:
+                self._websocket = await websockets.connect(
+                    self.config.websocket_url, additional_headers=headers
+                )
+                await self._send_json(self._start_message())
+                samples = self.config.sample_rate_hz * self.config.frame_duration_ms // 1000
+                self._stream = sounddevice.RawInputStream(
+                    samplerate=self.config.sample_rate_hz,
+                    blocksize=samples,
+                    device=self.config.device,
+                    channels=1,
+                    dtype="int16",
+                    callback=self._audio_callback,
+                )
+                self._accept_audio.set()
+                self._stream.start()
+                self._sender_task = asyncio.create_task(self._send_audio(), name="audio-sender")
+                self._receiver_task = asyncio.create_task(
+                    self._receive_events(), name="transcript-receiver"
+                )
+            except BaseException:
+                await self._close()
+                raise
 
-        samples = self.config.sample_rate_hz * self.config.frame_duration_ms // 1000
-        self._accept_audio.set()
-        self._stream = sounddevice.RawInputStream(
-            samplerate=self.config.sample_rate_hz,
-            blocksize=samples,
-            device=self.config.device,
-            channels=1,
-            dtype="int16",
-            callback=self._audio_callback,
-        )
-        self._stream.start()
-        self._sender_task = asyncio.create_task(self._send_audio(), name="audio-sender")
-        self._receiver_task = asyncio.create_task(
-            self._receive_events(), name="transcript-receiver"
-        )
+    async def wait_failed(self) -> None:
+        """Wake the owning process when capture can no longer deliver audio."""
+        await self._failed.wait()
 
     async def pause(self) -> None:
-        if not self.running or not self._accept_audio.is_set():
-            return
-        self._accept_audio.clear()
-        self._drain_queue()
-        await self._send_json(
-            {"type": "stream.pause", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
-        )
+        async with self._control_lock:
+            if not self.running or not self._accept_audio.is_set():
+                return
+            self._accept_audio.clear()
+            try:
+                # Like native capture, preserve the queued and in-flight tail.
+                await self._drain_audio()
+                await self._send_json(
+                    {"type": "stream.pause", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
+                )
+            except Exception as exc:
+                self._fail(exc)
 
     async def resume(self) -> None:
-        if not self.running or self._accept_audio.is_set():
-            return
-        await self._send_json(
-            {"type": "stream.resume", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
-        )
-        self._accept_audio.set()
+        async with self._control_lock:
+            if not self.running or self._accept_audio.is_set():
+                return
+            try:
+                await self._send_json(
+                    {"type": "stream.resume", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
+                )
+                if self.failure is None:
+                    self._accept_audio.set()
+            except Exception as exc:
+                self._fail(exc)
 
     async def stop(self) -> None:
-        if not self.running:
-            return
-        self._accept_audio.clear()
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-        if self._sender_task is not None:
-            await self._queue.join()
-            self._sender_task.cancel()
-            await _ignore_cancel(self._sender_task)
-        await self._send_json(
-            {"type": "stream.stop", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
-        )
-        # The helper may drop the socket without a close frame once the
-        # stream has stopped; the receiver must not report that as an error.
+        async with self._control_lock:
+            if self._websocket is None:
+                return
+            self._accept_audio.clear()
+            try:
+                if self.failure is None:
+                    await self._drain_audio()
+                    # A close after stream.stop is expected. Keep receiving the
+                    # final captions until the helper acknowledges or times out.
+                    self._closing = True
+                    await self._send_json(
+                        {"type": "stream.stop", "stream_id": self.config.stream_id, "at_ms": self._elapsed_ms()}
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_acknowledged.wait(), self.STOP_ACK_TIMEOUT_SECONDS
+                        )
+                    except TimeoutError:
+                        _status("stop_timeout", "The helper did not acknowledge stream.stop in time.")
+            except Exception as exc:
+                self._fail(exc)
+            finally:
+                await self._close()
+
+    async def _drain_audio(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+        drained = asyncio.create_task(self._queue.join())
+        failed = asyncio.create_task(self.wait_failed())
+        try:
+            done, _ = await asyncio.wait(
+                (drained, failed), timeout=self.DRAIN_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self.failure is not None:
+                raise self.failure
+            if drained not in done:
+                raise TimeoutError("Timed out draining captured audio to the helper")
+        finally:
+            for task in (drained, failed):
+                task.cancel()
+                await _ignore_cancel(task)
+
+    async def _close(self) -> None:
         self._closing = True
-        await self._websocket.close()
-        if self._receiver_task is not None:
-            await _ignore_cancel(self._receiver_task)
-        self._websocket = None
+        self._accept_audio.clear()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception as exc:
+                self._fail(exc)
+            finally:
+                try:
+                    stream.close()
+                except Exception as exc:
+                    self._fail(exc)
+        for task in (self._sender_task, self._receiver_task):
+            if task is not None:
+                task.cancel()
+                await _ignore_cancel(task)
+        self._sender_task = self._receiver_task = None
+        self._drain_queue()
+        websocket, self._websocket = self._websocket, None
+        if websocket is not None:
+            try:
+                await asyncio.wait_for(websocket.close(), self.TRANSPORT_TIMEOUT_SECONDS)
+            except Exception as exc:
+                self._fail(exc)
+
+    def _fail(self, error: Exception) -> None:
+        self._accept_audio.clear()
+        if self.failure is None:
+            self.failure = error
+            self._failed.set()
+            _status("stream_error", str(error))
 
     def _audio_callback(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
         del frames, time_info
@@ -200,18 +288,24 @@ class MicrophoneCaptureClient:
         self._loop.call_soon_threadsafe(self._enqueue_frame, frame)
 
     def _enqueue_frame(self, frame: CapturedFrame) -> None:
+        # A callback already queued on the event loop may arrive after Pause.
+        if not self._accept_audio.is_set():
+            return
         try:
             self._queue.put_nowait(frame)
         except asyncio.QueueFull:
             self.dropped_frames += 1
 
     async def _send_audio(self) -> None:
-        while True:
-            captured = await self._queue.get()
-            try:
-                await self._send_frame(captured)
-            finally:
-                self._queue.task_done()
+        try:
+            while True:
+                captured = await self._queue.get()
+                try:
+                    await self._send_frame(captured)
+                finally:
+                    self._queue.task_done()
+        except Exception as exc:
+            self._fail(exc)
 
     async def _send_frame(self, captured: CapturedFrame) -> None:
         sample_count = len(captured.pcm) // 2
@@ -226,8 +320,9 @@ class MicrophoneCaptureClient:
             "captured_at_ns": captured.captured_at_ns,
             "byte_length": len(captured.pcm),
         }
-        await self._send_json(header)
-        await self._websocket.send(captured.pcm)
+        async with self._send_lock:
+            await self._send(json.dumps(header, separators=(",", ":")))
+            await self._send(captured.pcm)
 
     async def _receive_events(self) -> None:
         try:
@@ -242,9 +337,16 @@ class MicrophoneCaptureClient:
                     continue
                 if isinstance(event, dict):
                     self.on_event(event)
+                    if event.get("type") == "stream.stopped":
+                        self._stop_acknowledged.set()
+            if not self._closing:
+                self._fail(ConnectionError("The helper closed the capture connection"))
         except Exception as exc:
-            if self.running and not self._closing:
-                _status("stream_error", str(exc))
+            if not self._closing:
+                self._fail(exc)
+        finally:
+            # A disconnected socket cannot acknowledge a stop.
+            self._stop_acknowledged.set()
 
     def _start_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {
@@ -276,7 +378,11 @@ class MicrophoneCaptureClient:
         return message
 
     async def _send_json(self, message: dict[str, Any]) -> None:
-        await self._websocket.send(json.dumps(message, separators=(",", ":")))
+        async with self._send_lock:
+            await self._send(json.dumps(message, separators=(",", ":")))
+
+    async def _send(self, message: str | bytes) -> None:
+        await asyncio.wait_for(self._websocket.send(message), self.TRANSPORT_TIMEOUT_SECONDS)
 
     def _next_sequence(self) -> int:
         sequence = self._sequence
@@ -310,8 +416,10 @@ def _status(code: str, message: str) -> None:
 def _print_event(event: dict[str, Any]) -> None:
     """Finals as `[MIC] text`, matching the Swift backend's stdout."""
     if event.get("type") == "transcript.final":
-        label = str(event.get("source", "microphone")).upper()
-        print(f"[{label}] {event.get('text', '')}", flush=True)
+        transcript = event.get("event")
+        if isinstance(transcript, dict):
+            label = str(transcript.get("source", "microphone")).upper()
+            print(f"[{label}] {transcript.get('text', '')}", flush=True)
     elif event.get("type") == "error":
         _status(str(event.get("code", "error")), str(event.get("message", "")))
 

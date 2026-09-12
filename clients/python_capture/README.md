@@ -34,6 +34,16 @@ command line, so the helper builds one and runs whichever it was given:
   credential never appears on the command line.
 - Capture starts immediately. SIGUSR1 pauses, SIGUSR2 resumes, SIGINT or
   SIGTERM stops the stream cleanly and exits 0.
+- Pause drains queued and in-flight audio before sending its control message;
+  Resume waits for that drain. A frame's JSON header and binary payload cannot
+  be split by a control message. Stop also drains audio and keeps receiving
+  final captions until `stream.stopped` or a two-second acknowledgment timeout.
+- A failed send or unexpected connection close stops accepting audio, reports
+  `stream_error`, and exits 1 after cleanup. The portable backend fails explicitly
+  instead of reconnecting. Queue drain waits at most five seconds; each
+  transport send/close waits at most two seconds. An unacknowledged Stop reports
+  `stop_timeout` before closing. These bounds keep failed transport work from
+  leaving the capture process waiting indefinitely.
 - Finalized captions go to stdout as `[MICROPHONE] text`; status lines go to
   stderr as `code: message`, which the helper surfaces as a notice.
 - `--mic-device` takes the `uid` from `--list-devices`. `sounddevice` has no
