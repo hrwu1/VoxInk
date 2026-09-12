@@ -29,6 +29,7 @@ from fastapi.websockets import WebSocketDisconnect
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from services.protocol import PROTOCOL_VERSION, SERVICE_VERSION
 from voxink_core.vad import AudioChunk, EnergyVadChunker, VadConfig
 from voxink_core.artifacts import discover_transcripts, read_transcript, read_transcript_text
 from voxink_core.audit import AUDIT_FILENAME, AuditLog
@@ -75,10 +76,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Report falling behind real time only after this much audio, so one slow chunk
 # during model warm-up does not look like sustained lag.
 _LAG_WINDOW_MS = 5_000.0
-PROTOCOL_VERSION = 1
 # Cap on the live caption feed the UI polls; it only renders the recent tail.
 UI_EVENT_BUFFER = 500
-SERVICE_VERSION = "0.3.0"
 # Custom terms live beside the transcripts by default, where a user editing
 # their own words is already looking.
 VOCABULARY_FILENAME = "vocabulary.txt"

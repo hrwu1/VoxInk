@@ -18,7 +18,7 @@ from typing import Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from services.transcription.app import PROTOCOL_VERSION, SERVICE_VERSION
+from services.protocol import PROTOCOL_VERSION, SERVICE_VERSION
 from voxink_cli import discovery
 from .diagnostics import DiagnosticLog
 
