@@ -212,7 +212,7 @@ def run_shell(
 
 def _capture_running(connect: Callable[[], ControlClient]) -> bool:
     try:
-        return connect().capture_status(after=0).get("state") not in CAPTURE_SETTLED_STATES
+        return connect().capture_status(after=0, include_events=False).get("state") not in CAPTURE_SETTLED_STATES
     except Failure:
         return False
 

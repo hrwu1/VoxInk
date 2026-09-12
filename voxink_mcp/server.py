@@ -56,7 +56,7 @@ TOOLS: list[dict[str, Any]] = [
     _tool("voxink_capture_mark", "Drop a timestamped marker into the transcript.", {"label": {"type": "string"}}),
     _tool(
         "voxink_capture_events",
-        "Read transcript events after a cursor. Waits up to wait_seconds for new events so an "
+        "Read transcript events after a cursor (requires transcripts.read). Waits up to wait_seconds for new events so an "
         "agent can follow a meeting as it happens; returns next_cursor to pass back.",
         {
             "after": {"type": "integer", "minimum": 0, "default": 0},
@@ -147,7 +147,7 @@ TOOL_SCOPES: dict[str, tuple[str, ...]] = {
     "voxink_capture_resume": ("capture.microphone", "capture.system", "capture.applications"),
     "voxink_capture_stop": ("capture.microphone", "capture.system", "capture.applications"),
     "voxink_capture_mark": ("capture.microphone", "capture.system", "capture.applications"),
-    "voxink_capture_events": ("sessions.read",),
+    "voxink_capture_events": ("transcripts.read",),
     "voxink_transcripts_list": ("transcripts.read",),
     "voxink_transcript_show": ("transcripts.read",),
 }
@@ -253,7 +253,7 @@ class Session:
     def tool_status(self) -> dict[str, Any]:
         client = self.client()
         health = client.health()
-        capture = client.capture_status()
+        capture = client.capture_status(include_events=False)
         return {
             "ready": health.get("status") == "ok",
             "model": health.get("model"),

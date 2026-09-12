@@ -84,7 +84,7 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(status["error"]["details"]["request_id"])
         self.assertTrue(status["error"]["details"]["claim_secret"])
         self.assertTrue(status["error"]["retryable"])
-        asked = self.call(session, "voxink_permissions_request", {"scopes": ["capture.system", "transcripts.read"], "max_minutes": 15, "reason": "meeting notes"})
+        asked = self.call(session, "voxink_permissions_request", {"scopes": ["capture.system", "sessions.read", "transcripts.read"], "max_minutes": 15, "reason": "meeting notes"})
         self.assertTrue(asked["ok"], asked)
         request_id = asked["data"]["request_id"]
         secret = asked["data"]["claim_secret"]
@@ -143,6 +143,12 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(claimed["ok"])
         self.assertNotEqual(claimed["error"]["code"], "approval_required")
         self.assertEqual(self.owner_client().grant_requests()["requests"], [])
+
+    def test_caption_events_request_transcript_permission(self) -> None:
+        session = Session(token=None, owner=False, client_name="test", client_factory=self.factory)
+        refused = self.call(session, "voxink_capture_events", {"wait_seconds": 0})
+        self.assertEqual(refused["error"]["code"], "approval_required")
+        self.assertEqual(refused["error"]["details"]["missing_scopes"], ["transcripts.read"])
 
     def test_serve_reads_jsonrpc_lines_from_stdin(self) -> None:
         stdin = io.StringIO(

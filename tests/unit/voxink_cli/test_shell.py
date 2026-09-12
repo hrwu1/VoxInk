@@ -74,7 +74,7 @@ class FakeHelper:
         client.capture_status.side_effect = self._status
         return client
 
-    def _status(self, *, after: int) -> dict:
+    def _status(self, *, after: int, include_events: bool = True) -> dict:
         with self.lock:
             last = None
             if self.session_id:
@@ -87,7 +87,7 @@ class FakeHelper:
             events = self.events if self.session_id else []
             return {
                 "state": self.state, "session_id": self.session_id,
-                "events": events[after:], "next_cursor": len(events),
+                "events": events[after:] if include_events else [], "next_cursor": len(events),
                 "error": None, "last_session": last,
             }
 

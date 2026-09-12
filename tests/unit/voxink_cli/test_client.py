@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 
 from voxink_cli.client import GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
 from voxink_cli.discovery import ControlEndpoint
@@ -91,7 +92,12 @@ class ControlClientTests(unittest.TestCase):
             _Response(b"{}"), lambda: self.client.capture_status(after=12)
         )
 
-        self.assertTrue(call.args[0].full_url.endswith("/v1/ui/capture/status?after=12"))
+        query = parse_qs(urlsplit(call.args[0].full_url).query)
+        self.assertEqual(query, {"after": ["12"], "include_events": ["true"]})
+
+    def test_status_only_request_explicitly_excludes_events(self) -> None:
+        _, call = self._call(_Response(b"{}"), lambda: self.client.capture_status(include_events=False))
+        self.assertEqual(parse_qs(urlsplit(call.args[0].full_url).query)["include_events"], ["false"])
 
     def test_service_statuses_become_public_error_codes(self) -> None:
         expected = {

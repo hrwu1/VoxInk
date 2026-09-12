@@ -250,8 +250,12 @@ class ControlClient:
             body["backend"] = backend
         return self._request("POST", "/v1/ui/capture/start", body=body)
 
-    def capture_status(self, *, after: int = 0) -> dict[str, Any]:
-        return self._request("GET", "/v1/ui/capture/status", query={"after": after})
+    def capture_status(self, *, after: int = 0, include_events: bool = True) -> dict[str, Any]:
+        """Read status; caption-bearing views require transcripts.read."""
+        return self._request(
+            "GET", "/v1/ui/capture/status",
+            query={"after": after, "include_events": str(include_events).lower()},
+        )
 
     def control_capture(self, action: str) -> dict[str, Any]:
         return self._request("POST", f"/v1/ui/capture/{action}")

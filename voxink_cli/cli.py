@@ -166,7 +166,7 @@ def _capabilities(args: argparse.Namespace, client: ControlClient) -> Result:
 
 def _status(args: argparse.Namespace, client: ControlClient) -> Result:
     health = client.health()
-    capture = client.capture_status()
+    capture = client.capture_status(include_events=False)
     data = {
         "ready": health.get("status") == "ok",
         "provider": health.get("provider"),
@@ -378,7 +378,7 @@ def _capture_view(view: dict[str, Any], *, after: int = 0) -> Result:
 def _wait_for_settled(client: ControlClient, args: argparse.Namespace) -> dict[str, Any]:
     """Block until capture leaves its transitional state, or the timeout ends."""
     deadline = time.monotonic() + args.timeout
-    view = client.capture_status()
+    view = client.capture_status(include_events=False)
     while view.get("state") not in CAPTURE_SETTLED_STATES:
         if time.monotonic() >= deadline:
             raise Failure(
@@ -387,7 +387,12 @@ def _wait_for_settled(client: ControlClient, args: argparse.Namespace) -> dict[s
                 details={"state": view.get("state")},
             )
         time.sleep(WATCH_INTERVAL_SECONDS)
-        view = client.capture_status()
+        view = client.capture_status(include_events=False)
+    # Waiting for one's capture to stop does not require transcript access.
+    # Preserve the final-event output for callers already allowed to read it.
+    standing = client.grant_self()
+    if standing.get("credential") == "owner" or "transcripts.read" in standing.get("scopes", []):
+        return client.capture_status()
     return view
 
 
@@ -1001,11 +1006,11 @@ def build_parser() -> argparse.ArgumentParser:
     mark.add_argument("label", nargs="?", default="", help="optional note for the marker")
     mark.set_defaults(handler=_capture_mark, command="capture.mark")
 
-    status = leaf(capture, "status", "Report capture state and buffered events.")
+    status = leaf(capture, "status", "Report capture state and buffered events (requires transcripts.read).")
     status.add_argument("--after", type=int, default=0, help="resume from this event cursor")
     status.set_defaults(handler=_capture_status, command="capture.status")
 
-    watch = leaf(capture, "watch", "Stream capture events until the session ends.")
+    watch = leaf(capture, "watch", "Stream capture events until the session ends (requires transcripts.read).")
     watch.add_argument("--after", type=int, default=0, help="resume from this event cursor")
     watch.add_argument(
         "--follow-forever",
