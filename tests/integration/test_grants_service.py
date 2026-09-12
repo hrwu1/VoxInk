@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 import signal
 import tempfile
@@ -87,6 +88,119 @@ class GrantServiceTests(unittest.TestCase):
         return FakeProcess()
 
     # -- who may do what --------------------------------------------------------
+
+    def test_read_routes_apply_the_same_scope_policy_to_every_principal(self) -> None:
+        runtime = self.runtime
+        runtime.native_session_id = "scope-session"
+        runtime.ui_events["scope-session"] = deque([{"type": "transcript", "text": "private fixture"}])
+        runtime.ui_events_total["scope-session"] = 1
+        self.client.post("/v1/sessions", json={"session_id": "scope-session"}, headers=self.owner())
+        routes = {
+            "/v1/sessions": "sessions.read",
+            "/v1/sessions/scope-session": "sessions.read",
+            "/v1/ui/capture/status?include_events=false": "sessions.read",
+            "/v1/ui/capture/status": "transcripts.read",
+            "/v1/transcripts": "transcripts.read",
+            "/v1/sessions/scope-session/diarization": "transcripts.read",
+        }
+        identities = [("owner", self.owner()), ("anonymous", {})]
+        for scope in ("models.switch", "sessions.read", "transcripts.read"):
+            _, token = self.issue(scopes=[scope])
+            identities.append((scope, self.bearer(token)))
+        with patch.object(runtime.diarization, "describe", return_value={"state": "disabled"}):
+            for identity, headers in identities:
+                for route, scope in routes.items():
+                    with self.subTest(identity=identity, route=route):
+                        response = self.client.get(route, headers=headers)
+                        allowed = identity in {"owner", scope} or (identity == "transcripts.read" and "include_events=false" in route)
+                        expected = 401 if identity == "anonymous" else (200 if allowed else 403)
+                        self.assertEqual(response.status_code, expected, response.text)
+                        if expected == 200 and "capture/status" in route:
+                            self.assertEqual(response.json()["events"], [] if "false" in route else list(runtime.ui_events["scope-session"]))
+
+    def test_legacy_mutations_require_owner_before_producing_side_effects(self) -> None:
+        for scopes in (["models.switch"], ["transcripts.read"], ["capture.microphone"]):
+            _, token = self.issue(scopes=scopes)
+            headers = self.bearer(token)
+            with self.subTest(scopes=scopes):
+                created = self.client.post("/v1/sessions", json={"session_id": "not-created"}, headers=headers)
+                self.assertEqual(created.status_code, 403)
+                transcribed = self.client.post("/v1/transcriptions", files={"file": ("test.wav", b"fake input")}, headers=headers)
+                self.assertEqual(transcribed.status_code, 403)
+                diarized = self.client.post("/v1/sessions/not-created/diarization", headers=headers)
+                self.assertEqual(diarized.status_code, 403)
+        self.assertEqual(self.runtime.provider.calls, 0)
+        self.assertEqual(self.runtime.sessions.list(), ())
+        created = self.client.post("/v1/sessions", json={"session_id": "owner-created"}, headers=self.owner())
+        self.assertEqual(created.status_code, 201, created.text)
+        transcribed = self.client.post("/v1/transcriptions", files={"file": ("test.wav", b"fake input")}, headers=self.owner())
+        self.assertEqual(transcribed.status_code, 200, transcribed.text)
+
+    def test_capture_actions_do_not_disclose_text_to_control_only_grants(self) -> None:
+        _, token = self.issue(scopes=["capture.system"])
+        headers = self.bearer(token)
+        with patch("services.transcription.app.subprocess.Popen", return_value=self.fake_process()):
+            started = self.client.post("/v1/ui/capture/start", json={"sources": ["system"]}, headers=headers)
+            self.assertEqual(started.status_code, 200, started.text)
+            sid = started.json()["session_id"]
+            self.runtime.ui_events[sid].append({"type": "transcript", "text": "private fixture"})
+            self.runtime.ui_events_total[sid] = 1
+            for action in ("pause", "resume", "stop"):
+                response = self.client.post(f"/v1/ui/capture/{action}", headers=headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["events"], [])
+                status = self.client.get("/v1/ui/capture/status?include_events=false", headers=headers)
+                self.assertEqual(status.status_code, 200, status.text)
+                self.assertEqual(status.json()["events"], [])
+
+    def test_capture_controls_require_the_active_sources_and_application_limits(self) -> None:
+        _, system_token = self.issue(scopes=["capture.system"])
+        _, app_token = self.issue(scopes=["capture.applications"], applications=["com.allowed"])
+        process = self.fake_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process):
+            self.client.post("/v1/ui/capture/start", json={"sources": ["microphone"]}, headers=self.owner())
+            refused = self.client.post("/v1/ui/capture/pause", headers=self.bearer(system_token))
+            self.assertEqual(refused.status_code, 403)
+            self.assertEqual(process.signals, [])
+            self.client.post("/v1/ui/capture/stop", headers=self.owner())
+        process = self.fake_process()
+        with patch("services.transcription.app.subprocess.Popen", return_value=process):
+            self.client.post("/v1/ui/capture/start", json={"sources": ["system"], "applications": ["com.other"]}, headers=self.owner())
+            refused = self.client.post("/v1/ui/capture/resume", headers=self.bearer(app_token))
+            self.assertEqual(refused.status_code, 403)
+            self.assertEqual(process.signals, [])
+
+    def test_capture_status_restarts_cursor_when_the_observed_session_changes(self) -> None:
+        self.runtime.native_session_id = "new-session"
+        self.runtime.ui_events["new-session"] = deque([{"type": "transcript", "text": "first"}])
+        self.runtime.ui_events_total["new-session"] = 1
+        response = self.client.get("/v1/ui/capture/status?after=99&session_id=old-session", headers=self.owner())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["events"][0]["text"], "first")
+        response = self.client.get("/v1/ui/capture/status?after=1&session_id=new-session", headers=self.owner())
+        self.assertEqual(response.json()["events"], [])
+
+    def test_capture_clock_reconciles_pause_resume_stop_and_new_recording(self) -> None:
+        now = [0.0]
+        with patch.object(self.runtime.capture_state, "_clock", side_effect=lambda: now[0]):
+            for turn in range(2):
+                process = self.fake_process()
+                with patch("services.transcription.app.subprocess.Popen", return_value=process):
+                    response = self.client.post("/v1/ui/capture/start", json={"sources": ["microphone"]}, headers=self.owner())
+                    self.assertEqual(response.json()["elapsed_ms"], 0)
+                    now[0] += 2.5
+                    paused = self.client.post("/v1/ui/capture/pause", headers=self.owner()).json()
+                    self.assertEqual(paused["elapsed_ms"], 2500)
+                    now[0] += 10
+                    paused = self.client.get("/v1/ui/capture/status", headers=self.owner()).json()
+                    self.assertEqual(paused["elapsed_ms"], 2500)
+                    self.client.post("/v1/ui/capture/resume", headers=self.owner())
+                    now[0] += 1.5
+                    stopped = self.client.post("/v1/ui/capture/stop", headers=self.owner()).json()
+                    self.assertEqual(stopped["elapsed_ms"], 4000)
+                    now[0] += 20
+                    stopped = self.client.get("/v1/ui/capture/status", headers=self.owner()).json()
+                    self.assertEqual(stopped["elapsed_ms"], 4000)
 
     def test_self_reports_the_callers_own_standing_not_the_catalog(self) -> None:
         catalog = self.client.get("/v1/grants/scopes").json()["scopes"]
