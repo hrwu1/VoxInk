@@ -67,7 +67,7 @@ from voxink_core.translation import QwenLocalTranslator, TranslationProvider, ot
 from voxink_core.vocabulary import MAX_FILE_BYTES, Vocabulary, VocabularyFile
 from .authorization import AccessPolicy, Principal, authorized, principal_for, capture_scopes, CAPTURE_SCOPES
 from .capture_state import CaptureState
-from voxink_dev.diart_runtime import DEFAULT_RUNTIME
+from voxink_core.diarization.diart_runtime import DEFAULT_RUNTIME
 from services.transcription.diart_bridge import DiartBridge, LiveTurn, availability as diart_availability
 
 

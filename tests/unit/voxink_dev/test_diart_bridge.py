@@ -295,6 +295,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.addCleanup(bridge.close)
 
                 def spawn(*args, **kwargs):
+                    self.assertEqual(args[0][4], "voxink_core.diarization.diart_live_worker")
                     return original_popen([sys.executable, "-u", "-c", program], **{**kwargs, "env": dict(os.environ)})
 
                 with patch("services.transcription.diart_bridge.availability", return_value={"available": True}), \

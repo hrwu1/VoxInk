@@ -13,8 +13,8 @@ import subprocess
 import time
 import uuid
 
-from voxink_dev.diart_live_worker import MAX_RESPONSE_BYTES, STEP_BYTES
-from voxink_dev.diart_runtime import runtime_environment, validate_runtime, record_action
+from voxink_core.diarization.diart_live_worker import MAX_RESPONSE_BYTES, STEP_BYTES
+from voxink_core.diarization.diart_runtime import runtime_environment, validate_runtime, record_action
 
 PROJECT = Path(__file__).resolve().parents[2]
 # Native microphone timestamps describe callback delivery, not a sample clock.
@@ -91,7 +91,7 @@ class DiartBridge:
             with self.log_path.open("x") as log:
                 self.process = subprocess.Popen([
                     str(self.runtime / ".venv/bin/python"), "-B", "-u", "-m",
-                    "voxink_dev.diart_live_worker", "--runtime", str(self.runtime), "--device", self.device,
+                    "voxink_core.diarization.diart_live_worker", "--runtime", str(self.runtime), "--device", self.device,
                 ], cwd=PROJECT, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=log, bufsize=0)
             os.set_blocking(self.process.stdin.fileno(), False)
