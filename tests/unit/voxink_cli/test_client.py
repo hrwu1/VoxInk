@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from voxink_cli.client import ControlClient, RequestContext
+from voxink_cli.client import GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
 from voxink_cli.discovery import ControlEndpoint
 from voxink_cli.envelope import ErrorCode, Failure
 
@@ -158,6 +159,46 @@ class ControlClientTests(unittest.TestCase):
                 )
 
         self.assertEqual(ErrorCode.NOT_READY, caught.exception.code)
+
+    def test_invalid_selected_token_files_never_select_the_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "grant"
+            for payload in (b"", b" \n\t", b"\xff"):
+                source.write_bytes(payload)
+                for selected in (source, None):
+                    with self.subTest(payload=payload, explicit=selected is not None):
+                        with patch.dict(os.environ, {GRANT_TOKEN_FILE_ENV: str(source)}):
+                            with patch("voxink_cli.client.load", return_value=self.endpoint):
+                                with self.assertRaises(Failure) as caught:
+                                    ControlClient.connect(self.context, token_file=selected)
+                        self.assertEqual(caught.exception.code, ErrorCode.PERMISSION_DENIED)
+                        self.assertEqual(caught.exception.request_id, self.context.request_id)
+            source.unlink()
+            with patch("voxink_cli.client.load", return_value=self.endpoint):
+                with self.assertRaises(Failure) as caught:
+                    ControlClient.connect(self.context, token_file=source)
+            self.assertEqual(caught.exception.code, ErrorCode.PERMISSION_DENIED)
+
+    def test_selected_nonempty_token_is_never_replaced_by_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "grant"
+            # Validity belongs to the service: even a rejected token stays a
+            # grant credential rather than becoming the more powerful owner.
+            for token in ("vxg_test", "invalid-token"):
+                source.write_text(token + "\n", encoding="utf-8")
+                with patch("voxink_cli.client.load", return_value=self.endpoint):
+                    client = ControlClient.connect(self.context, token_file=source)
+                self.assertTrue(client.uses_grant)
+                self.assertEqual(client.credential, token)
+                with patch("voxink_cli.client.urlopen", side_effect=_http_error(401, "invalid credential")):
+                    with self.assertRaises(Failure) as caught:
+                        client.health()
+                self.assertEqual(caught.exception.code, ErrorCode.PERMISSION_DENIED)
+
+    def test_an_explicit_empty_token_never_falls_back_to_owner(self) -> None:
+        client = ControlClient(self.endpoint, self.context, token="")
+        _, call = self._call(_Response(b"{}"), client.health)
+        self.assertIsNone(call.args[0].get_header("Authorization"))
 
 
 class FileTranscriptionTests(unittest.TestCase):

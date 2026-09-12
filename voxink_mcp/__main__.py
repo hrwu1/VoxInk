@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from .server import serve
+from voxink_cli.envelope import Failure
 
 
 def main() -> int:
@@ -22,9 +23,13 @@ def main() -> int:
     )
     parser.add_argument("--client-name", default="mcp-agent", help="name shown to the owner in requests")
     args = parser.parse_args()
-    return serve(
-        sys.stdin, sys.stdout, token_file=args.token_file, owner=args.owner, client_name=args.client_name
-    )
+    try:
+        return serve(
+            sys.stdin, sys.stdout, token_file=args.token_file, owner=args.owner, client_name=args.client_name
+        )
+    except Failure as error:
+        print(f"{error.code}: {error.message}", file=sys.stderr)
+        return error.exit_code
 
 
 if __name__ == "__main__":

@@ -69,6 +69,29 @@ class RequestContext:
 GRANT_TOKEN_FILE_ENV = "VOXINK_GRANT_TOKEN_FILE"
 
 
+def read_grant_token(token_file: Path | None = None, *, request_id: str | None = None) -> str | None:
+    """Read a selected grant; only an absent selection may use a default identity."""
+    configured = os.environ.get(GRANT_TOKEN_FILE_ENV)
+    source = token_file if token_file is not None else (Path(configured) if configured else None)
+    if source is None:
+        return None
+    try:
+        token = source.expanduser().read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise Failure(
+            ErrorCode.PERMISSION_DENIED,
+            "The selected grant token file cannot be read.",
+            request_id=request_id,
+        ) from exc
+    if not token:
+        raise Failure(
+            ErrorCode.PERMISSION_DENIED,
+            "The selected grant token file is empty.",
+            request_id=request_id,
+        )
+    return token
+
+
 class ControlClient:
     """A thin transport over the local control plane; it owns no product logic."""
 
@@ -82,7 +105,7 @@ class ControlClient:
 
     @property
     def credential(self) -> str | None:
-        return self.token or self.endpoint.auth_secret
+        return self.endpoint.auth_secret if self.token is None else self.token
 
     @property
     def uses_grant(self) -> bool:
@@ -100,21 +123,7 @@ class ControlClient:
             endpoint = load(endpoint_path)
         except EndpointUnavailable as exc:
             raise Failure(ErrorCode.NOT_READY, str(exc), request_id=context.request_id) from exc
-        token = None
-        source = token_file or (
-            Path(os.environ[GRANT_TOKEN_FILE_ENV]).expanduser()
-            if os.environ.get(GRANT_TOKEN_FILE_ENV)
-            else None
-        )
-        if source is not None:
-            try:
-                token = source.read_text(encoding="utf-8").strip() or None
-            except OSError as exc:
-                raise Failure(
-                    ErrorCode.PERMISSION_DENIED,
-                    f"The grant token file cannot be read: {exc}",
-                    request_id=context.request_id,
-                ) from exc
+        token = read_grant_token(token_file, request_id=context.request_id)
         return cls(endpoint, context, token=token)
 
     # -- Agent grants (§14.5) ----------------------------------------------

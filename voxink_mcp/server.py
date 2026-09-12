@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable, TextIO
 
-from voxink_cli.client import GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext
+from voxink_cli.client import GRANT_TOKEN_FILE_ENV, ControlClient, RequestContext, read_grant_token
 from voxink_cli.envelope import ErrorCode, Failure
 
 
@@ -394,7 +394,7 @@ def serve(
     client_name: str = "mcp-agent",
     client_factory: Callable[[RequestContext, str | None], ControlClient] | None = None,
 ) -> int:
-    token = _read_token(token_file)
+    token = read_grant_token(token_file)
     session = Session(token=token, owner=owner, client_name=client_name, client_factory=client_factory)
     for line in stdin:
         line = line.strip()
@@ -458,16 +458,6 @@ def handle(session: Session, message: dict[str, Any]) -> dict[str, Any] | None:
     if identifier is None:
         return None
     return _error(identifier, -32601, f"method not found: {method}")
-
-
-def _read_token(token_file: Path | None) -> str | None:
-    source = token_file or (Path(os.environ[GRANT_TOKEN_FILE_ENV]).expanduser() if os.environ.get(GRANT_TOKEN_FILE_ENV) else None)
-    if source is None:
-        return None
-    try:
-        return source.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
 
 
 def _result(identifier: Any, result: dict[str, Any]) -> dict[str, Any]:
