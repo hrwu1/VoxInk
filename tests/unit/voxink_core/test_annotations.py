@@ -11,6 +11,7 @@ from voxink_core.diarization.transcript import read_blocks
 from voxink_core.models import SessionConfig, Source, TranscriptEvent
 from voxink_core.persistence.audio import AudioRetentionWriter, track_name
 from voxink_core.persistence.markdown import MarkdownTranscriptWriter
+from voxink_core.persistence.transcript_format import parse_header
 from voxink_core.sessions import InvalidSessionTransition, SessionManager
 
 
@@ -59,6 +60,26 @@ class AnnotationTests(unittest.TestCase):
         (block,) = read_blocks(self.directory)
         self.assertIs(block.source, Source.SYSTEM)
         self.assertEqual(block.text, "From the call.")
+
+    def test_channel_and_speaker_share_lossless_header_escaping(self) -> None:
+        channels = ("Zoom", "Zoom [Meeting]", r"Zoom\Room", "Zoom\\", "] [Host] **")
+        labels = [(channel, speaker) for channel in channels for speaker in (None, r"Alice [Host]\team")]
+        writer = MarkdownTranscriptWriter(self.directory, self.config, durable_flush=False)
+        with writer:
+            for index, (channel, speaker) in enumerate(labels):
+                writer.append(_event(
+                    index * 1000, f"call {index}", source=Source.SYSTEM,
+                    channel="us.zoom.xos", channel_name=channel, speaker=speaker,
+                ))
+            writer.append(_event(11000, "Microphone", channel_name="Ignored [channel]"))
+            writer.append(_event(12000, "Bundle fallback", source=Source.SYSTEM, channel=r"com.test\app"))
+        blocks = read_blocks(self.directory)
+        self.assertEqual(len(blocks), len(labels) + 2)
+        self.assertEqual([parse_header(block.header).channel for block in blocks[:-2]], [label[0] for label in labels])
+        self.assertEqual([block.speaker for block in blocks[:-2]], [label[1] for label in labels])
+        self.assertIsNone(parse_header(blocks[-2].header).channel)
+        self.assertEqual(parse_header(blocks[-1].header).channel, r"com.test\app")
+        self.assertEqual([block.text for block in blocks[:-2]], [f"call {index}" for index in range(len(labels))])
 
     def test_session_marks_while_paused_but_not_when_stopped(self) -> None:
         manager = SessionManager(

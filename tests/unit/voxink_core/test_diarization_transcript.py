@@ -98,6 +98,39 @@ class ReadBlocksTests(unittest.TestCase):
         )
         self.assertEqual(read_blocks(self.directory)[0].speaker, "MIC_SPEAKER_00")
 
+    def test_speaker_labels_round_trip_without_swallowing_neighboring_blocks(self):
+        names = (
+            "Alice", "Alice [Host]", "[主持人]", r"Alice\Host", r"Alice\[Host]",
+            "Alice\\", "[", "]", "[MIC] **", "Alice\nHost", None,
+        )
+        events = [
+            make_event(index * 1000, (index + 1) * 1000, f"utterance {index}", speaker=name)
+            for index, name in enumerate(names)
+        ]
+        write_session(self.directory, events)
+        blocks = read_blocks(self.directory)
+        self.assertEqual([block.speaker for block in blocks], list(names))
+        self.assertEqual([block.text for block in blocks], [event.text for event in events])
+        self.assertEqual([block.start_ms for block in blocks], [event.start_ms for event in events])
+        self.assertEqual([block.block for block in blocks], list(range(1, len(events) + 1)))
+        self.assertEqual(blocks[0].header, "**[00:00:00.000-00:00:01.000] [MIC] [Alice]**")
+
+    def test_legacy_headers_keep_literal_backslashes_and_brackets(self):
+        # These fixtures must stay independent of the new writer: its escaping
+        # must not change what an already stored speaker name means.
+        names = (r"Alice\Host", r"Alice\[Host", "Alice\\", r"Alice\nHost", "Alice [Host]")
+        part = self.directory / "transcript-part-001.md"
+        part.write_text(
+            "".join(
+                f"**[00:00:0{index}.000-00:00:0{index + 1}.000] [MIC] [{name}]**\nline {index}\n\n"
+                for index, name in enumerate(names)
+            ),
+            encoding="utf-8",
+        )
+        blocks = read_blocks(self.directory)
+        self.assertEqual([block.speaker for block in blocks], list(names))
+        self.assertEqual([block.text for block in blocks], [f"line {index}" for index in range(len(names))])
+
     def test_system_source_blocks_are_distinguished(self):
         write_session(
             self.directory,

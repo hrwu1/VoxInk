@@ -16,12 +16,14 @@ from voxink_core.diarization.artifacts import (
     TURNS_FILENAME,
     build_document,
     read_document,
+    rename_speaker,
+    render_from_document,
     stale_sources,
     validate_document,
     write_artifacts,
 )
 from voxink_core.diarization.models import DiarizationError, DiarizationResult, SpeakerTurn
-from voxink_core.diarization.transcript import part_digests, read_blocks
+from voxink_core.diarization.transcript import parse_part, part_digests, read_blocks
 
 from tests.fixtures.transcripts import SESSION_ID, make_event, write_session
 
@@ -118,6 +120,22 @@ class WriteArtifactsTests(ArtifactTestCase):
             1,
             "a rewrite must not accumulate files",
         )
+
+    def test_derived_speaker_names_round_trip_through_write_and_rename(self):
+        names = {"MIC_SPEAKER_00": r"Alice [Host]\team", "MIC_SPEAKER_01": "来宾 [Guest]"}
+        paths = self.write(speakers={speaker: {"name": name} for speaker, name in names.items()})
+        canonical = part_digests(self.directory)
+        blocks = parse_part(paths.markdown)
+        self.assertEqual([block.speaker for block in blocks], [*names.values(), None])
+        self.assertEqual([block.text for block in blocks], [block.text for block in self.blocks])
+        self.assertEqual(
+            render_from_document(self.directory, read_document(self.directory)),
+            paths.markdown.read_text(encoding="utf-8"),
+        )
+        renamed = "Alice\\"
+        rename_speaker(self.directory, "MIC_SPEAKER_00", renamed)
+        self.assertEqual(parse_part(paths.markdown)[0].speaker, renamed)
+        self.assertEqual(part_digests(self.directory), canonical)
 
 
 class AtomicityTests(ArtifactTestCase):
@@ -361,7 +379,7 @@ class SplitBlockArtifactTests(unittest.TestCase):
         )
         self.aligner = {"model_id": "Qwen/Qwen3-ForcedAligner-0.6B", "model_revision": "c7cbfc20"}
 
-    def write(self):
+    def write(self, *, speakers=None):
         return write_artifacts(
             self.directory,
             session_id=SESSION_ID,
@@ -371,6 +389,7 @@ class SplitBlockArtifactTests(unittest.TestCase):
             source_artifacts=part_digests(self.directory),
             created_at=CREATED_AT,
             aligner=self.aligner,
+            speakers=speakers,
         )
 
     def test_markdown_shows_one_sub_block_per_piece_with_the_text_intact(self):
@@ -380,6 +399,17 @@ class SplitBlockArtifactTests(unittest.TestCase):
         self.assertIn("**[00:00:01.100-00:00:01.900] [MIC] [MIC_SPEAKER_00]**\n真的好吃。", markdown)
         self.assertNotIn("[00:00:00.000-00:00:15.000]", markdown)
         self.assertIn('aligner_model_id: "Qwen/Qwen3-ForcedAligner-0.6B"', markdown)
+
+    def test_split_piece_speaker_names_round_trip_and_rerender(self):
+        names = {"MIC_SPEAKER_00": r"Alice [Host]\team", "MIC_SPEAKER_01": "来宾 [Guest]"}
+        paths = self.write(speakers={speaker: {"name": name} for speaker, name in names.items()})
+        blocks = parse_part(paths.markdown)
+        self.assertEqual([block.speaker for block in blocks], [names["MIC_SPEAKER_01"], names["MIC_SPEAKER_00"]])
+        self.assertEqual("".join(block.text for block in blocks), self.blocks[0].text)
+        self.assertEqual(
+            render_from_document(self.directory, read_document(self.directory)),
+            paths.markdown.read_text(encoding="utf-8"),
+        )
 
     def test_document_records_pieces_as_ranges_and_the_aligner(self):
         self.write()
@@ -395,7 +425,8 @@ class SplitBlockArtifactTests(unittest.TestCase):
         self.assertNotIn('"text":', json.dumps(document))
 
     def test_a_canonical_speaker_is_never_split(self):
-        write_session(self.directory, [make_event(0, 15_000, "可能太香了。真的好吃。", speaker="Host")])
+        speaker = r"Alice [Host]\team"
+        write_session(self.directory, [make_event(0, 15_000, "可能太香了。真的好吃。", speaker=speaker)])
         self.blocks = read_blocks(self.directory)
         words = tuple(
             WordTimestamp(c, 100 + i * 200, 300 + i * 200) for i, c in enumerate("可能太香了真的好吃")
@@ -408,7 +439,8 @@ class SplitBlockArtifactTests(unittest.TestCase):
             alignments={(self.blocks[0].part, self.blocks[0].block): words},
         )
         markdown = self.write().markdown.read_text(encoding="utf-8")
-        self.assertIn("[MIC] [Host]**\n可能太香了。真的好吃。", markdown)
+        self.assertIn(f"{self.blocks[-1].header}\n可能太香了。真的好吃。", markdown)
+        self.assertEqual(parse_part(self.directory / MARKDOWN_FILENAME)[-1].speaker, speaker)
 
     def test_validation_rejects_pieces_that_do_not_tile_the_block(self):
         document = build_document(

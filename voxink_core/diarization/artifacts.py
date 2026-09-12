@@ -21,7 +21,7 @@ import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models import Source
-from ..persistence.markdown import format_timestamp
+from ..persistence.transcript_format import format_header, parse_header
 from .alignment import SegmentLabel
 from .splitting import Piece
 from .models import (
@@ -30,7 +30,7 @@ from .models import (
     DiarizationResult,
     SpeakerTurn,
 )
-from .transcript import TranscriptBlock, file_digest, read_blocks, source_tag
+from .transcript import TranscriptBlock, file_digest, read_blocks
 
 
 SCHEMA_VERSION = 1
@@ -456,30 +456,34 @@ def _render_block(
         # rather than second-guessing it.
         if not block.speaker:
             return "".join(_piece_markdown(block, piece, names) for piece in pieces)
-    header = block.header or f"**[{block.start_ms}-{block.end_ms}] [{block.source.value}]**"
+    header = block.header or format_header(
+        block.start_ms, block.end_ms, block.source, speaker=block.speaker
+    )
     # A block that already carries a canonical speaker keeps it; this view adds
     # information, it never overrides what the transcript itself recorded.
     if speaker_id and not block.speaker:
-        header = f"{header[:-2]} [{_display(speaker_id, names)}]**"
+        parsed = parse_header(header)
+        header = format_header(
+            block.start_ms, block.end_ms, block.source,
+            channel=parsed.channel if parsed else None,
+            speaker=_display(speaker_id, names),
+        )
     return f"{header}\n{block.text}\n\n"
 
 
 def _piece_markdown(block: TranscriptBlock, piece: _PieceTuple, names: Mapping[str, str]) -> str:
     text_start, text_end, start_ms, end_ms, speaker_id = piece
-    speaker = f" [{_display(speaker_id, names)}]" if speaker_id else ""
-    header = (
-        f"**[{format_timestamp(start_ms)}-{format_timestamp(end_ms)}] "
-        f"[{source_tag(block.source)}]{speaker}**"
+    parsed = parse_header(block.header)
+    header = format_header(
+        start_ms, end_ms, block.source,
+        channel=parsed.channel if parsed else None,
+        speaker=_display(speaker_id, names) if speaker_id else None,
     )
     return f"{header}\n{block.text[text_start:text_end].strip()}\n\n"
 
 
 def _display(speaker_id: str, names: Mapping[str, str]) -> str:
-    """A name in brackets must not contain a bracket, or the header breaks."""
-    name = names.get(speaker_id)
-    if not name:
-        return speaker_id
-    return name.replace("[", "(").replace("]", ")")
+    return names.get(speaker_id) or speaker_id
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:

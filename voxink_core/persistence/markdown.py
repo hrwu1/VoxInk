@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TextIO
 
 from ..models import SessionConfig, TranscriptEvent
+from .transcript_format import format_header, format_timestamp
 
 
 PART_PREFIX = "transcript-part-"
@@ -234,25 +235,15 @@ def _front_matter(
 
 
 def _event_block(event: TranscriptEvent) -> str:
-    source = "MIC" if event.source.value == "microphone" else "SYSTEM"
     # A per-application stream names its application inside the source tag,
     # so the tag stays one bracket and the speaker bracket keeps its place.
-    channel = event.channel_name or event.channel
-    if channel and event.source.value == "system":
-        source = f"{source}: {' '.join(channel.replace(']', ' ').split())}"
-    speaker = f" [{event.speaker}]" if event.speaker else ""
-    return (
-        f"**[{format_timestamp(event.start_ms)}-{format_timestamp(event.end_ms)}] "
-        f"[{source}]{speaker}**\n{event.text.strip()}\n\n"
+    channel = (event.channel_name or event.channel) if event.source.value == "system" else None
+    header = format_header(
+        event.start_ms, event.end_ms, event.source,
+        channel=" ".join(channel.split()) if channel else None,
+        speaker=event.speaker,
     )
-
-
-def format_timestamp(milliseconds: int) -> str:
-    """Render milliseconds as the `HH:MM:SS.mmm` the block header carries."""
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, millis = divmod(remainder, 1_000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{header}\n{event.text.strip()}\n\n"
 
 
 def _yaml_quote(value: str) -> str:

@@ -18,22 +18,10 @@ from typing import Any, Iterator
 
 from ..models import Source
 from ..persistence.markdown import COMPLETE_MARKER, PART_PREFIX, RECOVERED_MARKER
+from ..persistence.transcript_format import HEADER_PATTERN, parse_header, parse_timestamp, source_tag
 
 
 PART_GLOB = f"{PART_PREFIX}[0-9][0-9][0-9].md"
-
-_SOURCE_BY_TAG = {"MIC": Source.MICROPHONE, "SYSTEM": Source.SYSTEM}
-_TAG_BY_SOURCE = {source: tag for tag, source in _SOURCE_BY_TAG.items()}
-
-#: Matches the header `MarkdownTranscriptWriter._event_block` writes. Hours are
-#: not capped at two digits: the writer widens the field rather than truncating,
-#: and a session long enough to need three would otherwise silently stop
-#: parsing.
-_HEADER = re.compile(
-    r"^\*\*\[(?P<start>\d{2,}:\d{2}:\d{2}\.\d{3})-(?P<end>\d{2,}:\d{2}:\d{2}\.\d{3})\] "
-    r"\[(?P<source>MIC|SYSTEM)(?:: (?P<channel>[^\]]+))?\](?: \[(?P<speaker>[^\]]+)\])?\*\*$",
-    re.MULTILINE,
-)
 
 #: Annotations the writer appends beside blocks and that are not transcript
 #: text: a user's marker (its own header, with a label line under it) and a
@@ -121,26 +109,11 @@ def block_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def source_tag(source: Source) -> str:
-    """The header tag the canonical writer uses for a source."""
-    return _TAG_BY_SOURCE[Source(source)]
-
-
-def parse_timestamp(value: str) -> int:
-    """Parse `HH:MM:SS.mmm` into milliseconds."""
-    hours, minutes, rest = value.split(":")
-    seconds, millis = rest.split(".")
-    return (
-        int(hours) * 3_600_000
-        + int(minutes) * 60_000
-        + int(seconds) * 1_000
-        + int(millis)
-    )
-
-
 def _blocks(part_name: str, text: str) -> Iterator[TranscriptBlock]:
-    matches = list(_HEADER.finditer(text))
+    matches = list(HEADER_PATTERN.finditer(text))
     for index, match in enumerate(matches, start=1):
+        header = parse_header(match.group(0))
+        assert header is not None
         # A block runs to the next header, not to the next blank line: a
         # transcript body may legitimately contain one, and splitting on blank
         # lines would truncate it.
@@ -158,11 +131,11 @@ def _blocks(part_name: str, text: str) -> Iterator[TranscriptBlock]:
         yield TranscriptBlock(
             part=part_name,
             block=index,
-            source=_SOURCE_BY_TAG[match.group("source")],
-            start_ms=parse_timestamp(match.group("start")),
-            end_ms=parse_timestamp(match.group("end")),
+            source=header.source,
+            start_ms=header.start_ms,
+            end_ms=header.end_ms,
             text=body.strip(),
-            speaker=match.group("speaker"),
+            speaker=header.speaker,
             sha256=block_digest(canonical),
             header=match.group(0),
         )
