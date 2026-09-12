@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -89,6 +90,51 @@ TOOLS: list[dict[str, Any]] = [
     ),
 ]
 
+_TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
+
+
+class InvalidArguments(ValueError):
+    """A request does not satisfy an advertised tool input schema."""
+
+
+def _validate(value: Any, schema: dict[str, Any], path: str = "arguments") -> None:
+    """Validate the JSON Schema subset used by this server's tool catalog."""
+    kind = schema["type"]
+    matches = {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }
+    if not matches[kind]:
+        raise InvalidArguments(f"{path} must be {kind}")
+    if kind in {"integer", "number"}:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise InvalidArguments(f"{path} must be finite")
+        if "minimum" in schema and value < schema["minimum"]:
+            raise InvalidArguments(f"{path} must be at least {schema['minimum']}")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise InvalidArguments(f"{path} must be at most {schema['maximum']}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise InvalidArguments(f"{path} must be one of {schema['enum']}")
+    if kind == "array":
+        for index, item in enumerate(value):
+            _validate(item, schema["items"], f"{path}[{index}]")
+    if kind == "object":
+        properties = schema.get("properties", {})
+        for required in schema.get("required", []):
+            if required not in value:
+                raise InvalidArguments(f"{path}.{required} is required")
+        if schema.get("additionalProperties") is False:
+            extra = value.keys() - properties.keys()
+            if extra:
+                raise InvalidArguments(f"{path} has unknown fields: {', '.join(sorted(extra))}")
+        for key, item in value.items():
+            if key in properties:
+                _validate(item, properties[key], f"{path}.{key}")
+
 
 # The scopes each tool needs, so a refusal can name them and ask for exactly
 # those. The consent tools are absent on purpose: they are how an agent holding
@@ -142,9 +188,11 @@ class Session:
     # -- tools ----------------------------------------------------------------
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        handler = getattr(self, f"tool_{name.removeprefix('voxink_')}", None)
-        if handler is None:
+        tool = _TOOLS_BY_NAME.get(name)
+        if tool is None:
             raise Failure(ErrorCode.INVALID_REQUEST, f"unknown tool: {name}")
+        _validate(arguments, tool["inputSchema"])
+        handler = getattr(self, f"tool_{name.removeprefix('voxink_')}")
         try:
             return handler(**arguments)
         except Failure as failure:
@@ -401,8 +449,8 @@ def serve(
         if not line:
             continue
         try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
+            message = json.loads(line, parse_constant=_invalid_json_constant)
+        except (ValueError, RecursionError):
             _write(stdout, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
             continue
         response = handle(session, message)
@@ -411,13 +459,28 @@ def serve(
     return 0
 
 
-def handle(session: Session, message: dict[str, Any]) -> dict[str, Any] | None:
+def handle(session: Session, message: Any) -> dict[str, Any] | None:
     """Answer one JSON-RPC message; notifications get no answer."""
+    if not isinstance(message, dict):
+        return _error(None, -32600, "invalid request: expected an object")
     method = message.get("method")
     identifier = message.get("id")
-    params = message.get("params") or {}
+    valid_id = identifier is None or (
+        isinstance(identifier, (str, int, float)) and not isinstance(identifier, bool)
+        and (not isinstance(identifier, float) or math.isfinite(identifier))
+    )
+    if message.get("jsonrpc") != "2.0" or not isinstance(method, str) or not valid_id:
+        return _error(identifier if valid_id else None, -32600, "invalid request")
+    notification = "id" not in message
+    params = message.get("params", {})
+
+    def reply(response: dict[str, Any]) -> dict[str, Any] | None:
+        return None if notification else response
+
+    if not isinstance(params, dict):
+        return reply(_error(identifier, -32602, "invalid parameters: expected an object"))
     if method == "initialize":
-        return _result(identifier, {
+        return reply(_result(identifier, {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
@@ -429,18 +492,23 @@ def handle(session: Session, message: dict[str, Any]) -> dict[str, Any] | None:
                 "then call voxink_permissions_claim with those two values. Call "
                 "voxink_capabilities first to see permitted_scopes for this session."
             ),
-        })
+        }))
     if method in {"notifications/initialized", "notifications/cancelled"}:
         return None
     if method == "ping":
-        return _result(identifier, {})
+        return reply(_result(identifier, {}))
     if method == "tools/list":
-        return _result(identifier, {"tools": TOOLS})
+        return reply(_result(identifier, {"tools": TOOLS}))
     if method == "tools/call":
-        name = params.get("name", "")
-        arguments = params.get("arguments") or {}
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return reply(_error(identifier, -32602, "invalid parameters: name must be a string and arguments an object"))
         try:
             payload = session.call(name, arguments)
+            text = json.dumps({"ok": True, "data": payload}, ensure_ascii=False, allow_nan=False)
+        except InvalidArguments as exc:
+            return reply(_error(identifier, -32602, f"invalid arguments: {exc}"))
         except Failure as failure:
             body = {
                 "ok": False,
@@ -451,13 +519,15 @@ def handle(session: Session, message: dict[str, Any]) -> dict[str, Any] | None:
                     "details": dict(failure.details),
                 },
             }
-            return _result(identifier, {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True})
-        except TypeError as exc:
-            return _error(identifier, -32602, f"invalid arguments: {exc}")
-        return _result(identifier, {"content": [{"type": "text", "text": json.dumps({"ok": True, "data": payload}, ensure_ascii=False)}]})
-    if identifier is None:
-        return None
-    return _error(identifier, -32601, f"method not found: {method}")
+            return reply(_result(identifier, {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True}))
+        except Exception:  # A broken tool must not terminate the stdio session.
+            return reply(_error(identifier, -32603, "internal error"))
+        return reply(_result(identifier, {"content": [{"type": "text", "text": text}]}))
+    return reply(_error(identifier, -32601, f"method not found: {method}"))
+
+
+def _invalid_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _result(identifier: Any, result: dict[str, Any]) -> dict[str, Any]:
