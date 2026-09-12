@@ -391,7 +391,7 @@ Do not store secrets or provider credentials in metadata.
 
 ### 9.5 Transcript format
 
-Proposed readable format:
+Canonical readable format:
 
 ```markdown
 **[00:00:03.200-00:00:06.100] [SYSTEM]**
@@ -403,6 +403,13 @@ Yes, I have it open now.
 
 Overlapping speech remains as separate, source-labeled segments ordered by start
 time.
+
+`voxink_core.persistence.transcript_format` owns header encoding and parsing for
+canonical transcripts and derived speaker views. Plain labels retain their
+existing representation. Labels containing brackets, backslashes, or line
+breaks use lossless escaping and an invisible `voxink-header-escaping: 1` HTML
+comment on that header. Readers decode only marked headers, preserving literal
+backslashes in older transcripts.
 
 ## 10. Optional Audio Retention
 
@@ -426,14 +433,19 @@ VoxInk
 │   ├── macos_capture/          # Native capture backend (headless)
 │   └── python_capture/         # Portable microphone backend (no Swift build)
 ├── services/
+│   ├── protocol.py             # Lightweight helper identity shared with launcher
 │   └── transcription/          # Local HTTP/WebSocket transcription service
 ├── voxink_cli/                 # Public `voxink` command and shared control client
 ├── voxink_mcp/                 # MCP server over the same control client
 ├── voxink_menubar/             # Menu-bar control surface and floating captions
+├── voxink_web/                 # Browser control surface and local static bundle
+├── voxink_dev/                 # Launcher, diagnostics, and experiment setup
 ├── voxink_core/
 │   ├── providers/              # Qwen and future provider adapters
+│   ├── diarization/            # Speaker processing and isolated runtime workers
 │   └── persistence/            # Markdown/audio writers and rotation
 ├── tests/
+│   ├── fixtures/               # Shared event and error contract examples
 │   ├── unit/                   # Core and capture-client unit tests
 │   └── integration/            # Service API and boundary tests
 └── models/
@@ -442,6 +454,14 @@ VoxInk
 
 The source tree follows this layout. Runtime model weights and local virtual
 environments remain outside version control.
+
+Within the service, `AccessPolicy` owns operation authorization and
+`CaptureState` owns lifecycle timing. HTTP routes still coordinate capture and
+session use cases. Browser connection and authorized transport are independent
+of the recorder hook; a reducer reconciles service state and ignores stale
+responses. CLI and MCP share capture selection validation and credential-file
+loading. Runtime workers depend on core utilities; developer setup may depend
+on those utilities, while the service does not import developer tooling.
 
 ## 12. Testing Strategy
 
@@ -453,6 +473,8 @@ environments remain outside version control.
 - Integration tests for file-to-API-to-Markdown flow.
 - Tests proving local-only mode attempts no network access.
 - Permission denial and capture-source disappearance tests.
+- Cross-language event/error fixtures, route-by-principal permission checks,
+  capture failure/drain/acknowledgment tests, and external-control browser checks.
 - Application restart/reconnect tests.
 - Crash recovery and multi-part session tests.
 - Long-duration soak tests before declaring sessions unlimited in production.
@@ -622,6 +644,19 @@ single use. Starting unattended capture is allowed only when the user has
 created a matching scoped grant in the application. Missing authorization
 returns `approval_required` with a request identifier that the application can
 present to the user. A command-line confirmation flag cannot bypass this gate.
+
+Transcript-bearing status and diarization reads require `transcripts.read`.
+`GET /v1/ui/capture/status?include_events=false` returns state without caption
+text for `sessions.read`, `transcripts.read`, or a capture grant matching the
+active sources and application restrictions. Capture-only control responses
+also omit transcript events. Pause, resume, stop, and mark validate the active
+capture's restrictions. Legacy session creation, batch transcription, and
+diarization mutation routes remain owner-only until dedicated write scopes are
+defined. Explicitly selected empty or unreadable grant files fail closed.
+
+Capture status includes pause-aware `elapsed_ms`. Clients pass the session ID
+with an event cursor so a replacement session resets that cursor. Browser
+controls keep reconciling helper state while idle as well as while recording.
 
 Control mutations record an audit entry containing the time, operation,
 request ID, client identity, affected session, result, and permission scope.
