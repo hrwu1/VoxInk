@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { applyFeedEvents, type Caption, type FeedEvent } from './caption-feed';
 import { elapsedSeconds, freezeElapsed } from './elapsed-timer';
+import type { LocalConnection } from './use-local-connection';
 
 export type { Caption } from './caption-feed';
 export type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping' | 'failed';
@@ -21,7 +22,6 @@ export type LocalModel = {
   active: boolean;
 };
 
-type LaunchConfig = { origin: string; token: string; retainAudio: boolean };
 type NativeStatus = {
   state: 'ready' | 'recording' | 'paused' | 'stopping' | 'failed';
   session_id?: string | null;
@@ -115,12 +115,13 @@ function parseDiarization(status: DiarizationStatus): Diarization {
   };
 }
 
-export function useVoxInkRecorder() {
+export function useVoxInkRecorder(connection: LocalConnection) {
+  const { authorizedFetch, isLive } = connection;
   const [state, setState] = useState<RecorderState>('ready');
   const [seconds, setSeconds] = useState(0);
   const [captions, setCaptions] = useState<Caption[]>([]);
-  const [launch, setLaunch] = useState<LaunchConfig | null>(null);
-  const [retainAudio, setRetainAudioState] = useState(true);
+  const [retainAudioOverride, setRetainAudioState] = useState<boolean | null>(null);
+  const retainAudio = retainAudioOverride ?? connection.retainAudio;
   const [identifySpeakers, setIdentifySpeakersState] = useState(false);
   const [liveSpeakers, setLiveSpeakersState] = useState(false);
   const [liveDiarization, setLiveDiarization] = useState<LiveDiarization>({
@@ -129,7 +130,7 @@ export function useVoxInkRecorder() {
   const [diarization, setDiarization] = useState<Diarization>(IDLE_DIARIZATION);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const diarizedSessionId = useRef<string | null>(null);
-  const [message, setMessage] = useState('Open through voxink-dev to connect');
+  const [message, setMessage] = useState('');
   const [mode, setModeState] = useState<CaptureMode>('microphone');
   const [nativeAvailable, setNativeAvailable] = useState(false);
   // The helper's backend may be microphone-only (the portable Python one).
@@ -183,43 +184,8 @@ export function useVoxInkRecorder() {
     setSeconds(elapsedSeconds(completedElapsedMs.current, null, nowMs));
   }, []);
 
-  const authorizedFetch = useCallback(async (path: string, init: RequestInit = {}) => {
-    if (!launch) throw new Error('The local helper is not connected');
-    const response = await fetch(path, {
-      ...init,
-      cache: 'no-store',
-      headers: { ...init.headers, Authorization: `Bearer ${launch.token}` },
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { detail?: string };
-      throw new Error(payload.detail || `Local helper request failed (${response.status})`);
-    }
-    return response;
-  }, [launch]);
-
-  useEffect(() => {
-    const values = new URLSearchParams(window.location.hash.slice(1));
-    const bootstrap = values.get('bootstrap');
-    const retainAudio = values.get('retain_audio') === '1';
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    if (!bootstrap) return;
-    void fetch('/v1/ui/bootstrap', {
-      method: 'POST', headers: { 'X-VoxInk-Bootstrap': bootstrap }, cache: 'no-store',
-    }).then(async (response) => {
-      if (!response.ok) throw new Error('The UI launch link expired. Run voxink-dev again.');
-      const payload = (await response.json()) as { token?: unknown };
-      if (typeof payload.token !== 'string' || !payload.token) throw new Error('The local helper returned no launch credential.');
-      setLaunch({ origin: window.location.origin, token: payload.token, retainAudio });
-      setRetainAudioState(retainAudio);
-      setMessage(retainAudio ? 'Local helper ready — saving audio' : 'Authenticated local helper ready');
-    }).catch((error) => {
-      setState('failed');
-      setMessage(error instanceof Error ? error.message : 'Cannot authenticate the local UI');
-    });
-  }, []);
-
   const refreshApplications = useCallback(async () => {
-    if (!launch) return;
+    if (!isLive) return;
     try {
       const response = await authorizedFetch('/v1/ui/capture/applications');
       const catalog = await response.json() as { applications?: Array<{ bundle_id: string; name: string }> };
@@ -227,10 +193,10 @@ export function useVoxInkRecorder() {
     } catch {
       setApplications([]);
     }
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, isLive]);
 
   const refreshDevices = useCallback(async () => {
-    if (!launch) return;
+    if (!isLive) return;
     try {
       const response = await authorizedFetch('/v1/devices');
       const catalog = await response.json() as { devices?: Array<{ uid?: string | null; name: string; default?: boolean }> };
@@ -240,10 +206,10 @@ export function useVoxInkRecorder() {
     } catch {
       setDevices([]);
     }
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, isLive]);
 
   useEffect(() => {
-    if (!launch) return;
+    if (!isLive) return;
     void authorizedFetch('/v1/ui/capture/capabilities')
       .then((response) => response.json())
       .then((payload) => {
@@ -265,10 +231,10 @@ export function useVoxInkRecorder() {
         setSystemAvailable(false);
         setMessage('Cannot read local capture capabilities; native modes are unavailable');
       });
-  }, [authorizedFetch, launch, refreshDevices]);
+  }, [authorizedFetch, isLive, refreshDevices]);
 
   useEffect(() => {
-    if (!launch) return;
+    if (!isLive) return;
     void authorizedFetch('/v1/models')
       .then((response) => response.json())
       .then((payload) => {
@@ -296,7 +262,7 @@ export function useVoxInkRecorder() {
       .catch((error) => {
         setMessage(error instanceof Error ? error.message : 'Cannot read installed local models');
       });
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, isLive]);
 
   useEffect(() => {
     if (state !== 'recording') return;
@@ -370,7 +336,7 @@ export function useVoxInkRecorder() {
   }, [pauseElapsed]);
 
   useEffect(() => {
-    if (!active || !launch) return;
+    if (!active || !isLive) return;
     const generation = sessionGeneration.current;
     let cancelled = false;
     let inFlight = false;
@@ -392,13 +358,13 @@ export function useVoxInkRecorder() {
     const timer = window.setInterval(() => void poll(), 500);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [active, applyNativeStatus, authorizedFetch, launch]);
+  }, [active, applyNativeStatus, authorizedFetch, isLive]);
 
   // Ask once whether diarization can run here. The weights are a separate
   // licence-gated download, so "supported" and "installed" are different
   // questions and the control should not offer what cannot happen.
   useEffect(() => {
-    if (!launch) return;
+    if (!isLive) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -410,24 +376,24 @@ export function useVoxInkRecorder() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, isLive]);
 
   const refreshDiarization = useCallback(async () => {
     const sessionId = diarizedSessionId.current;
     const generation = sessionGeneration.current;
-    if (!launch || !sessionId) return;
+    if (!isLive || !sessionId) return;
     const response = await authorizedFetch(`/v1/sessions/${sessionId}/diarization`);
     const status = await response.json() as DiarizationStatus;
     if (generation === sessionGeneration.current && sessionId === diarizedSessionId.current) {
       setDiarization(parseDiarization(status));
     }
-  }, [authorizedFetch, launch]);
+  }, [authorizedFetch, isLive]);
 
   // Poll only after Stop, and only until the job settles. Nothing here blocks
   // the transcript, which is already complete and on screen.
   useEffect(() => {
     const sessionId = diarizedSessionId.current;
-    if (!launch || !sessionId) return;
+    if (!isLive || !sessionId) return;
     if (state !== 'ready' && state !== 'failed') return;
     if (diarization.state === 'ready' || diarization.state === 'failed') return;
     let cancelled = false;
@@ -441,13 +407,13 @@ export function useVoxInkRecorder() {
     const timer = window.setInterval(() => void poll(), DIARIZATION_POLL_MS);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [diarization.state, launch, refreshDiarization, state]);
+  }, [diarization.state, isLive, refreshDiarization, state]);
 
   const start = useCallback(async () => {
     if (modelSwitching) { setMessage('Wait for the local model to finish changing'); return; }
     if (startPending.current || stopPending.current) return;
     const generation = ++sessionGeneration.current;
-    if (!launch) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
+    if (!isLive) { setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio'); resetElapsed(); beginElapsed(); setCaptions([]); setState('recording'); return; }
     startPending.current = true;
     setActive(false);
     setState('starting'); resetElapsed(); setCaptions([]); nativeCursor.current = 0;
@@ -500,7 +466,7 @@ export function useVoxInkRecorder() {
     } finally {
       if (generation === sessionGeneration.current) startPending.current = false;
     }
-  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, launch, liveDiarization.available, liveSpeakers, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
+  }, [authorizedFetch, beginElapsed, diarizationAvailable, fail, identifySpeakers, language, isLive, liveDiarization.available, liveSpeakers, mode, modelSwitching, partialCaptions, resetElapsed, retainAudio, selectedApplications, selectedDevice, translate, translationAvailable]);
 
   const control = useCallback(async (
     action: 'pause' | 'resume' | 'stop', next: RecorderState, note: string,
@@ -514,7 +480,7 @@ export function useVoxInkRecorder() {
     const generation = sessionGeneration.current;
     if (action !== 'resume') pauseElapsed();
     else beginElapsed();
-    if (!launch) { setState(action === 'stop' ? 'ready' : next); setMessage('Preview ready'); return; }
+    if (!isLive) { setState(action === 'stop' ? 'ready' : next); setMessage('Preview ready'); return; }
     if (action === 'stop') stopPending.current = true;
     setState(action === 'stop' ? 'stopping' : next);
     setMessage(cancellingStart ? 'Cancelling startup…' : action === 'stop' ? 'Finalizing the last utterance…' : note);
@@ -532,7 +498,7 @@ export function useVoxInkRecorder() {
         fail(error);
       }
     }
-  }, [applyNativeStatus, authorizedFetch, beginElapsed, fail, launch, pauseElapsed]);
+  }, [applyNativeStatus, authorizedFetch, beginElapsed, fail, isLive, pauseElapsed]);
 
   const pause = useCallback(() => control('pause', 'paused', 'Session paused'), [control]);
   const resume = useCallback(
@@ -542,7 +508,7 @@ export function useVoxInkRecorder() {
 
   const mark = useCallback(async (label = '') => {
     if (state !== 'recording' && state !== 'paused') return;
-    if (!launch) {
+    if (!isLive) {
       setCaptions((current) => applyFeedEvents(current, [{
         type: 'mark', segment_id: `mark-${Date.now()}`, text: label, start_ms: seconds * 1000, end_ms: seconds * 1000,
       }]));
@@ -558,10 +524,10 @@ export function useVoxInkRecorder() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Cannot mark the transcript');
     }
-  }, [authorizedFetch, launch, seconds, state]);
+  }, [authorizedFetch, isLive, seconds, state]);
 
   const revealFolder = useCallback(async () => {
-    if (!launch) { setMessage('Preview mode — nothing has been saved'); return; }
+    if (!isLive) { setMessage('Preview mode — nothing has been saved'); return; }
     try {
       await authorizedFetch('/v1/ui/actions/reveal', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -570,11 +536,11 @@ export function useVoxInkRecorder() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Cannot open the transcript folder');
     }
-  }, [authorizedFetch, lastSession, launch]);
+  }, [authorizedFetch, lastSession, isLive]);
 
   const nameSpeaker = useCallback(async (speakerId: string, name: string, remember: boolean) => {
     const sessionId = diarizedSessionId.current;
-    if (!launch || !sessionId) return;
+    if (!isLive || !sessionId) return;
     try {
       await authorizedFetch(`/v1/sessions/${sessionId}/speakers/${encodeURIComponent(speakerId)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -585,7 +551,7 @@ export function useVoxInkRecorder() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Cannot name the speaker');
     }
-  }, [authorizedFetch, launch, refreshDiarization]);
+  }, [authorizedFetch, isLive, refreshDiarization]);
 
   const setMode = useCallback((value: CaptureMode) => {
     if (state !== 'ready' && state !== 'failed') return;
@@ -622,12 +588,12 @@ export function useVoxInkRecorder() {
 
   const setLiveSpeakers = useCallback((enabled: boolean) => {
     if (state !== 'ready' && state !== 'failed') return;
-    if (enabled && (!launch || !nativeAvailable || !liveDiarization.available || !mode.startsWith('microphone'))) return;
+    if (enabled && (!isLive || !nativeAvailable || !liveDiarization.available || !mode.startsWith('microphone'))) return;
     setLiveSpeakersState(enabled);
     setMessage(enabled
       ? 'Microphone captions will show provisional speaker labels during recording'
       : 'Live speaker labels are off for the next session');
-  }, [launch, liveDiarization.available, mode, nativeAvailable, state]);
+  }, [isLive, liveDiarization.available, mode, nativeAvailable, state]);
 
   const setTranslate = useCallback((enabled: boolean) => {
     if (state !== 'ready' && state !== 'failed') return;
@@ -647,7 +613,7 @@ export function useVoxInkRecorder() {
   }, [state]);
 
   const selectModel = useCallback(async (modelId: string) => {
-    if (!launch || modelId === activeModel || modelSwitching) return;
+    if (!isLive || modelId === activeModel || modelSwitching) return;
     if (state !== 'ready' && state !== 'failed') return;
     setModelSwitching(true);
     setMessage('Verifying and changing the local model…');
@@ -667,10 +633,11 @@ export function useVoxInkRecorder() {
     } finally {
       setModelSwitching(false);
     }
-  }, [activeModel, authorizedFetch, launch, modelSwitching, state]);
+  }, [activeModel, authorizedFetch, isLive, modelSwitching, state]);
 
   return {
-    state, elapsed, captions, message, isLive: Boolean(launch), mode, setMode,
+    state: connection.failed ? 'failed' as const : state, elapsed, captions,
+    message: message || connection.message, isLive, mode, setMode,
     retainAudio, setRetainAudio,
     identifySpeakers, setIdentifySpeakers, diarizationAvailable, diarization, nameSpeaker,
     liveSpeakers, setLiveSpeakers, liveDiarization,
@@ -680,7 +647,5 @@ export function useVoxInkRecorder() {
     models, activeModel, selectModel, modelSwitching,
     lastSession, revealFolder, mark,
     start, pause, resume, stop,
-    // Other panels reach the helper through the same one-time launch credential.
-    authorizedFetch,
   };
 }

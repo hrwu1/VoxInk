@@ -1,5 +1,6 @@
 'use client';
 
+import { useLocalConnection } from './use-local-connection';
 import { useEffect, useRef, useState } from 'react';
 import { liveSpeakerLabel, sourceLabel } from './caption-feed';
 import {
@@ -138,10 +139,11 @@ function SpeakerNameDialog({ speakerId, current, onClose, onSave }: {
 }
 
 export default function Home() {
-  const recorder = useVoxInkRecorder();
-  const vocabulary = useVocabulary(recorder.authorizedFetch, recorder.isLive);
+  const connection = useLocalConnection();
+  const recorder = useVoxInkRecorder(connection);
+  const vocabulary = useVocabulary(connection.authorizedFetch, connection.isLive);
   const [tab, setTab] = useState<Tab>('record');
-  const grants = useGrants(recorder.authorizedFetch, recorder.isLive, tab === 'agents');
+  const grants = useGrants(connection.authorizedFetch, connection.isLive, tab === 'agents');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [naming, setNaming] = useState<{ speakerId: string; current: string } | null>(null);
   const { state, elapsed, captions, message, isLive } = recorder;

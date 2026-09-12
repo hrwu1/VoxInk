@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import type { AuthorizedFetch } from './local-service';
 
 export type VocabularyCorrection = { misheard: string; correct: string };
 export type VocabularySummary = {
@@ -10,7 +11,6 @@ export type VocabularySummary = {
   biasedTerms: number;
 };
 
-type AuthorizedFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
 const EMPTY_SUMMARY: VocabularySummary = { path: '', terms: [], corrections: [], biasedTerms: 0 };
 

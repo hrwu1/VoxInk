@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import type { AuthorizedFetch } from './local-service';
 
-type AuthorizedFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
 export type Grant = {
   id: string;
@@ -118,9 +118,10 @@ export function useGrants(authorizedFetch: AuthorizedFetch, isLive: boolean, ena
 
   useEffect(() => {
     if (!isLive || !enabled) return;
-    void refresh();
+    let cancelled = false;
+    queueMicrotask(() => { if (!cancelled) void refresh(); });
     const timer = window.setInterval(() => void refresh(), POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [enabled, isLive, refresh]);
 
   const approve = useCallback(async (requestId: string, options: { maxMinutes?: number; singleUse?: boolean; expiresHours?: number }) => {
