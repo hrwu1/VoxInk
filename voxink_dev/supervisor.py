@@ -255,13 +255,24 @@ class HelperSupervisor:
         process = self.process
         if process is None or process.stderr is None:
             return
+        sink = self._open_stderr_log()
 
         def drain(stream: object) -> None:
             try:
                 for line in stream:  # type: ignore[attr-defined]
-                    self._stderr_lines.append(line.rstrip("\n"))
+                    line = line.rstrip("\n")
+                    self._stderr_lines.append(line)
+                    if sink is not None:
+                        try:
+                            sink.write(line + "\n")
+                            sink.flush()
+                        except OSError:
+                            pass
             except (OSError, ValueError):
                 return
+            finally:
+                if sink is not None:
+                    sink.close()
 
         reader = threading.Thread(
             target=drain,
@@ -271,6 +282,28 @@ class HelperSupervisor:
         )
         self._stderr_reader = reader
         reader.start()
+
+    @property
+    def stderr_log_path(self) -> Path | None:
+        """Where the helper's stderr is kept, beside the diagnostics log."""
+        if self.diagnostics is None:
+            return None
+        return self.diagnostics.path.with_suffix(".stderr.log")
+
+    def _open_stderr_log(self):
+        """Persist the helper's stderr so a failure survives the buffer.
+
+        The in-memory tail exists for the startup error message; a service
+        that failed an hour into a recording has long scrolled out of it.
+        """
+        path = self.stderr_log_path
+        if path is None:
+            return None
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            return os.fdopen(descriptor, "a", encoding="utf-8")
+        except OSError:
+            return None
 
     def _stderr_detail(self) -> str:
         reader = self._stderr_reader

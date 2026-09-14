@@ -246,7 +246,37 @@ dependency.
 
 Private operational diagnostics are stored under
 `~/Library/Application Support/VoxInk/logs/`. They contain process state and
-protocol metadata, never transcript text, raw audio, or the launch credential.
+protocol metadata, never transcript text, raw audio, or the launch credential:
+
+- `developer-<stamp>-<pid>.jsonl` and `.stderr.log`: the launcher's view of
+  the service process, and everything the service wrote to stderr.
+- `service-<stamp>-<pid>.jsonl`: stream and helper lifecycle events (a stream
+  opened, released, or rejoined; a grace period expiring; live speakers
+  stopping; the capture helper starting and exiting).
+- `capture-<session>.log`: every status line the capture helper wrote while
+  that session ran, timestamped.
+
+### A recording is never lost
+
+Audio is kept at every layer between the microphone and the transcript:
+
+- **Live speakers is optional.** If the experimental diarizer rejects a frame
+  or its worker dies, the service drops it for that session, tells the client
+  with a `live_speakers_stopped` notice, and keeps transcribing on the same
+  socket. A stream that reopens afterwards is accepted without it.
+- **A dropped socket is not a Stop.** The service holds the session for a
+  60 s grace period; the helper reconnects with exponential backoff for as
+  long as the recording runs, queues the frames captured meanwhile, and
+  replays them in capture order once it is back, so the transcript has no gap.
+- **What cannot be delivered is spooled.** If the queue overflows (about eight
+  minutes), the service has finalized the session, or Stop arrives while the
+  service is unreachable, the helper writes the audio to
+  `<stream>-spool-NNN.wav` beside the transcript and reports `audio_spooled`;
+  the capture status lists these files under `last_session.spooled_audio`.
+  Transcribe one later with `voxink transcribe <file>`.
+- **Degradation is visible.** The menu bar shows the helper's notice under the
+  Live badge and in its menu, the browser shows it as a message, and Stop
+  still finalizes the transcript when the helper itself has died.
 
 ### Live captions, translation, markers, and settings
 

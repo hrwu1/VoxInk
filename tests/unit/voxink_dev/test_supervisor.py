@@ -140,6 +140,34 @@ class SupervisorIntegrationTests(unittest.TestCase):
         self.assertEqual(0, process.returncode)
         self.assertIn("traceback line 19999", supervisor._stderr_detail())
 
+    def test_helper_stderr_is_kept_on_disk_beside_the_diagnostics(self) -> None:
+        """A failure an hour into a recording has scrolled out of the memory tail."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stderr.write('INFO: started\\nERROR: stream failed\\n')"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = DiagnosticLog(Path(temporary) / "logs")
+            supervisor = self._supervisor_for(process)
+            supervisor.diagnostics = diagnostics
+            with patch.object(supervisor, "wait_until_ready", return_value={"protocol_version": 1}):
+                supervisor.start()
+            try:
+                process.wait(timeout=15)
+            finally:
+                supervisor.stop()
+                diagnostics.close()
+            log_path = supervisor.stderr_log_path
+            self.assertEqual(diagnostics.path.with_suffix(".stderr.log"), log_path)
+            self.assertEqual(0o600, log_path.stat().st_mode & 0o777)
+            self.assertEqual(
+                ["INFO: started", "ERROR: stream failed"],
+                log_path.read_text(encoding="utf-8").splitlines(),
+            )
+
     def test_startup_failure_still_reports_the_helper_stderr_detail(self) -> None:
         process = subprocess.Popen(
             [sys.executable, "-c", "import sys; sys.stderr.write('model missing\\n'); sys.exit(3)"],

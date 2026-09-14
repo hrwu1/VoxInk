@@ -76,7 +76,9 @@ def main() -> None:
             speaker_threshold=args.speaker_threshold,
         )
     )
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    # No access log: the UI polls twice a second, and the supervisor now keeps
+    # everything written here on disk. The audit trail records mutations.
+    uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False)
 
 
 if __name__ == "__main__":
