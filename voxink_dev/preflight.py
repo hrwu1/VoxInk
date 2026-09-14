@@ -27,7 +27,7 @@ DEFAULT_NATIVE_CAPTURE = (
 )
 # The portable microphone backend the helper launches where the Swift one is
 # not built. It needs `sounddevice` and captures the microphone only.
-DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "scripts" / "voxink-mic-capture"
+DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "clients" / "python_capture" / "voxink-mic-capture"
 DEFAULT_MENUBAR_APP = (
     PROJECT_ROOT
     / "voxink_menubar"

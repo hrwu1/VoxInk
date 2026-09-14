@@ -20,13 +20,13 @@ Install the optional runtime packages in your environment:
 
 ## Backend contract
 
-`scripts/voxink-mic-capture` and the Swift `voxink-capture` accept the same
+`clients/python_capture/voxink-mic-capture` and the Swift `voxink-capture` accept the same
 command line, so the helper builds one and runs whichever it was given:
 
 ```sh
-./scripts/voxink-mic-capture --list-devices     # uid<TAB>name[<TAB>default]
-./scripts/voxink-mic-capture --list-sources     # one supported source per line
-./scripts/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/ID/stream \
+./clients/python_capture/voxink-mic-capture --list-devices     # uid<TAB>name[<TAB>default]
+./clients/python_capture/voxink-mic-capture --list-sources     # one supported source per line
+./clients/python_capture/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/ID/stream \
     --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio]
 ```
 

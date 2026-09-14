@@ -123,7 +123,7 @@ Every interface records through a capture backend the helper launches. The
 Swift `voxink-capture` (built by `./scripts/build-macos-capture`) serves the
 microphone, all system audio, and selected applications. Where it is not
 built, `voxink-app` says so and the helper launches the portable Python
-backend instead (`scripts/voxink-mic-capture`), which serves the microphone
+backend instead (`clients/python_capture/voxink-mic-capture`), which serves the microphone
 only and needs the capture dependencies:
 
 ```sh
@@ -583,7 +583,7 @@ With the direct service running and the credential still exported, the
 portable backend streams the microphone until Ctrl-C:
 
 ```sh
-./scripts/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/demo/stream --session-id demo
+./clients/python_capture/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/demo/stream --session-id demo
 ```
 
 It accepts the same command line and signals as the Swift `voxink-capture`
