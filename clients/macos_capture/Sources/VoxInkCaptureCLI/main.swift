@@ -14,6 +14,7 @@ private struct Options {
     var backend = SystemAudioBackend.auto
     var microphoneDeviceUID: String?
     var language: String?
+    var spoolDirectory: URL?
 
     static func parse(_ arguments: [String]) throws -> Options {
         var options = Options()
@@ -26,11 +27,12 @@ private struct Options {
             case "--list-devices": options.listDevices = true
             case "--list-sources": options.listSources = true
             case "--retain-audio": options.retainAudio = true
-            case "--app", "--endpoint", "--session-id", "--backend", "--mic-device", "--language":
+            case "--app", "--endpoint", "--session-id", "--backend", "--mic-device", "--language", "--spool-dir":
                 guard index + 1 < arguments.count else { throw CLIError("Missing value after \(arguments[index]).") }
                 let value = arguments[index + 1]
                 switch arguments[index] {
                 case "--app": options.applicationBundleIdentifiers.insert(value)
+                case "--spool-dir": options.spoolDirectory = URL(fileURLWithPath: value)
                 case "--endpoint":
                     guard let url = URL(string: value) else { throw CLIError("Invalid endpoint: \(value)") }
                     options.endpoint = url
@@ -68,6 +70,7 @@ private struct CLIError: LocalizedError {
                       [--endpoint ws://127.0.0.1:8300/v1/sessions/SESSION_ID/stream]
                       [--session-id ID]
                       [--retain-audio]
+                      [--spool-dir DIR]   where audio the service never received is saved
 
     Examples:
       voxink-capture --mic
@@ -140,7 +143,8 @@ private struct VoxInkCaptureCommand {
                 backend: options.backend,
                 microphoneDeviceUID: options.microphoneDeviceUID,
                 language: options.language,
-                applicationNames: applicationNames
+                applicationNames: applicationNames,
+                spoolDirectory: options.spoolDirectory
             )
             // Headless: the helper launches this process and the interfaces
             // draw captions from the helper's status feed.

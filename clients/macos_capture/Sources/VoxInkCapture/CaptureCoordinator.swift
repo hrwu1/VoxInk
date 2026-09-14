@@ -52,6 +52,7 @@ public actor CaptureCoordinator {
             applications: configuration.selectedApplications,
             retainAudio: configuration.retainAudio,
             language: configuration.language,
+            spoolDirectory: configuration.spoolDirectory,
             transcriptHandler: transcriptHandler,
             statusHandler: statusHandler
         )

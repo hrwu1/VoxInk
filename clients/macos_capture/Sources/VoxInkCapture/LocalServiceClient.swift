@@ -135,6 +135,20 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
     private var reconnects = StreamReconnectPolicy()
     private var sendTails = [String: Task<Void, Error>]()
     private var stoppedWaiters = [String: CheckedContinuation<Void, Never>]()
+    /// Where undeliverable audio is spooled; nil derives a per-session
+    /// directory under the user's Application Support.
+    private let spoolDirectory: URL?
+    private let backlogCapacityBytes: Int
+    private var clock = StreamClock()
+    /// Frames waiting for a socket, per stream, oldest first.
+    private var backlogs = [String: AudioBacklog]()
+    private var spools = [String: AudioSpool]()
+    /// Streams whose spool could not be opened or written; reported once.
+    private var spoolFailures = Set<String>()
+
+    /// About eight minutes of 16 kHz mono audio held in memory before the
+    /// oldest of it is written to the spool file.
+    public static let defaultBacklogCapacityBytes = 16 * 1024 * 1024
 
     /// How long a stop waits for the service to acknowledge `stream.stop`. The
     /// service finalizes its last VAD chunk first, so closing the socket early
@@ -147,6 +161,8 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         applications: [String] = [],
         retainAudio: Bool = false,
         language: String? = nil,
+        spoolDirectory: URL? = nil,
+        backlogCapacityBytes: Int = WebSocketAudioFrameSink.defaultBacklogCapacityBytes,
         transcriptHandler: TranscriptHandler? = nil,
         translationHandler: TranslationHandler? = nil,
         statusHandler: StatusHandler? = nil
@@ -157,6 +173,8 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         self.applications = applications
         self.retainAudio = retainAudio
         self.language = language
+        self.spoolDirectory = spoolDirectory
+        self.backlogCapacityBytes = backlogCapacityBytes
         self.transcriptHandler = transcriptHandler
         self.translationHandler = translationHandler
         self.statusHandler = statusHandler
@@ -184,33 +202,193 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         try await task.value
     }
 
-    /// Serializing each header/binary pair is required because the service allows
-    /// exactly one outstanding audio header on a connection.
-    private func sendPair(_ frame: AudioFrame) async throws {
-        let socket = try await socket(for: frame)
+    /// A frame is delivered now, kept for a socket that is coming back, or
+    /// written to the spool. It is never dropped.
+    ///
+    /// Serializing each header/binary pair is required because the service
+    /// allows exactly one outstanding audio header on a connection, and the
+    /// backlog goes first so the session timeline stays in capture order.
+    private func sendPair(_ frame: AudioFrame) async {
+        guard let socket = await socketIfAvailable(for: frame) else {
+            keep(frame)
+            return
+        }
+        var pending = backlogs[frame.streamID]?.drain() ?? []
+        pending.append(frame)
+        for (index, queued) in pending.enumerated() {
+            do {
+                try await deliver(queued, on: socket)
+            } catch {
+                dropSocket(socket, streamID: frame.streamID)
+                for remaining in pending[index...] { keep(remaining) }
+                return
+            }
+        }
+    }
+
+    private func deliver(_ frame: AudioFrame, on socket: URLSessionWebSocketTask) async throws {
         let durationMilliseconds = Double(frame.pcmS16LE.count) / 2.0 / Double(frame.sampleRate) * 1_000.0
         let elapsedNanoseconds = frame.timestampNanoseconds >= sessionStartedNanoseconds
             ? frame.timestampNanoseconds - sessionStartedNanoseconds
             : 0
         let captureMilliseconds = Double(elapsedNanoseconds) / 1_000_000.0
+        let startMilliseconds = clock.startMilliseconds(
+            streamID: frame.streamID,
+            capturedAtMilliseconds: captureMilliseconds,
+            durationMilliseconds: durationMilliseconds
+        )
         let header = AudioFrameHeader(
             sequence: frame.sequence,
             streamID: frame.streamID,
-            startMilliseconds: max(0, captureMilliseconds - durationMilliseconds),
+            startMilliseconds: startMilliseconds,
             durationMilliseconds: durationMilliseconds,
             capturedAtNanoseconds: frame.timestampNanoseconds,
             byteLength: frame.pcmS16LE.count
         )
-        do {
-            try await sendJSON(header, on: socket)
-            try await socket.send(.data(frame.pcmS16LE))
-        } catch {
-            if sockets[frame.streamID] === socket {
-                sockets.removeValue(forKey: frame.streamID)
-                socket.cancel(with: .goingAway, reason: nil)
-            }
-            throw error
+        try await sendJSON(header, on: socket)
+        try await socket.send(.data(frame.pcmS16LE))
+        clock.advance(streamID: frame.streamID, toMilliseconds: startMilliseconds + durationMilliseconds)
+    }
+
+    private func dropSocket(_ socket: URLSessionWebSocketTask, streamID: String) {
+        guard sockets[streamID] === socket else { return }
+        sockets.removeValue(forKey: streamID)
+        socket.cancel(with: .goingAway, reason: nil)
+    }
+
+    /// Hold a frame that could not be delivered: queued for the reconnect,
+    /// or spooled once the queue is full or the session is gone.
+    private func keep(_ frame: AudioFrame) {
+        if reconnects.isDead(frame.streamID) {
+            spool([frame], streamID: frame.streamID)
+            return
         }
+        var backlog = backlogs[frame.streamID] ?? AudioBacklog(capacityBytes: backlogCapacityBytes)
+        let evicted = backlog.append(frame)
+        backlogs[frame.streamID] = backlog
+        spool(evicted, streamID: frame.streamID)
+    }
+
+    private func spoolBacklog(_ streamID: String) {
+        guard var backlog = backlogs[streamID] else { return }
+        let frames = backlog.drain()
+        backlogs[streamID] = backlog
+        spool(frames, streamID: streamID)
+    }
+
+    private func spool(_ frames: [AudioFrame], streamID: String) {
+        guard let first = frames.first, !spoolFailures.contains(streamID) else { return }
+        let spool: AudioSpool
+        if let open = spools[streamID] {
+            spool = open
+        } else {
+            do {
+                spool = try AudioSpool(
+                    directory: resolvedSpoolDirectory(),
+                    streamID: streamID,
+                    sampleRate: first.sampleRate,
+                    channels: first.channels
+                )
+            } catch {
+                spoolFailures.insert(streamID)
+                statusHandler?(CaptureStatusEvent(
+                    sessionID: sessionID ?? first.sessionID,
+                    source: first.source,
+                    level: .error,
+                    code: "audio_spool_failed",
+                    message: "Stream \(streamID) cannot reach the service and its spool file could not be created (\(error.localizedDescription)); audio is being lost."
+                ))
+                return
+            }
+            spools[streamID] = spool
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID ?? first.sessionID,
+                source: first.source,
+                level: .warning,
+                code: "audio_spooled",
+                message: "Stream \(streamID) cannot reach the service; its audio is being saved to \(spool.url.path) and is not in the live transcript."
+            ))
+        }
+        do {
+            for frame in frames { try spool.append(frame.pcmS16LE) }
+        } catch {
+            spoolFailures.insert(streamID)
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID ?? first.sessionID,
+                source: first.source,
+                level: .error,
+                code: "audio_spool_failed",
+                message: "Stream \(streamID) could not write to \(spool.url.path) (\(error.localizedDescription)); audio is being lost."
+            ))
+        }
+    }
+
+    private func resolvedSpoolDirectory() -> URL {
+        if let spoolDirectory { return spoolDirectory }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return support
+            .appendingPathComponent("VoxInk", isDirectory: true)
+            .appendingPathComponent("spool", isDirectory: true)
+            .appendingPathComponent(sessionID ?? "session", isDirectory: true)
+    }
+
+    /// Deliver what is still queued at Stop, opening a socket if the service
+    /// is back, and spool whatever cannot go.
+    private func settleBacklogs() async {
+        for streamID in backlogs.keys.sorted() {
+            guard var backlog = backlogs[streamID], !backlog.isEmpty else { continue }
+            let frames = backlog.drain()
+            backlogs[streamID] = backlog
+            var socket = sockets[streamID]
+            if socket == nil, let first = frames.first {
+                socket = await socketIfAvailable(for: first)
+            }
+            guard let socket else {
+                spool(frames, streamID: streamID)
+                continue
+            }
+            for (index, frame) in frames.enumerated() {
+                do {
+                    try await deliver(frame, on: socket)
+                } catch {
+                    dropSocket(socket, streamID: streamID)
+                    spool(Array(frames[index...]), streamID: streamID)
+                    break
+                }
+            }
+        }
+        backlogs.removeAll()
+    }
+
+    private func closeSpools() {
+        for (streamID, spool) in spools.sorted(by: { $0.key < $1.key }) {
+            let seconds = spool.durationSeconds
+            do {
+                try spool.close()
+            } catch {
+                statusHandler?(CaptureStatusEvent(
+                    sessionID: sessionID ?? "unknown",
+                    source: nil,
+                    level: .error,
+                    code: "audio_spool_failed",
+                    message: "Spool \(spool.url.path) could not be finalized (\(error.localizedDescription)); its header may be stale."
+                ))
+                continue
+            }
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID ?? "unknown",
+                source: nil,
+                level: .warning,
+                code: "audio_spooled",
+                message: "Stream \(streamID): \(String(format: "%.1f", seconds)) s of audio never reached the service and were saved to \(spool.url.path). Transcribe it with: voxink transcribe \(spool.url.path)"
+            ))
+        }
+        spools.removeAll()
+    }
+
+    private func uptimeSeconds() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
     }
 
     /// Capture diagnostics are local events, not service protocol messages.
@@ -245,6 +423,8 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         // Let queued audio finish rather than cancelling it: the tail of a
         // session is exactly the part a user is still waiting to read.
         await drainPendingSends()
+        await settleBacklogs()
+        closeSpools()
         let atMilliseconds = elapsedMilliseconds()
         for (streamID, socket) in sockets {
             let stop = StreamStopEnvelope(streamID: streamID, atMilliseconds: atMilliseconds)
@@ -290,36 +470,29 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
         stoppedWaiters.removeValue(forKey: streamID)?.resume()
     }
 
-    private func socket(for frame: AudioFrame) async throws -> URLSessionWebSocketTask {
+    /// The stream's socket, opening one when the policy allows an attempt
+    /// now. Nil means the frame must be kept: the stream is backing off from
+    /// a failed attempt, the attempt just failed, or the session is gone.
+    private func socketIfAvailable(for frame: AudioFrame) async -> URLSessionWebSocketTask? {
         if let socket = sockets[frame.streamID] { return socket }
-        guard let session, let sessionID else { throw URLError(.notConnectedToInternet) }
-        switch reconnects.socketNeeded(for: frame.streamID) {
+        guard let session, let sessionID else { return nil }
+        switch reconnects.socketNeeded(for: frame.streamID, now: uptimeSeconds()) {
         case .connect:
             break
-        case .reconnect(let attempt, let limit):
+        case .reconnect(let attempt):
             statusHandler?(CaptureStatusEvent(
                 sessionID: sessionID,
                 source: frame.source,
                 level: .warning,
                 code: "service_reconnecting",
-                message: "Reconnecting stream \(frame.streamID) to the service (attempt \(attempt) of \(limit)); the recording continues."
+                message: "Reconnecting stream \(frame.streamID) to the service (attempt \(attempt)); audio is kept until it is back."
             ))
-        case .abandon:
-            statusHandler?(CaptureStatusEvent(
-                sessionID: sessionID,
-                source: frame.source,
-                level: .error,
-                code: "stream_abandoned",
-                message: "Stream \(frame.streamID) could not be reconnected to the service after \(reconnects.maximumConsecutiveReconnects) attempts; its audio is no longer being recorded. Stop and start again."
-            ))
-            throw CaptureError.streamAbandoned(frame.streamID)
-        case .dead:
-            throw CaptureError.streamAbandoned(frame.streamID)
+        case .wait, .dead:
+            return nil
         }
         var request = URLRequest(url: endpoint)
         if let authToken { request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization") }
         let task = session.webSocketTask(with: request)
-        sockets[frame.streamID] = task
         task.resume()
         let start = StreamStartEnvelope(
             sessionID: sessionID,
@@ -339,7 +512,21 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
             channelName: frame.channelName,
             language: language
         )
-        try await sendJSON(start, on: task)
+        do {
+            try await sendJSON(start, on: task)
+        } catch {
+            task.cancel(with: .goingAway, reason: nil)
+            let delay = reconnects.attemptFailed(frame.streamID, now: uptimeSeconds())
+            statusHandler?(CaptureStatusEvent(
+                sessionID: sessionID,
+                source: frame.source,
+                level: .warning,
+                code: "service_unreachable",
+                message: "Stream \(frame.streamID) could not reach the service (\(error.localizedDescription)); trying again in \(String(format: "%.2g", delay)) s, audio is kept meanwhile."
+            ))
+            return nil
+        }
+        sockets[frame.streamID] = task
         Task { [weak self, task] in await self?.receiveLoop(task: task, streamID: frame.streamID) }
         return task
     }
@@ -373,13 +560,17 @@ public actor WebSocketAudioFrameSink: AudioFrameSink {
                     }
                 } else if let response = try? decoder.decode(ErrorResponse.self, from: data), response.type == "error" {
                     if response.code == "session_unavailable" {
-                        // The session is finalized; a reconnect would only be refused again.
+                        // The session is finalized; a reconnect would only be
+                        // refused again. What is queued goes to the spool now.
                         reconnects.sessionUnavailable(streamID)
+                        spoolBacklog(streamID)
                     }
+                    // Live speakers giving up is not a recording problem.
+                    let level: CaptureStatusEvent.Level = response.code == "live_speakers_stopped" ? .warning : .error
                     statusHandler?(CaptureStatusEvent(
                         sessionID: sessionID ?? "unknown",
                         source: nil,
-                        level: .error,
+                        level: level,
                         code: response.code ?? "service_error",
                         message: response.message ?? "The transcription service reported an error."
                     ))

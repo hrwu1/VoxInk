@@ -38,6 +38,9 @@ public struct CaptureConfiguration: Sendable {
     /// Display names for selected applications, keyed by bundle identifier,
     /// so a per-application stream can be labeled the way the user knows it.
     public var applicationNames: [String: String]
+    /// Where audio the service never received is written as WAV files; nil
+    /// keeps it under the user's Application Support directory.
+    public var spoolDirectory: URL?
 
     /// Bundle identifiers this session captures, empty for microphone-only or
     /// all-system capture. Every stream reports the same list so whichever one
@@ -58,7 +61,8 @@ public struct CaptureConfiguration: Sendable {
         backend: SystemAudioBackend = .auto,
         microphoneDeviceUID: String? = nil,
         language: String? = nil,
-        applicationNames: [String: String] = [:]
+        applicationNames: [String: String] = [:],
+        spoolDirectory: URL? = nil
     ) {
         self.sessionID = sessionID
         self.microphoneEnabled = microphoneEnabled
@@ -69,6 +73,7 @@ public struct CaptureConfiguration: Sendable {
         self.microphoneDeviceUID = microphoneDeviceUID
         self.language = language
         self.applicationNames = applicationNames
+        self.spoolDirectory = spoolDirectory
         let safeSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
         self.serviceURL = serviceURL ?? URL(string: "ws://127.0.0.1:8300/v1/sessions/\(safeSessionID)/stream")!
         self.authToken = authToken
@@ -153,7 +158,6 @@ public enum CaptureError: LocalizedError {
     case audioFormatUnavailable(String)
     case conversionFailed
     case tapUnavailable(String)
-    case streamAbandoned(String)
 
     public var errorDescription: String? {
         switch self {
@@ -177,8 +181,6 @@ public enum CaptureError: LocalizedError {
             return "AVAudioConverter could not normalize an audio frame."
         case .tapUnavailable(let detail):
             return "System audio could not be tapped: \(detail)"
-        case .streamAbandoned(let streamID):
-            return "Stream \(streamID) is no longer connected to the service; its audio is not being recorded."
         }
     }
 }
@@ -188,50 +190,66 @@ public enum CaptureError: LocalizedError {
 /// The first time is an ordinary connect. After that the socket died under a
 /// live stream, and reopening it is a reconnect the user must hear about: the
 /// service holds the session open for a grace period, so a prompt reconnect
-/// keeps the recording whole, but one that keeps failing must stop trying
-/// rather than reopen a socket on every 20 ms frame. A service that says the
-/// session is unavailable has already finalized it; nothing sent afterwards
-/// would be kept, so the stream is dead from then on.
+/// keeps the recording whole. A reconnect that fails is retried with
+/// exponential backoff for as long as the recording runs, never abandoned:
+/// the frames captured meanwhile are queued, and a service that is gone for
+/// good costs a spool file, not the recording. Only a service that says the
+/// session is unavailable ends the stream, because it has finalized the
+/// session and would keep nothing sent afterwards.
 public struct StreamReconnectPolicy: Sendable {
     public enum Decision: Equatable, Sendable {
         case connect
-        case reconnect(attempt: Int, limit: Int)
-        /// The budget ran out just now; report it once.
-        case abandon
-        /// Already abandoned or refused; drop the frame silently.
+        /// Try now; `attempt` is one more than the consecutive failures so far.
+        case reconnect(attempt: Int)
+        /// Still backing off from the last failure; keep the frame for later.
+        case wait(seconds: Double)
+        /// The session is finalized; nothing sent would be kept.
         case dead
     }
 
-    public let maximumConsecutiveReconnects: Int
+    public let initialDelaySeconds: Double
+    public let maximumDelaySeconds: Double
     private var started = Set<String>()
-    private var attempts = [String: Int]()
+    private var reconnecting = Set<String>()
+    private var failures = [String: Int]()
+    private var notBefore = [String: Double]()
     private var dead = Set<String>()
 
-    public init(maximumConsecutiveReconnects: Int = 3) {
-        self.maximumConsecutiveReconnects = maximumConsecutiveReconnects
+    public init(initialDelaySeconds: Double = 0.25, maximumDelaySeconds: Double = 5) {
+        self.initialDelaySeconds = initialDelaySeconds
+        self.maximumDelaySeconds = maximumDelaySeconds
     }
 
-    /// Called when a frame arrives for a stream with no socket.
-    public mutating func socketNeeded(for streamID: String) -> Decision {
+    /// Called when a frame arrives for a stream with no socket. `now` is a
+    /// monotonic clock in seconds, the same one `attemptFailed` was given.
+    public mutating func socketNeeded(for streamID: String, now: Double) -> Decision {
         if dead.contains(streamID) { return .dead }
         if !started.contains(streamID) {
             started.insert(streamID)
             return .connect
         }
-        let attempt = (attempts[streamID] ?? 0) + 1
-        if attempt > maximumConsecutiveReconnects {
-            dead.insert(streamID)
-            return .abandon
+        if let earliest = notBefore[streamID], now < earliest {
+            return .wait(seconds: earliest - now)
         }
-        attempts[streamID] = attempt
-        return .reconnect(attempt: attempt, limit: maximumConsecutiveReconnects)
+        reconnecting.insert(streamID)
+        return .reconnect(attempt: (failures[streamID] ?? 0) + 1)
+    }
+
+    /// The socket could not be opened or `stream.start` not sent. Returns
+    /// how long to wait before the next attempt.
+    public mutating func attemptFailed(_ streamID: String, now: Double) -> Double {
+        let count = (failures[streamID] ?? 0) + 1
+        failures[streamID] = count
+        let delay = min(initialDelaySeconds * pow(2.0, Double(count - 1)), maximumDelaySeconds)
+        notBefore[streamID] = now + delay
+        return delay
     }
 
     /// The service accepted the stream. Returns whether this closed a reconnect.
     public mutating func streamReady(_ streamID: String) -> Bool {
-        let reconnected = (attempts[streamID] ?? 0) > 0
-        attempts[streamID] = 0
-        return reconnected
+        failures[streamID] = nil
+        notBefore[streamID] = nil
+        return reconnecting.remove(streamID) != nil
     }
 
     /// The service refused the stream because its session is gone.

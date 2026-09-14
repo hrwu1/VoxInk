@@ -52,38 +52,49 @@ final class SessionIdentifierTests: XCTestCase {
 
 final class StreamReconnectPolicyTests: XCTestCase {
     func testFirstSocketIsAPlainConnectAndLaterOnesAreReportedReconnects() {
-        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 3)
-        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
+        var policy = StreamReconnectPolicy()
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1", now: 0))
         XCTAssertFalse(policy.streamReady("microphone-1"))
-        XCTAssertEqual(.reconnect(attempt: 1, limit: 3), policy.socketNeeded(for: "microphone-1"))
+        XCTAssertEqual(.reconnect(attempt: 1), policy.socketNeeded(for: "microphone-1", now: 1))
         XCTAssertTrue(policy.streamReady("microphone-1"))
+        XCTAssertFalse(policy.streamReady("microphone-1"))
     }
 
-    func testAnAcceptedReconnectResetsTheBudget() {
-        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 2)
-        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1"))
-        XCTAssertEqual(.reconnect(attempt: 1, limit: 2), policy.socketNeeded(for: "system-1"))
-        XCTAssertEqual(.reconnect(attempt: 2, limit: 2), policy.socketNeeded(for: "system-1"))
-        XCTAssertTrue(policy.streamReady("system-1"))
-        XCTAssertEqual(.reconnect(attempt: 1, limit: 2), policy.socketNeeded(for: "system-1"))
+    func testFailedAttemptsBackOffExponentiallyUpToTheCap() {
+        var policy = StreamReconnectPolicy(initialDelaySeconds: 0.25, maximumDelaySeconds: 1)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1", now: 0))
+        XCTAssertEqual(0.25, policy.attemptFailed("system-1", now: 0))
+        XCTAssertEqual(.wait(seconds: 0.15), policy.socketNeeded(for: "system-1", now: 0.1))
+        XCTAssertEqual(.reconnect(attempt: 2), policy.socketNeeded(for: "system-1", now: 0.25))
+        XCTAssertEqual(0.5, policy.attemptFailed("system-1", now: 0.25))
+        XCTAssertEqual(.reconnect(attempt: 3), policy.socketNeeded(for: "system-1", now: 0.75))
+        XCTAssertEqual(1, policy.attemptFailed("system-1", now: 0.75))
+        XCTAssertEqual(.reconnect(attempt: 4), policy.socketNeeded(for: "system-1", now: 1.75))
+        // Capped: the fourth failure waits no longer than the third.
+        XCTAssertEqual(1, policy.attemptFailed("system-1", now: 1.75))
+        XCTAssertFalse(policy.isDead("system-1"))
     }
 
-    func testAnExhaustedBudgetAbandonsOnceThenDropsSilently() {
-        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 1)
-        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
-        XCTAssertEqual(.reconnect(attempt: 1, limit: 1), policy.socketNeeded(for: "microphone-1"))
-        XCTAssertEqual(.abandon, policy.socketNeeded(for: "microphone-1"))
-        XCTAssertEqual(.dead, policy.socketNeeded(for: "microphone-1"))
-        XCTAssertTrue(policy.isDead("microphone-1"))
+    func testAnAcceptedStreamResetsTheBackoff() {
+        var policy = StreamReconnectPolicy(initialDelaySeconds: 0.25, maximumDelaySeconds: 5)
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1", now: 0))
+        _ = policy.attemptFailed("microphone-1", now: 0)
+        _ = policy.attemptFailed("microphone-1", now: 1)
+        XCTAssertEqual(.reconnect(attempt: 3), policy.socketNeeded(for: "microphone-1", now: 10))
+        XCTAssertTrue(policy.streamReady("microphone-1"))
+        // The socket dies again later: the first retry is immediate and counts from one.
+        XCTAssertEqual(.reconnect(attempt: 1), policy.socketNeeded(for: "microphone-1", now: 20))
+        XCTAssertEqual(0.25, policy.attemptFailed("microphone-1", now: 20))
     }
 
-    func testARefusedSessionKillsTheStreamWithoutSpendingTheBudget() {
-        var policy = StreamReconnectPolicy(maximumConsecutiveReconnects: 3)
-        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1"))
+    func testARefusedSessionKillsTheStreamOnly() {
+        var policy = StreamReconnectPolicy()
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "microphone-1", now: 0))
         policy.sessionUnavailable("microphone-1")
-        XCTAssertEqual(.dead, policy.socketNeeded(for: "microphone-1"))
+        XCTAssertEqual(.dead, policy.socketNeeded(for: "microphone-1", now: 1))
+        XCTAssertTrue(policy.isDead("microphone-1"))
         // Other streams of the same session are judged on their own.
-        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1"))
+        XCTAssertEqual(.connect, policy.socketNeeded(for: "system-1", now: 1))
     }
 }
 
