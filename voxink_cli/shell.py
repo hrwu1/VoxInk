@@ -6,7 +6,7 @@ own. Bare `start`, `pause`, `resume`, `stop`, `mark`, and `status` expand to
 their `capture` commands. Captions from the helper's status feed print between
 prompts, whichever surface started the capture.
 
-The shell never starts a helper. `voxink-dev --cli` starts one and opens the
+The shell never starts a helper. `voxink-app --cli` starts one and opens the
 shell with `--stop-on-exit`, so quitting ends the capture along with the
 helper; a shell opened by hand against a running helper leaves the capture
 running when it exits.

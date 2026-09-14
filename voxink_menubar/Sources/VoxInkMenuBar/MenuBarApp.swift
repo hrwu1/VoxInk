@@ -7,7 +7,7 @@ import VoxInkCapture
 // browser uses. It never captures audio itself: it asks the helper to start
 // the native capture process, polls the caption feed, shows the floating
 // panel, and offers a push-to-talk hotkey that pastes what was said into the
-// front application. Launched by `voxink-dev`, which supplies the
+// front application. Launched by `voxink-app`, which supplies the
 // helper's address and credential in the environment.
 
 private struct Environment {
@@ -795,7 +795,7 @@ private struct VoxInkMenuBarApp {
     static func main() {
         guard let environment = Environment.load() else {
             FileHandle.standardError.write(Data(
-                "voxink-menubar must be launched by voxink-dev (VOXINK_SERVICE_URL and VOXINK_AUTH_SECRET are required).\n".utf8
+                "voxink-menubar must be launched by voxink-app (VOXINK_SERVICE_URL and VOXINK_AUTH_SECRET are required).\n".utf8
             ))
             exit(2)
         }

@@ -152,7 +152,7 @@ export default function Home() {
   const selectedModel = recorder.models.find((model) => model.id === recorder.activeModel);
   const usesMicrophone = recorder.mode.startsWith('microphone');
   const liveSpeakerHint = !isLive
-    ? 'Connect with ./scripts/voxink-dev to use live speakers'
+    ? 'Connect with ./scripts/voxink-app to use live speakers'
     : !recorder.nativeAvailable
       ? 'Native microphone capture is unavailable'
       : !usesMicrophone

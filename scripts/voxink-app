@@ -1,4 +1,8 @@
 #!/bin/sh
+# Run VoxInk on a source checkout: preflight, start the helper, publish the
+# control endpoint, open the menu bar, browser, or shell, and stop the helper on
+# exit. This is the signed application's role until that application exists;
+# the public `voxink` command only talks to the helper this starts.
 set -eu
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

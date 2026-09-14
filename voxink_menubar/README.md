@@ -1,7 +1,7 @@
 # VoxInk menu-bar application
 
 `voxink-menubar` is a control surface over the helper's HTTP API, the native
-sibling of the `voxink` command and the MCP server. `voxink-dev` launches it as
+sibling of the `voxink` command and the MCP server. `voxink-app` launches it as
 its default interface with `VOXINK_SERVICE_URL`, `VOXINK_AUTH_SECRET`, and
 `VOXINK_OUTPUT_ROOT` in its environment.
 
@@ -26,7 +26,7 @@ swift test --package-path voxink_menubar
 ```
 
 The development bundle lands in `voxink_menubar/.build/VoxInkMenuBarDev.app`,
-which is where `voxink-dev` looks for it.
+which is where `voxink-app` looks for it.
 
 ## Floating caption panel
 

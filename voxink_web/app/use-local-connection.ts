@@ -15,7 +15,7 @@ export type LocalConnection = {
 export function useLocalConnection(): LocalConnection {
   const [token, setToken] = useState<string | null>(null);
   const [retainAudio, setRetainAudio] = useState(true);
-  const [message, setMessage] = useState('Open through voxink-dev to connect');
+  const [message, setMessage] = useState('Open through voxink-app to connect');
   const [failed, setFailed] = useState(false);
   // Reuse the one-time exchange if React replays the mount effect in development.
   const bootstrapRequest = useRef<Promise<{ token: string; retainAudio: boolean }> | null>(null);
@@ -30,7 +30,7 @@ export function useLocalConnection(): LocalConnection {
       bootstrapRequest.current = fetch('/v1/ui/bootstrap', {
         method: 'POST', headers: { 'X-VoxInk-Bootstrap': bootstrap }, cache: 'no-store',
       }).then(async (response) => {
-        if (!response.ok) throw new Error('The UI launch link expired. Run voxink-dev again.');
+        if (!response.ok) throw new Error('The UI launch link expired. Run voxink-app again.');
         const payload = (await response.json()) as { token?: unknown };
         if (typeof payload.token !== 'string' || !payload.token) throw new Error('The local helper returned no launch credential.');
         return { token: payload.token, retainAudio };

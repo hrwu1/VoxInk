@@ -95,7 +95,7 @@ def load(path: Path | None = None, *, state_root: Path | None = None) -> Control
         document = json.loads(resolved.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise EndpointUnavailable(
-            "No VoxInk helper is running. Start one with: ./scripts/voxink-dev"
+            "No VoxInk helper is running. Start one with: ./scripts/voxink-app"
         ) from None
     except (OSError, json.JSONDecodeError) as exc:
         raise EndpointUnavailable(f"The local control endpoint is unreadable: {exc}") from exc

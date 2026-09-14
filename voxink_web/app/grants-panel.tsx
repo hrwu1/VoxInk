@@ -53,7 +53,7 @@ export function GrantsPanel({ grants, isLive }: { grants: Grants; isLive: boolea
           <p className="grants-empty">
             {isLive
               ? 'No agent is waiting. A request appears here when an agent runs `voxink permissions request` or a tool returns approval_required.'
-              : 'Launch through voxink-dev to manage agent access.'}
+              : 'Launch through voxink-app to manage agent access.'}
           </p>
         ) : grants.requests.map((request) => {
           const draft = approving[request.id] ?? { maxMinutes: request.maxDurationS ? String(Math.ceil(request.maxDurationS / 60)) : '', singleUse: false };

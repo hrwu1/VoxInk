@@ -60,15 +60,15 @@ so `swift test` fails there with `no such module 'XCTest'`.
 List the currently running applications through the repository launcher:
 
 ```sh
-./scripts/voxink-dev --list-apps
+./scripts/voxink-app --list-apps
 ```
 
 Capture examples:
 
 ```sh
-./scripts/voxink-dev --source microphone
-./scripts/voxink-dev --source system
-./scripts/voxink-dev --source microphone --source applications \
+./scripts/voxink-app --source microphone
+./scripts/voxink-app --source system
+./scripts/voxink-app --source microphone --source applications \
   --app us.zoom.xos --app com.apple.Safari
 ```
 

@@ -513,7 +513,7 @@ The public interface must preserve the existing product boundaries:
   lifecycle, credentials, permissions, and recovery.
 - Agents cannot obtain sensitive permissions merely by invoking the CLI.
 
-The existing `scripts/voxink-dev`, Python capture client, and Swift capture CLI
+The existing `scripts/voxink-app`, Python capture client, and Swift capture CLI
 remain development and diagnostic tools. They are not the public contract.
 
 ### 14.2 Shared control architecture
@@ -561,7 +561,7 @@ the current process layout:
 | `voxink config` | Read schemas and validated settings and update permitted settings. |
 | `voxink diagnostics` | Read sanitized state and produce a privacy-reviewed diagnostic bundle. |
 | `voxink permissions` | Inspect pending requests and existing agent grants and revoke grants. |
-| `voxink shell` | The command as an interactive Terminal interface: each typed line is a `voxink` command line, captions print between prompts. `voxink-dev --cli` opens it. |
+| `voxink shell` | The command as an interactive Terminal interface: each typed line is a `voxink` command line, captions print between prompts. `voxink-app --cli` opens it. |
 
 The first implementation slice includes capability/readiness discovery,
 capture input discovery, the complete capture lifecycle, session and artifact
@@ -796,7 +796,7 @@ Deferred rather than in a priority tier.
 
 Confirmed by reading the tree and running the checks on 2026-09-02:
 
-- A one-command workflow through `./scripts/voxink-dev`, which starts the
+- A one-command workflow through `./scripts/voxink-app`, which starts the
   menu-bar application by default, the browser workflow through `--web`, and a
   public `./scripts/voxink` command.
 - System audio through Core Audio process taps, with ScreenCaptureKit as the

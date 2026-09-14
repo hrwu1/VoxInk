@@ -198,7 +198,7 @@ def _doctor(args: argparse.Namespace, client: ControlClient) -> Result:
             "helper",
             health.get("status") == "ok",
             f"Helper answers at {client.endpoint.base_url}.",
-            "The helper is reachable but unhealthy. Restart it: ./scripts/voxink-dev",
+            "The helper is reachable but unhealthy. Restart it: ./scripts/voxink-app",
         )
     )
     capture = client.capture_capabilities()
@@ -1055,7 +1055,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument(
         "--stop-on-exit",
         action="store_true",
-        help="stop an open capture when the shell exits (voxink-dev sets this)",
+        help="stop an open capture when the shell exits (voxink-app sets this)",
     )
     shell.set_defaults(handler=_shell, command="shell")
 

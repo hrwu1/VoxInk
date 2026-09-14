@@ -37,7 +37,7 @@ export function VocabularyPanel({ vocabulary, isLive }: VocabularyPanelProps) {
         <p className="vocabulary-message" role="status">
           {isLive
             ? message || 'One term per line. Use “misheard => Correct” to fix a word VoxInk keeps getting wrong.'
-            : 'Preview mode — launch with ./scripts/voxink-dev to edit your vocabulary.'}
+            : 'Preview mode — launch with ./scripts/voxink-app to edit your vocabulary.'}
         </p>
 
         <div className="vocabulary-actions">

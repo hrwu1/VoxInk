@@ -74,7 +74,7 @@ class ControlEndpointTests(unittest.TestCase):
         with self.assertRaises(EndpointUnavailable) as caught:
             load(self.path)
 
-        self.assertIn("voxink-dev", str(caught.exception))
+        self.assertIn("voxink-app", str(caught.exception))
 
     def test_an_unreadable_endpoint_is_reported_rather_than_raising_json_errors(self) -> None:
         self.path.parent.mkdir(parents=True)

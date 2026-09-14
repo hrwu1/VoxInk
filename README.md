@@ -62,7 +62,7 @@ the complete local workflow with:
 
 ```sh
 ./scripts/build-macos-menubar
-./scripts/voxink-dev --device cpu
+./scripts/voxink-app --device cpu
 ```
 
 The command verifies the Python environment and local model checksums, checks
@@ -79,7 +79,7 @@ audio only to the supervised loopback helper, displays finalized captions, and
 removes its one-time launch token from the browser address immediately.
 
 ```sh
-./scripts/voxink-dev --web --device cpu
+./scripts/voxink-app --web --device cpu
 ```
 
 The browser's **Capture mode** menu supports microphone, all system audio,
@@ -91,7 +91,7 @@ For selected-application capture, open the target app, choose it from the list,
 and press **Refresh** if it was opened after VoxInk. Start, pause, resume, and
 stop work from the same browser controls for every mode.
 
-For the installed Diart experiment, restart `./scripts/voxink-dev`, choose a
+For the installed Diart experiment, restart `./scripts/voxink-app`, choose a
 mode that includes the microphone, enable **Live speakers (experimental)**,
 and press **Start recording**. The checkbox is off by default. Wait for model
 loading, then speak normally; **Speaker 1**, **Speaker 2**, overlap, and
@@ -106,7 +106,7 @@ For typed controls in the launching Terminal, select the CLI interface
 explicitly:
 
 ```sh
-./scripts/voxink-dev --cli --device cpu
+./scripts/voxink-app --cli --device cpu
 ```
 
 This opens the `voxink shell`: every line you type is a `voxink` command
@@ -122,7 +122,7 @@ capture running when it exits.
 Every interface records through a capture backend the helper launches. The
 Swift `voxink-capture` (built by `./scripts/build-macos-capture`) serves the
 microphone, all system audio, and selected applications. Where it is not
-built, `voxink-dev` says so and the helper launches the portable Python
+built, `voxink-app` says so and the helper launches the portable Python
 backend instead (`scripts/voxink-mic-capture`), which serves the microphone
 only and needs the capture dependencies:
 
@@ -141,9 +141,9 @@ parts beside the transcript. Use `--no-retain-audio` to start either interface
 with retention disabled:
 
 ```sh
-./scripts/voxink-dev
-./scripts/voxink-dev --cli
-./scripts/voxink-dev --no-retain-audio
+./scripts/voxink-app
+./scripts/voxink-app --cli
+./scripts/voxink-app --no-retain-audio
 ```
 
 Microphone and system audio are saved as separate tracks so their sources stay
@@ -182,7 +182,7 @@ is sent with every chunk of audio, so a very long list costs recognition speed.
 Use a file somewhere else with:
 
 ```sh
-./scripts/voxink-dev --vocabulary ~/Documents/work-terms.txt
+./scripts/voxink-app --vocabulary ~/Documents/work-terms.txt
 ```
 
 The browser console edits the same file under its **Vocabulary** tab, so a text
@@ -204,24 +204,24 @@ changes:
 This creates a background-only development app with the stable identity macOS
 uses for Microphone and Screen & System Audio Recording permissions.
 
-Then the same `voxink-dev` supervisor can run every native source combination:
+Then the same `voxink-app` supervisor can run every native source combination:
 
 ```sh
 # Show bundle identifiers for currently running applications.
-./scripts/voxink-dev --list-apps
+./scripts/voxink-app --list-apps
 
 # All system audio.
-./scripts/voxink-dev --source system
+./scripts/voxink-app --source system
 
 # Microphone and all system audio together.
-./scripts/voxink-dev --source microphone --source system
+./scripts/voxink-app --source microphone --source system
 
 # One or more selected applications.
-./scripts/voxink-dev --source applications \
+./scripts/voxink-app --source applications \
   --app com.apple.Safari --app us.zoom.xos
 
 # Microphone and selected applications together.
-./scripts/voxink-dev --source microphone --source applications \
+./scripts/voxink-app --source microphone --source applications \
   --app com.apple.Safari
 ```
 
@@ -229,7 +229,7 @@ Naming sources on the command line selects the CLI shell, the one interface
 that takes its sources from the flags; the menu bar and the browser choose
 theirs from their own controls. Every route records through the helper, which
 launches the capture backend; the floating caption panel belongs to the
-menu-bar app, and the shell prints captions as lines. `voxink-dev` supplies
+menu-bar app, and the shell prints captions as lines. `voxink-app` supplies
 the private loopback endpoint and per-launch credential, monitors the helper,
 and shuts everything down on Ctrl-C. macOS requests Microphone and/or Screen &
 System Audio Recording permission when each protected source is first used.
@@ -237,7 +237,7 @@ System Audio Recording permission when each protected source is first used.
 Run only the startup checks with:
 
 ```sh
-./scripts/voxink-dev --preflight-only
+./scripts/voxink-app --preflight-only
 ```
 
 The checks match the capture backend the helper will launch: the Swift build
@@ -325,10 +325,10 @@ labels. Turn it off with `--no-echo-suppression`.
 ```sh
 ./scripts/build-macos-capture
 ./scripts/build-macos-menubar
-./scripts/voxink-dev
+./scripts/voxink-app
 ```
 
-This is what `voxink-dev` runs by default; `--menubar` asks for it explicitly,
+This is what `voxink-app` runs by default; `--menubar` asks for it explicitly,
 which reports the missing build instead of falling back to the browser. The
 app is its own Swift package in `voxink_menubar/`, a control surface beside
 `voxink_cli` and `voxink_mcp`; it depends on the capture package only for the
@@ -431,7 +431,7 @@ agent's next step is to have the owner approve it and call
 
 ## Scripting and agents: the `voxink` command
 
-`scripts/voxink-dev` is the interactive launcher. `scripts/voxink` is the
+`scripts/voxink-app` is the interactive launcher. `scripts/voxink` is the
 public command for scripts and AI agents: it is a thin client of the running
 helper's local control API, so it never re-implements capture, transcription,
 persistence, or model management, and it never scans the transcript folder
@@ -440,7 +440,7 @@ itself. `PROJECT_SPEC.md` section 14 is the full contract.
 Start a helper in one Terminal, then use `voxink` from another:
 
 ```sh
-./scripts/voxink-dev                 # publishes a private control endpoint
+./scripts/voxink-app                 # publishes a private control endpoint
 ./scripts/voxink status
 ```
 
@@ -550,7 +550,7 @@ that reconnects with `--after` resumes without replaying or skipping events.
 
 ## Direct service debugging
 
-Normal use should go through `scripts/voxink-dev`. For protocol debugging, set
+Normal use should go through `scripts/voxink-app`. For protocol debugging, set
 a temporary credential before starting the helper directly:
 
 ```sh
@@ -656,7 +656,7 @@ The optional local `Qwen3-ASR-0.6B` profile uses the same provider and remains
 offline. The 1.7B profile remains the default; select the smaller model with:
 
 ```sh
-./scripts/voxink-dev --model models/Qwen3-ASR-0.6B --device auto
+./scripts/voxink-app --model models/Qwen3-ASR-0.6B --device auto
 ```
 
 When both model packages are installed, the browser control surface also lists

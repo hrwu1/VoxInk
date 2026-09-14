@@ -438,7 +438,7 @@ export function useVoxInkRecorder(connection: LocalConnection) {
         type: 'status', source: 'command', generation, nowMs: performance.now(),
         status: { state: 'recording', session_id: null, next_cursor: 0 },
       });
-      setMessage('Preview mode — launch with ./scripts/voxink-dev for live audio');
+      setMessage('Preview mode — launch with ./scripts/voxink-app for live audio');
       return;
     }
     // Speakers are only findable in audio that was kept, so the two travel
