@@ -174,6 +174,12 @@ public final class FloatingCaptionPanelController {
         model.status = status
     }
 
+    /// A degraded-recording line shown under the header; nil clears it.
+    public func setNotice(_ notice: String?) {
+        model.notice = notice
+        if notice != nil { wake() }
+    }
+
     /// Latest audio level per source; the meter hides sources that are nil.
     public func setLevels(_ levels: CaptionLevels) {
         model.levels = levels
@@ -367,6 +373,8 @@ final class CaptionPanelModel: ObservableObject {
     /// Whether the panel is showing its idle bubble instead of the stream.
     @Published var collapsed = false
     @Published var levels = CaptionLevels()
+    /// The helper's degraded-recording line, if any.
+    @Published var notice: String?
     var onHide: (() -> Void)?
     var onExpand: (() -> Void)?
     var onMark: (() -> Void)?
@@ -474,6 +482,9 @@ private struct FloatingCaptionView: View {
     private var panelBody: some View {
         VStack(spacing: 0) {
             header
+            if let notice = model.notice {
+                NoticeRow(text: notice)
+            }
             CaptionStream(model: model, fontSize: fontSize)
         }
         .background(ZStack { HUDBackground(); Color.black.opacity(0.28) })
@@ -517,6 +528,27 @@ private struct FloatingCaptionView: View {
         .padding(.trailing, 10)
         .padding(.top, 9)
         .padding(.bottom, 5)
+    }
+}
+
+/// One amber line under the header: the recording is running but degraded.
+private struct NoticeRow: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10, weight: .semibold))
+            Text(text)
+                .font(.system(size: 11))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Palette.mark)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 

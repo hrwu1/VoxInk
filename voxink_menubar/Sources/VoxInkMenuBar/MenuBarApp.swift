@@ -74,11 +74,13 @@ private struct StatusView: Decodable {
     let events: [FeedEvent]
     let nextCursor: Int
     let error: String?
+    /// The helper's latest status line (`code: message`) while it runs.
+    let notice: String?
     let levels: [String: Double]?
     let liveDiarization: LiveDiarizationView?
 
     enum CodingKeys: String, CodingKey {
-        case state, events, error, levels
+        case state, events, error, notice, levels
         case sessionID = "session_id"
         case nextCursor = "next_cursor"
         case liveDiarization = "live_diarization"
@@ -181,6 +183,8 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         set { defaults.set(newValue, forKey: "liveSpeakers") }
     }
     private var liveDiarization = LiveDiarizationView()
+    /// A degraded-recording line from the helper, shown until it clears.
+    private var helperNotice: String?
     private var readingCapabilities = false
     private var pollTimer: Timer?
     private var cursor = 0
@@ -261,6 +265,11 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         }
         if let line = liveSpeakerStatusLine() {
             let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        if let helperNotice {
+            let item = NSMenuItem(title: helperNotice, action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
@@ -428,6 +437,8 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         defer { commandInFlight = false }
         state = "starting"
         lastError = nil
+        helperNotice = nil
+        captionPanel.setNotice(nil)
         refreshStatusButton()
         captionPanel.clear()
         syncPanelStatus()
@@ -566,6 +577,11 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         cursor = view.nextCursor
         if let live = view.liveDiarization { liveDiarization = live }
         captionPanel.setLevels(CaptionLevels(microphone: view.levels?["microphone"], system: view.levels?["system"]))
+        let notice = HelperNotice.line(from: view.notice)
+        if notice != helperNotice {
+            helperNotice = notice
+            captionPanel.setNotice(notice)
+        }
         if view.state != state {
             state = view.state
             if state == "ready" || state == "failed" { startedAt = nil }
