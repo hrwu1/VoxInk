@@ -182,9 +182,11 @@ class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.output_root = Path(self.temporary.name) / "outputs"
+        self.state_root = Path(self.temporary.name) / "state"
         self.provider = FakeProvider()
         app = create_app(
-            ServiceSettings(output_root=self.output_root), provider=self.provider
+            ServiceSettings(output_root=self.output_root, state_root=self.state_root),
+            provider=self.provider,
         )
         self.client = TestClient(app)
 
@@ -345,6 +347,9 @@ class ApiTests(unittest.TestCase):
                 self.assertIn("com.apple.Safari", command)
                 self.assertIn("--retain-audio", command)
                 self.assertNotIn("--system-all", command)
+                # Undeliverable audio is spooled beside the transcript.
+                spool = command[command.index("--spool-dir") + 1]
+                self.assertEqual(str(self.output_root / started.json()["session_id"]), spool)
 
                 self.assertEqual(200, client.post("/v1/ui/capture/pause", headers=headers).status_code)
                 process.send_signal.assert_called_with(signal.SIGUSR1)
@@ -354,6 +359,61 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(200, stopped.status_code, stopped.text)
                 self.assertEqual("ready", stopped.json()["state"])
                 process.send_signal.assert_called_with(signal.SIGINT)
+
+    def test_stop_finalizes_a_session_whose_helper_died_and_lists_spooled_audio(self) -> None:
+        """A dead helper must not turn Stop into an error that leaves the session open."""
+        executable = Path(self.temporary.name) / "voxink-capture"
+        executable.touch()
+        executable.chmod(0o755)
+        process = MagicMock()
+        process.pid = 4242
+        process.returncode = 0
+        process.stderr = None
+        process.poll.return_value = None
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                state_root=self.state_root,
+                auth_secret="ui-secret",
+                native_capture_path=executable,
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with patch("services.transcription.app.subprocess.Popen", return_value=process):
+            with TestClient(app) as client:
+                started = client.post(
+                    "/v1/ui/capture/start", headers=headers,
+                    json={"sources": ["microphone"], "retain_audio": False},
+                )
+                self.assertEqual(200, started.status_code, started.text)
+                session_id = started.json()["session_id"]
+                with client.websocket_connect(f"/v1/sessions/{session_id}/stream", headers=headers) as websocket:
+                    websocket.send_json(_start_message(session_id, "microphone"))
+                    self.assertEqual("stream.ready", websocket.receive_json()["type"])
+                    _utterance(websocket, "microphone", 0)
+                # The socket dropped without a stream.stop: the session is held.
+                self.assertEqual("running", client.get(f"/v1/sessions/{session_id}", headers=headers).json()["state"])
+                self.assertIn(session_id, app.state.runtime.stream_grace_timers)
+                (self.output_root / session_id / "microphone-1-spool-000001.wav").write_bytes(b"RIFF")
+                process.poll.return_value = 1
+                stopped = client.post("/v1/ui/capture/stop", headers=headers)
+                self.assertEqual(200, stopped.status_code, stopped.text)
+                self.assertEqual("ready", stopped.json()["state"])
+                self.assertEqual(
+                    ["microphone-1-spool-000001.wav"], stopped.json()["last_session"]["spooled_audio"]
+                )
+                self.assertEqual("stopped", client.get(f"/v1/sessions/{session_id}", headers=headers).json()["state"])
+                self.assertNotIn(session_id, app.state.runtime.stream_grace_timers)
+                process.send_signal.assert_not_called()
+        transcript = (self.output_root / session_id / "transcript-part-001.md").read_text(encoding="utf-8")
+        self.assertIn("voxink-part-status: complete", transcript)
+        events = [
+            json.loads(line)
+            for path in (self.state_root / "logs").glob("service-*.jsonl")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("capture.stopped_without_helper", [event["event"] for event in events])
 
     def test_capture_start_treats_every_source_combination_alike(self) -> None:
         """One rule: each requested source adds its flag, and nothing else."""
@@ -1315,10 +1375,13 @@ class StreamDisconnectTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.output_root = Path(self.temporary.name) / "outputs"
+        self.state_root = Path(self.temporary.name) / "state"
         self.provider = FakeProvider()
         self.grace = 0.4
         self.app = create_app(
-            ServiceSettings(output_root=self.output_root, stream_grace_seconds=self.grace),
+            ServiceSettings(
+                output_root=self.output_root, state_root=self.state_root, stream_grace_seconds=self.grace
+            ),
             provider=self.provider,
         )
         self.client = TestClient(self.app)
@@ -1358,6 +1421,24 @@ class StreamDisconnectTests(unittest.TestCase):
         self.assertEqual("stopped", self._state("dropped"))
         self.assertNotIn("dropped", self.runtime.stream_grace_timers)
         self.assertIn("voxink-part-status: complete", self._transcript("dropped"))
+
+    def test_stream_lifecycle_is_persisted_for_diagnosis(self) -> None:
+        with self.client.websocket_connect("/v1/sessions/logged/stream") as websocket:
+            self.assertEqual("stream.ready", self._start(websocket, "logged")["type"])
+            _utterance(websocket, "microphone", 0)
+        self._wait_until_stopped("logged")
+        logs = list((self.state_root / "logs").glob("service-*.jsonl"))
+        self.assertEqual(1, len(logs), logs)
+        self.assertEqual(0o600, logs[0].stat().st_mode & 0o777)
+        events = [json.loads(line) for line in logs[0].read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(
+            ["stream.opened", "stream.released", "session.finalized_after_grace"],
+            [event["event"] for event in events],
+        )
+        self.assertEqual("disconnect", events[1]["reason"])
+        self.assertTrue(all(event["session_id"] == "logged" for event in events))
+        for event in events:
+            self.assertNotIn("text", event)
 
     def test_a_rejoining_stream_keeps_the_session_and_its_transcript(self) -> None:
         with self.client.websocket_connect("/v1/sessions/rejoin/stream") as first:
@@ -1454,6 +1535,7 @@ class StreamDisconnectTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
+        self.runtime.native_session_id = "helper"
         _start_native_stderr_reader(self.runtime, process)
         process.wait(timeout=10)
         self.runtime.native_stderr_reader.join(timeout=5)
@@ -1461,6 +1543,14 @@ class StreamDisconnectTests(unittest.TestCase):
             "service_reconnecting: Reconnecting stream microphone-1 (attempt 1 of 3)",
             self.runtime.native_notice,
         )
+        # Every line the helper wrote is kept, so a degraded recording can be
+        # explained after the helper has exited.
+        capture_log = self.state_root / "logs" / "capture-helper.log"
+        self.assertEqual(0o600, capture_log.stat().st_mode & 0o777)
+        lines = capture_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(2, len(lines), lines)
+        self.assertTrue(lines[0].endswith("service_reconnecting: Reconnecting stream microphone-1 (attempt 1 of 3)"))
+        self.assertTrue(lines[1].endswith("Traceback (most recent call last):"))
         self.runtime.native_process = process
         self.assertEqual(
             self.runtime.native_notice, _native_capture_view(self.runtime, after=0)["notice"]

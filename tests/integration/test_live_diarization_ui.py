@@ -26,6 +26,7 @@ from tests.integration.test_transcription_service import (
     ScriptedProvider,
     _send_frame,
     _start_message,
+    _utterance,
 )
 
 
@@ -257,18 +258,23 @@ class LiveDiarizationUiTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_initial_invalid_microphone_format_closes_pending_worker(self) -> None:
+    def test_initial_invalid_microphone_format_records_without_live_speakers(self) -> None:
+        # Live speakers is an extra; a stream it cannot use is still recorded.
         session_id = self.start_session()
         with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as websocket:
             start = _start_message(session_id, "microphone")
             start["audio"]["sample_rate_hz"] = 48000
             websocket.send_json(start)
-            self.assertEqual(websocket.receive_json()["code"], "invalid_message")
+            self.assertEqual(websocket.receive_json()["type"], "stream.ready")
+            self.assertEqual(_send_frame(websocket, "microphone", VOICED, 0)["type"], "audio.accepted")
         self.assertTrue(self.bridge.closed)
         self.assertEqual(self.runtime.live_diarizers, {})
-        self.assertEqual(self.provider.calls, 0)
+        self.assertEqual(self.bridge.feeds, [])
+        status = self.client.get("/v1/ui/capture/status").json()["live_diarization"]
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("16 kHz", status["error"])
 
-    def test_rejected_second_microphone_stream_preserves_active_worker(self) -> None:
+    def test_a_second_microphone_stream_joins_without_live_speakers(self) -> None:
         session_id = self.start_session()
         with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as first:
             first.send_json(_start_message(session_id, "microphone"))
@@ -277,13 +283,56 @@ class LiveDiarizationUiTests(unittest.TestCase):
                 start = _start_message(session_id, "microphone")
                 start["stream_id"] = "microphone-2"
                 second.send_json(start)
-                self.assertEqual(second.receive_json()["code"], "invalid_message")
-            self.assertFalse(self.bridge.closed)
-            _live_frame(first, VOICED, 0)
+                self.assertEqual(second.receive_json()["type"], "stream.ready")
+                self.assertFalse(self.bridge.closed)
+                _live_frame(first, VOICED, 0)
+                second.send_json({
+                    "type": "audio.frame", "sequence": 0, "stream_id": "microphone-2",
+                    "start_ms": 0, "duration_ms": 20, "byte_length": len(VOICED),
+                })
+                second.send_bytes(VOICED)
+                self.assertEqual(second.receive_json()["type"], "audio.accepted")
+            # Only the stream that owns the worker fed it.
             self.assertEqual(self.bridge.feeds, [(VOICED, 0)])
             first.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 20})
             _until(first, "stream.stopped")
         self.assertTrue(self.bridge.closed)
+
+    def test_a_rejected_frame_keeps_the_recording_and_accepts_a_rejoin(self) -> None:
+        # What happened on 2026-09-14: an audio overload made one frame's clock
+        # step back, the worker refused it, and the whole recording was lost.
+        self.bridge.feed_error = ValueError("audio timestamps overlap or moved backwards")
+        session_id = self.start_session()
+        with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as first:
+            first.send_json(_start_message(session_id, "microphone"))
+            self.assertEqual(first.receive_json()["type"], "stream.ready")
+            message = _send_frame(first, "microphone", VOICED, 0)
+            self.assertEqual(message["type"], "error")
+            self.assertEqual(message["code"], "live_speakers_stopped")
+            self.assertIn("moved backwards", message["message"])
+            # The same frame went on through the plain path on the same socket.
+            self.assertEqual(first.receive_json()["type"], "audio.accepted")
+            responses = [_send_frame(first, "microphone", SILENCE, start) for start in (20, 40)]
+            self.assertIn("transcript.final", [item["type"] for item in responses])
+            # The helper reopens the same stream on a new socket: accepted,
+            # recording on, live speakers simply absent.
+            with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as second:
+                second.send_json(_start_message(session_id, "microphone"))
+                self.assertEqual(second.receive_json()["type"], "stream.ready")
+                responses = _utterance(second, "microphone", 1000)
+                self.assertIn("transcript.final", [item["type"] for item in responses])
+                second.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 1060})
+                _until(second, "stream.stopped")
+        status = self.client.get("/v1/ui/capture/status").json()["live_diarization"]
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("moved backwards", status["error"])
+        self.assertTrue(self.bridge.closed)
+        self.assertEqual(self.bridge.feeds, [(VOICED, 0)])
+        self.assertEqual(self.provider.calls, 2)
+        text = self.transcript(session_id)
+        self.assertIn("First participant begins.", text)
+        self.assertIn("A brief reply.", text)
+        self.assertIn("voxink-part-status: complete", text)
 
     def test_helper_exit_before_stream_connects_closes_pending_worker(self) -> None:
         self.start_session()
@@ -433,7 +482,7 @@ class LiveDiarizationUiTests(unittest.TestCase):
             websocket.send_json({"type": "stream.stop", "stream_id": "microphone-1", "at_ms": 60})
             _until(websocket, "stream.stopped")
 
-    def test_worker_failure_is_visible_and_does_not_transcribe_without_labels(self) -> None:
+    def test_worker_failure_is_visible_and_the_recording_continues_without_labels(self) -> None:
         self.bridge.feed_error = RuntimeError("Diart worker exited unexpectedly")
         session_id = self.start_session()
         with self.client.websocket_connect(f"/v1/sessions/{session_id}/stream") as websocket:
@@ -441,12 +490,17 @@ class LiveDiarizationUiTests(unittest.TestCase):
             websocket.receive_json()
             message = _send_frame(websocket, "microphone", VOICED, 0)
             self.assertEqual(message["type"], "error")
+            self.assertEqual(message["code"], "live_speakers_stopped")
             self.assertIn("Diart worker exited", message["message"])
+            self.assertEqual(websocket.receive_json()["type"], "audio.accepted")
+            responses = [_send_frame(websocket, "microphone", SILENCE, start) for start in (20, 40)]
+            self.assertIn("transcript.final", [item["type"] for item in responses])
         status = self.client.get("/v1/ui/capture/status").json()["live_diarization"]
         self.assertEqual(status["state"], "failed")
         self.assertIn("Diart worker exited", status["error"])
         self.assertTrue(self.bridge.closed)
-        self.assertEqual(self.provider.calls, 0)
+        self.assertEqual(self.provider.calls, 1)
+        self.assertIn("First participant begins.", self.transcript(session_id))
 
     def test_disconnect_closes_the_session_worker(self) -> None:
         session_id = self.start_session()

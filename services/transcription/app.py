@@ -67,6 +67,7 @@ from voxink_core.translation import QwenLocalTranslator, TranslationProvider, ot
 from voxink_core.vocabulary import MAX_FILE_BYTES, Vocabulary, VocabularyFile
 from .authorization import AccessPolicy, Principal, authorized, principal_for, capture_scopes, CAPTURE_SCOPES
 from .capture_state import CaptureState
+from .diagnostics import ServiceDiagnostics
 from voxink_core.diarization.diart_runtime import DEFAULT_RUNTIME
 from services.transcription.diart_bridge import DiartBridge, LiveTurn, availability as diart_availability
 
@@ -127,7 +128,9 @@ class ServiceSettings:
     # How long a session stays open after its last stream disconnects without
     # a stream.stop, so a helper whose socket dropped can rejoin. A recording
     # must not be finalized, and diarized, over a transient socket failure.
-    stream_grace_seconds: float = 15.0
+    # The helper retries with backoff and queues audio meanwhile, so this only
+    # needs to outlast a service that is briefly wedged, not a fast reconnect.
+    stream_grace_seconds: float = 60.0
     # Local instruct model used to translate finalized segments. Optional:
     # absent, translation is reported unavailable and never requested.
     translation_model_path: Path | None = PROJECT_ROOT / "models" / "Qwen3-0.6B"
@@ -385,6 +388,9 @@ class ServiceRuntime:
         self.grants = GrantStore(settings.state_root / GRANTS_FILENAME)
         self.access = AccessPolicy(self.grants, settings.auth_secret)
         self.audit = AuditLog(settings.state_root / AUDIT_FILENAME)
+        # Stream and helper lifecycle, persisted so a recording that degraded
+        # can be explained after the processes involved are gone.
+        self.diagnostics = ServiceDiagnostics(settings.state_root / "logs")
         # The grant that started the running capture, and the timer that ends
         # it when the grant's maximum duration is reached.
         self.capture_grant: Grant | None = None
@@ -747,7 +753,9 @@ def create_app(
             raise HTTPException(status_code=503, detail="local helper port is unavailable")
         endpoint = f"ws://127.0.0.1:{port}/v1/sessions/{session_id}/stream"
         command = [
-            str(executable), "--endpoint", endpoint, "--session-id", session_id
+            str(executable), "--endpoint", endpoint, "--session-id", session_id,
+            # Audio the helper cannot deliver is spooled beside the transcript.
+            "--spool-dir", str(runtime.settings.output_root / session_id),
         ]
         if options.retain_audio:
             command.append("--retain-audio")
@@ -808,6 +816,10 @@ def create_app(
             raise HTTPException(status_code=503, detail=f"cannot start native capture: {exc}") from exc
         runtime.native_process = process
         runtime.native_session_id = session_id
+        runtime.diagnostics.event(
+            "capture.helper_started", session_id=session_id, pid=process.pid,
+            sources=[s.value for s in sources], live_speakers=options.live_diarization,
+        )
         runtime.capture_grant = grant
         if grant is not None:
             if grant.single_use:
@@ -915,6 +927,27 @@ def create_app(
         process = runtime.native_process
         if process is None or process.poll() is not None:
             runtime.native_capture_state = "ready"
+            session_id = runtime.native_session_id
+            if action == "stop" and session_id is not None and _session_is_open(runtime, session_id):
+                # The helper died under a running session. Stop still has to
+                # close the transcript and commit the audio now, not after the
+                # grace timer, and must not answer with an error.
+                if process is not None:
+                    _read_native_error(runtime, process)
+                with runtime.stream_lock:
+                    _cancel_stream_grace(runtime, session_id)
+                    runtime.active_streams.pop(session_id, None)
+                    runtime.paused_streams.pop(session_id, None)
+                _stop_abandoned_session(runtime, session_id)
+                runtime.diagnostics.event(
+                    "capture.stopped_without_helper", session_id=session_id,
+                    exit_code=process.returncode if process is not None else None,
+                )
+                runtime.audit.record(
+                    "capture.stop", client=principal.name, result="ok",
+                    request_id=http.headers.get("x-voxink-request-id"), session_id=session_id,
+                )
+                return _native_capture_view(runtime, after=0, include_events=runtime.access.may_read_transcripts(http))
             raise HTTPException(status_code=409, detail="no native capture session is running")
         if action == "pause":
             process.send_signal(signal.SIGUSR1)
@@ -1492,13 +1525,9 @@ def create_app(
                         continue
                     _record_audio(runtime, session_id, context, pending_header, pcm)
                     _note_level(runtime, context, pcm)
-                    if context.live_diarizer is not None:
-                        if "start_ms" not in pending_header:
-                            raise ValueError("live speakers requires source timestamps on every frame")
-                        turns = await context.live_diarizer.feed(
-                            pcm, round(float(pending_header["start_ms"])), sequence=pending_header.get("sequence"),
-                        )
-                        await _send_diart_turns(websocket, runtime, context, turns)
+                    if context.live_diarizer is not None and await _feed_live_speakers(
+                        websocket, runtime, context, pending_header, pcm
+                    ):
                         await websocket.send_json({"type": "audio.accepted", "sequence": pending_header.get("sequence")})
                     elif pending_header["type"] == "audio.frame":
                         context.anchor_to(pending_header)
@@ -1730,17 +1759,31 @@ def _open_stream(
         partial_interval_s=runtime.settings.partial_interval_ms / 1000.0,
     )
     if source is Source.MICROPHONE and runtime.live_diarization_session_id == session_id:
+        # Live speakers is an optional extra. Whatever state it is in, the
+        # microphone stream is accepted: a stream refused here is a recording
+        # lost, and that must never be the price of a failed experiment.
         audio = control.get("audio", {})
         if (context.sample_rate != 16000 or int(audio.get("channels", 1)) != 1
                 or audio.get("encoding", "pcm_s16le") != "pcm_s16le"):
-            raise ValueError("live speakers requires mono 16 kHz pcm_s16le audio")
+            _close_live_diarization(
+                runtime, session_id,
+                error="live speakers requires mono 16 kHz pcm_s16le audio; recording continues without it",
+            )
         bridge = runtime.live_diarizers.get(session_id)
-        if bridge is None or runtime.live_diarization_state == "failed":
-            raise ValueError("live speakers is unavailable for this session; start a new recording")
-        if any(getattr(active, "live_diarizer", None) is bridge
-               for active in runtime.active_streams.get(session_id, {}).values()):
-            raise ValueError("live speakers already has a microphone stream")
-        context.live_diarizer = bridge
+        if bridge is not None and runtime.live_diarization_state != "failed":
+            holders = [
+                active for active in runtime.active_streams.get(session_id, {}).values()
+                if getattr(active, "live_diarizer", None) is bridge
+            ]
+            if not holders:
+                context.live_diarizer = bridge
+            elif all(active.stream_id == stream_id for active in holders):
+                # The same stream rejoining before its dead connection finished
+                # cleaning up: the bridge moves to the live connection, and the
+                # stale context must no longer close it on the way out.
+                for active in holders:
+                    active.live_diarizer = None
+                context.live_diarizer = bridge
     with runtime.stream_lock:
         _ensure_started_session(
             runtime,
@@ -1750,6 +1793,7 @@ def _open_stream(
             applications=_stream_applications(control),
             retention=_stream_retention(control),
         )
+        rejoined = session_id in runtime.stream_grace_timers
         _cancel_stream_grace(runtime, session_id)
         runtime.active_streams.setdefault(session_id, {})[stream_id] = context
         runtime.paused_streams.setdefault(session_id, set()).discard(stream_id)
@@ -1757,6 +1801,10 @@ def _open_stream(
         runtime.stream_ends.pop((session_id, stream_id), None)
         if context.live_diarizer is not None:
             runtime.live_diarization_state = "running"
+    runtime.diagnostics.event(
+        "stream.opened", session_id=session_id, stream_id=stream_id, source=source.value,
+        live_speakers=context.live_diarizer is not None, rejoined=rejoined,
+    )
     return context
 
 
@@ -2142,6 +2190,11 @@ def _native_capture_view(
     if process is not None and exit_code is not None and runtime.native_capture_state != "ready":
         runtime.native_capture_state = "ready" if exit_code == 0 else "failed"
         _read_native_error(runtime, process)
+        runtime.diagnostics.event(
+            "capture.helper_exited", level="info" if exit_code == 0 else "error",
+            session_id=runtime.native_session_id, pid=process.pid, exit_code=exit_code,
+            error=runtime.native_error,
+        )
         if not runtime.active_streams.get(runtime.native_session_id or ""):
             _close_live_diarization(runtime, runtime.native_session_id or "")
     session_id = runtime.native_session_id
@@ -2212,7 +2265,67 @@ def _last_session_view(runtime: ServiceRuntime) -> dict[str, Any] | None:
         "transcript_parts": sorted(
             path.name for path in directory.glob("transcript-part-[0-9][0-9][0-9].md")
         ) if directory.is_dir() else [],
+        # Audio the helper could not deliver live; it is not in the transcript.
+        "spooled_audio": _spooled_audio(runtime, session_id),
     }
+
+
+def _spooled_audio(runtime: ServiceRuntime, session_id: str) -> list[str]:
+    """Names of the helper's spool files beside a session's transcript."""
+    directory = _session_directory(runtime, session_id)
+    if not directory.is_dir():
+        return []
+    return sorted(path.name for path in directory.glob("*-spool-*.wav"))
+
+
+def _session_is_open(runtime: ServiceRuntime, session_id: str) -> bool:
+    try:
+        session = runtime.sessions.get(session_id)
+    except KeyError:
+        return False
+    return session.state in {SessionState.RUNNING, SessionState.PAUSED}
+
+
+async def _feed_live_speakers(
+    websocket: WebSocket,
+    runtime: ServiceRuntime,
+    context: _StreamContext,
+    header: dict[str, Any],
+    pcm: bytes,
+) -> bool:
+    """Run one frame through live speakers; return False once it has given up.
+
+    The diarizer is an optional layer over a recording that is already on
+    disk. When it rejects a frame (the capture clock stepped back after an
+    audio overload) or its worker dies, it is closed, the client is told, and
+    the same frame continues through the plain transcription path so neither
+    the socket nor the utterance in progress is lost.
+    """
+    diarizer = context.live_diarizer
+    if diarizer is None:
+        return False
+    try:
+        if "start_ms" not in header:
+            raise ValueError("live speakers requires source timestamps on every frame")
+        turns = await diarizer.feed(
+            pcm, round(float(header["start_ms"])), sequence=header.get("sequence"),
+        )
+        await _send_diart_turns(websocket, runtime, context, turns)
+        return True
+    except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
+        context.live_diarizer = None
+        context.cancel_partial()
+        _close_live_diarization(runtime, context.session_id, error=str(exc))
+        runtime.diagnostics.event(
+            "live_speakers.stopped", level="warning", session_id=context.session_id,
+            stream_id=context.stream_id, error=str(exc),
+        )
+        await websocket.send_json({
+            "type": "error",
+            "code": "live_speakers_stopped",
+            "message": f"Live speakers stopped ({exc}); the recording continues without speaker labels.",
+        })
+        return False
 
 
 def _retention_view(runtime: ServiceRuntime, session_id: str | None) -> dict[str, Any]:
@@ -2264,6 +2377,11 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
     if runtime.native_process is process:
         runtime.native_capture_state = "ready" if process.returncode == 0 else "failed"
         _read_native_error(runtime, process)
+        runtime.diagnostics.event(
+            "capture.helper_stopped", session_id=session_id, pid=process.pid,
+            exit_code=process.returncode, error=runtime.native_error,
+            spooled_audio=_spooled_audio(runtime, session_id) if session_id else [],
+        )
     _close_live_diarization(runtime, session_id or "")
 
 
@@ -2279,18 +2397,22 @@ def _start_native_stderr_reader(
     stream = process.stderr
     if stream is None:
         return
+    capture_log = runtime.diagnostics.capture_log(runtime.native_session_id or "unknown")
 
     def drain() -> None:
         try:
             for line in stream:
                 line = line.rstrip("\n")
                 runtime.native_stderr.append(line)
+                capture_log.write(line)
                 # Status lines are `code: message`; anything else is a crash
                 # trace the exit path reports instead.
                 if _NOTICE_LINE.match(line):
                     runtime.native_notice = line
         except (OSError, ValueError):
             return
+        finally:
+            capture_log.close()
 
     reader = threading.Thread(target=drain, name="voxink-native-stderr", daemon=True)
     runtime.native_stderr_reader = reader
@@ -2466,6 +2588,11 @@ def _release_stream(
         paused = runtime.paused_streams.get(session_id)
         if paused is not None:
             paused.discard(context.stream_id)
+        runtime.diagnostics.event(
+            "stream.released", level="info" if not graceful else "warning",
+            session_id=session_id, stream_id=context.stream_id,
+            reason="stop" if not graceful else "disconnect", remaining=len(streams),
+        )
         if streams:
             return True
         runtime.active_streams.pop(session_id, None)
@@ -2492,6 +2619,10 @@ def _expire_stream_grace(
         del runtime.stream_grace_timers[session_id]
         if runtime.active_streams.get(session_id):
             return
+        runtime.diagnostics.event(
+            "session.finalized_after_grace", level="warning", session_id=session_id,
+            grace_seconds=runtime.settings.stream_grace_seconds,
+        )
         _stop_abandoned_session(runtime, session_id)
 
 
