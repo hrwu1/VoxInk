@@ -28,6 +28,9 @@ DEFAULT_NATIVE_CAPTURE = (
 # The portable microphone backend the helper launches where the Swift one is
 # not built. It needs `sounddevice` and captures the microphone only.
 DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "clients" / "python_capture" / "voxink-mic-capture"
+# The native Windows backend: microphone, system audio, and applications,
+# launched on Windows in place of the Swift helper.
+DEFAULT_WINDOWS_CAPTURE = PROJECT_ROOT / "clients" / "windows_capture" / "voxink-windows-capture.cmd"
 DEFAULT_MENUBAR_APP = (
     PROJECT_ROOT
     / "voxink_menubar"
@@ -38,12 +41,17 @@ DEFAULT_MENUBAR_APP = (
     / "voxink-menubar"
 )
 DEFAULT_OUTPUT_ROOT = Path.home() / "Documents" / "VoxInk"
-DEFAULT_STATE_ROOT = Path.home() / "Library" / "Application Support" / "VoxInk"
+DEFAULT_STATE_ROOT = (
+    Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "VoxInk"
+    if sys.platform == "win32"
+    else Path.home() / "Library" / "Application Support" / "VoxInk"
+)
 MIN_FREE_BYTES = 512 * 1024 * 1024
 MIN_AUDIO_FREE_BYTES = 2 * 1024 * 1024 * 1024
 
 SERVICE_IMPORTS = ("fastapi", "uvicorn", "websockets", "torch", "qwen_asr")
 MICROPHONE_IMPORTS = ("sounddevice",)
+WINDOWS_CAPTURE_IMPORTS = ("sounddevice", "numpy", "comtypes", "pycaw", "psutil")
 
 
 class PreflightError(RuntimeError):
@@ -65,6 +73,8 @@ class PreflightOptions:
     verify_checksums: bool = True
     # True when `native_capture` is the portable Python backend.
     python_capture: bool = True
+    # True when `native_capture` is the native Windows backend.
+    windows_capture: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +104,12 @@ def run_preflight(
     required_imports = list(SERVICE_IMPORTS)
     if "microphone" in options.sources and options.python_capture:
         required_imports.extend(MICROPHONE_IMPORTS)
+    if options.windows_capture:
+        required_imports.extend(WINDOWS_CAPTURE_IMPORTS)
     missing = [name for name in required_imports if not available(name)]
     if missing:
-        requirements = "requirements-capture.txt" if set(missing) & set(MICROPHONE_IMPORTS) else "requirements.txt"
+        capture_imports = set(MICROPHONE_IMPORTS) | set(WINDOWS_CAPTURE_IMPORTS)
+        requirements = "requirements-capture.txt" if set(missing) & capture_imports else "requirements.txt"
         failures.append(
             f"Missing Python dependencies: {', '.join(missing)}. Install {requirements} "
             "in the active Python 3.12 environment."

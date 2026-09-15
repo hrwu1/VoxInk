@@ -360,6 +360,42 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual("ready", stopped.json()["state"])
                 process.send_signal.assert_called_with(signal.SIGINT)
 
+    def test_on_windows_the_backend_is_driven_through_its_stdin(self) -> None:
+        """Windows cannot signal another process, so the control lines go down a pipe."""
+        executable = Path(self.temporary.name) / "voxink-windows-capture.cmd"
+        executable.touch()
+        executable.chmod(0o755)
+        process = MagicMock()
+        process.pid = 1234
+        process.returncode = 0
+        process.stderr = None
+        process.poll.return_value = None
+        app = create_app(
+            ServiceSettings(
+                output_root=self.output_root,
+                auth_secret="ui-secret",
+                native_capture_path=executable,
+            ),
+            provider=self.provider,
+        )
+        headers = {"Authorization": "Bearer ui-secret"}
+        with (
+            patch("services.transcription.app.sys.platform", "win32"),
+            patch("services.transcription.app.subprocess.Popen", return_value=process) as spawned,
+        ):
+            with TestClient(app) as client:
+                started = client.post("/v1/ui/capture/start", headers=headers, json={"sources": ["microphone"]})
+                self.assertEqual(200, started.status_code, started.text)
+                self.assertIs(subprocess.PIPE, spawned.call_args.kwargs["stdin"])
+                self.assertEqual(200, client.post("/v1/ui/capture/pause", headers=headers).status_code)
+                process.stdin.write.assert_called_with("pause\n")
+                self.assertEqual(200, client.post("/v1/ui/capture/resume", headers=headers).status_code)
+                process.stdin.write.assert_called_with("resume\n")
+                stopped = client.post("/v1/ui/capture/stop", headers=headers)
+                self.assertEqual(200, stopped.status_code, stopped.text)
+                process.stdin.write.assert_called_with("stop\n")
+                process.send_signal.assert_not_called()
+
     def test_stop_finalizes_a_session_whose_helper_died_and_lists_spooled_audio(self) -> None:
         """A dead helper must not turn Stop into an error that leaves the session open."""
         executable = Path(self.temporary.name) / "voxink-capture"

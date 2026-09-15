@@ -1,4 +1,13 @@
-# Optional dependencies for the portable microphone capture backend
-# (clients/python_capture/voxink-mic-capture), used where the Swift voxink-capture is not built.
+# Optional dependencies for the Python capture backends.
+#
+# clients/python_capture/voxink-mic-capture: the portable microphone backend,
+# used where the Swift voxink-capture is not built.
 sounddevice
 websockets
+# clients/windows_capture/voxink-windows-capture: the native Windows backend
+# (microphone, system audio, applications). numpy normalizes audio; the rest
+# reach WASAPI process loopback and the audio-session list on Windows only.
+numpy
+comtypes; sys_platform == "win32"
+pycaw; sys_platform == "win32"
+psutil; sys_platform == "win32"

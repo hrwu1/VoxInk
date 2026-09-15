@@ -806,7 +806,8 @@ def create_app(
             process = subprocess.Popen(
                 command,
                 env=os.environ.copy(),
-                stdin=subprocess.DEVNULL,
+                # On Windows the control channel is the backend's stdin.
+                stdin=subprocess.PIPE if sys.platform == "win32" else subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -950,10 +951,10 @@ def create_app(
                 return _native_capture_view(runtime, after=0, include_events=runtime.access.may_read_transcripts(http))
             raise HTTPException(status_code=409, detail="no native capture session is running")
         if action == "pause":
-            process.send_signal(signal.SIGUSR1)
+            _native_control(process, "pause")
             runtime.native_capture_state = "paused"
         elif action == "resume":
-            process.send_signal(signal.SIGUSR2)
+            _native_control(process, "resume")
             runtime.native_capture_state = "recording"
         else:
             runtime.native_capture_state = "stopping"
@@ -2353,6 +2354,25 @@ def _session_elapsed_ms(runtime: ServiceRuntime, session_id: str) -> int:
     return max(0, round((time.monotonic() - started) * 1000.0))
 
 
+def _native_control(process: subprocess.Popen[str], action: str) -> None:
+    """Pause, resume, or stop the capture backend.
+
+    Signals where the backend takes them: SIGUSR1, SIGUSR2, and SIGINT drive
+    the Swift and portable Python backends. Windows can send none of those to
+    another process, so there the Windows backend reads `pause`, `resume`,
+    and `stop` lines on the stdin pipe it was launched with.
+    """
+    if sys.platform == "win32":
+        stdin = process.stdin
+        if stdin is None:
+            raise OSError("the capture backend was launched without a control pipe")
+        stdin.write(f"{action}\n")
+        stdin.flush()
+        return
+    signals = {"pause": signal.SIGUSR1, "resume": signal.SIGUSR2, "stop": signal.SIGINT}
+    process.send_signal(signals[action])
+
+
 def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None:
     process = runtime.native_process
     session_id = runtime.native_session_id
@@ -2360,7 +2380,12 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
         runtime.native_capture_state = "ready"
         return
     if process.poll() is None:
-        process.send_signal(signal.SIGINT)
+        try:
+            _native_control(process, "stop")
+        except OSError:
+            # A backend that has already closed its control pipe is on its
+            # way out; the bounded wait below still ends it.
+            pass
         try:
             if session_id in runtime.live_diarizers:
                 # A final bounded turn still needs Diart and shared Qwen. Let

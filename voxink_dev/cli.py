@@ -19,6 +19,7 @@ from .preflight import (
     DEFAULT_NATIVE_CAPTURE,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_STATE_ROOT,
+    DEFAULT_WINDOWS_CAPTURE,
     PreflightError,
     PreflightOptions,
     run_preflight,
@@ -59,7 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BUNDLE_ID",
         help="application bundle identifier to capture; repeat for multiple applications",
     )
-    parser.add_argument("--native-capture", type=Path, default=DEFAULT_NATIVE_CAPTURE)
+    parser.add_argument(
+        "--native-capture", type=Path,
+        default=DEFAULT_WINDOWS_CAPTURE if sys.platform == "win32" else DEFAULT_NATIVE_CAPTURE,
+    )
     parser.add_argument(
         "--list-apps",
         action="store_true",
@@ -146,17 +150,20 @@ def _resolve_interface(args: argparse.Namespace) -> str:
     return "menubar"
 
 
-def _capture_backend(native: Path) -> tuple[Path, bool]:
-    """The capture executable the helper launches, and whether it is the Python one.
+def _capture_backend(native: Path) -> tuple[Path, str]:
+    """The capture executable the helper launches, and which kind it is.
 
-    The Swift helper serves every source, so it is used wherever it is built.
-    Otherwise the portable microphone backend keeps a checkout without a Swift
-    build, or a platform without Swift, able to record the microphone.
+    `native` is the Swift helper on macOS or the Windows backend on Windows;
+    either serves every source, so it is used wherever it is present.
+    Otherwise the portable microphone backend keeps a checkout without a
+    build able to record the microphone. The kind is `native`, `windows`, or
+    `portable`.
     """
     executable = native.expanduser().resolve()
     if executable.is_file() and os.access(executable, os.X_OK):
-        return executable, False
-    return DEFAULT_MICROPHONE_CAPTURE, True
+        kind = "windows" if sys.platform == "win32" and executable.suffix.lower() == ".cmd" else "native"
+        return executable, kind
+    return DEFAULT_MICROPHONE_CAPTURE, "portable"
 
 
 def _built_menubar_app(path: Path) -> Path | None:
@@ -193,7 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         interface = "web"
     # Every interface is a control surface over the helper, which launches the
     # capture backend itself.
-    backend, portable = _capture_backend(args.native_capture)
+    backend, kind = _capture_backend(args.native_capture)
+    portable = kind == "portable"
     if portable:
         print(
             "The native capture helper is not built; recording the microphone "
@@ -219,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
                 native_capture=backend,
                 verify_checksums=not args.skip_checksums,
                 python_capture=portable,
+                windows_capture=kind == "windows",
             )
         )
     except PreflightError as exc:

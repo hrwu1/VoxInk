@@ -100,6 +100,24 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, run_preflight(options, import_available=lambda _: True).checked_files)
 
     @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
+    def test_the_windows_backend_serves_system_audio_and_needs_its_packages(self) -> None:
+        backend = self.root / "voxink-windows-capture.cmd"
+        backend.write_text("@echo off\n")
+        backend.chmod(0o755)
+        options = PreflightOptions(
+            model_path=self.model,
+            output_root=self.root / "output",
+            state_root=self.root / "state",
+            sources=("microphone", "system"),
+            native_capture=backend,
+            python_capture=False,
+            windows_capture=True,
+        )
+        self.assertEqual(1, run_preflight(options, import_available=lambda _: True).checked_files)
+        with self.assertRaisesRegex(PreflightError, "comtypes, pycaw.+requirements-capture.txt"):
+            run_preflight(options, import_available=lambda name: name not in {"comtypes", "pycaw"})
+
+    @patch("voxink_dev.preflight.sys.version_info", (3, 12, 0))
     def test_browser_capture_does_not_require_python_audio_packages(self) -> None:
         options = PreflightOptions(
             model_path=self.model,

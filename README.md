@@ -130,6 +130,12 @@ only and needs the capture dependencies:
 .venv/bin/python -m pip install -r requirements-capture.txt
 ```
 
+On Windows the same role is played by the native Windows backend
+(`clients/windows_capture/voxink-windows-capture.cmd`), which serves the
+microphone, all system audio, and selected applications through WASAPI and
+installs from the same requirements file. See
+[the Windows capture notes](clients/windows_capture/README.md).
+
 With that backend the browser and Terminal offer microphone modes only, and a
 system source is refused with the build instruction.
 
@@ -623,8 +629,9 @@ one raw PCM s16le binary message. Transcript responses are normalized
 The service tracks active streams per session. Stopping one source does not
 finalize the shared session while another source remains active.
 
-See [the Python protocol notes](clients/python_capture/README.md) and
-[the macOS capture notes](clients/macos_capture/README.md) for wire examples.
+See [the Python protocol notes](clients/python_capture/README.md),
+[the macOS capture notes](clients/macos_capture/README.md), and
+[the Windows capture notes](clients/windows_capture/README.md) for wire examples.
 
 ## Measured performance
 

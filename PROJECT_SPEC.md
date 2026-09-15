@@ -430,8 +430,9 @@ such as FLAC should be evaluated for long-running sessions.
 ```text
 VoxInk
 ├── clients/
-│   ├── macos_capture/          # Native capture backend (headless)
-│   └── python_capture/         # Portable microphone backend (no Swift build)
+│   ├── macos_capture/          # Native macOS capture backend (headless)
+│   ├── windows_capture/        # Native Windows capture backend (headless)
+│   └── python_capture/         # Portable microphone backend (no build)
 ├── services/
 │   ├── protocol.py             # Lightweight helper identity shared with launcher
 │   └── transcription/          # Local HTTP/WebSocket transcription service

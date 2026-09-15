@@ -225,14 +225,23 @@ class CaptureBackendTests(unittest.TestCase):
             native = Path(directory) / "voxink-capture"
             native.write_bytes(b"")
             native.chmod(0o755)
-            self.assertEqual((native.resolve(), False), _capture_backend(native))
+            self.assertEqual((native.resolve(), "native"), _capture_backend(native))
 
     def test_the_portable_python_backend_stands_in_for_a_missing_build(self) -> None:
         with TemporaryDirectory() as directory:
-            backend, portable = _capture_backend(Path(directory) / "voxink-capture")
-        self.assertTrue(portable)
+            backend, kind = _capture_backend(Path(directory) / "voxink-capture")
+        self.assertEqual("portable", kind)
         self.assertEqual("voxink-mic-capture", backend.name)
         self.assertTrue(backend.is_file(), backend)
+
+    def test_on_windows_the_cmd_wrapper_is_the_native_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            native = Path(directory) / "voxink-windows-capture.cmd"
+            native.write_bytes(b"")
+            native.chmod(0o755)
+            with patch("voxink_dev.cli.sys.platform", "win32"):
+                self.assertEqual((native.resolve(), "windows"), _capture_backend(native))
+            self.assertEqual((native.resolve(), "native"), _capture_backend(native))
 
     def _main(self, argv: list[str], native: Path):
         with (
