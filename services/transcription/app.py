@@ -2399,12 +2399,13 @@ def _stop_native_capture(runtime: ServiceRuntime, timeout: float = 10.0) -> None
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
-    if process.stdin is not None:
+    control_pipe = getattr(process, "stdin", None)
+    if control_pipe is not None:
         # On Windows the backend runs under a cmd wrapper that terminate()
         # ends without its child; closing the control pipe is what tells that
         # child to stop, drain, and spool.
         try:
-            process.stdin.close()
+            control_pipe.close()
         except OSError:
             pass
     if runtime.native_process is process:
