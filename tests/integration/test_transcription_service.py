@@ -394,6 +394,7 @@ class ApiTests(unittest.TestCase):
                 stopped = client.post("/v1/ui/capture/stop", headers=headers)
                 self.assertEqual(200, stopped.status_code, stopped.text)
                 process.stdin.write.assert_called_with("stop\n")
+                process.stdin.close.assert_called_once()
                 process.send_signal.assert_not_called()
 
     def test_stop_finalizes_a_session_whose_helper_died_and_lists_spooled_audio(self) -> None:

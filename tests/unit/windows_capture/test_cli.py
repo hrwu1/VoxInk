@@ -9,7 +9,15 @@ import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from clients.windows_capture.cli import build_parser, capture_configuration, main, print_transcript, run, supported_sources
+from clients.windows_capture.cli import (
+    build_parser,
+    capture_configuration,
+    main,
+    print_transcript,
+    run,
+    stdin_is_control_pipe,
+    supported_sources,
+)
 from clients.windows_capture.models import CapturableApplication, CaptureError, InputDevice, SystemAudioBackend
 
 
@@ -180,6 +188,36 @@ class ControlContractTests(unittest.TestCase):
         finally:
             reader.close()
         coordinator.stop.assert_awaited_once()
+
+    def test_a_closed_control_pipe_is_a_stop_on_windows(self) -> None:
+        coordinator = self.coordinator()
+        read_end, write_end = os.pipe()
+        reader = os.fdopen(read_end, "r")
+
+        async def scenario() -> int:
+            task = asyncio.ensure_future(run(coordinator, stdin=reader, session_id="demo", stop_on_eof=True))
+            await asyncio.sleep(0.05)
+            os.close(write_end)
+            return await asyncio.wait_for(task, timeout=2)
+
+        try:
+            with patch("builtins.print"):
+                self.assertEqual(0, asyncio.run(scenario()))
+        finally:
+            reader.close()
+        coordinator.stop.assert_awaited_once()
+
+    def test_only_a_windows_pipe_counts_as_the_helpers_control_channel(self) -> None:
+        pipe = MagicMock()
+        pipe.isatty.return_value = False
+        terminal = MagicMock()
+        terminal.isatty.return_value = True
+        with patch("clients.windows_capture.cli.sys.platform", "win32"):
+            self.assertTrue(stdin_is_control_pipe(pipe))
+            self.assertFalse(stdin_is_control_pipe(terminal))
+            self.assertFalse(stdin_is_control_pipe(None))
+        with patch("clients.windows_capture.cli.sys.platform", "darwin"):
+            self.assertFalse(stdin_is_control_pipe(pipe))
 
     def test_a_start_failure_exits_one_and_still_releases(self) -> None:
         coordinator = self.coordinator()

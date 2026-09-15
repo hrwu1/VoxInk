@@ -100,10 +100,20 @@ class ControlChannel:
     """Delivers pause, resume, and stop to the event loop from signals where
     they exist and from stdin lines everywhere."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, on_action: Callable[[str], None], stdin: TextIO | None) -> None:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        on_action: Callable[[str], None],
+        stdin: TextIO | None,
+        stop_on_eof: bool = False,
+    ) -> None:
         self._loop = loop
         self._on_action = on_action
         self._stdin = stdin
+        # The helper on Windows holds the pipe for as long as it lives, so its
+        # end is the helper's end: stop rather than record into the void. On
+        # macOS the helper gives no stdin at all, so EOF there means nothing.
+        self._stop_on_eof = stop_on_eof
         self._installed: list[tuple[int, Any]] = []
         self._reader: threading.Thread | None = None
 
@@ -154,11 +164,31 @@ class ControlChannel:
                 if action in CONTROL_ACTIONS:
                     self._loop.call_soon_threadsafe(self._on_action, action)
         except (OSError, ValueError):
-            # A closed stdin is not a stop: the helper on macOS gives none.
             return
+        if self._stop_on_eof:
+            try:
+                self._loop.call_soon_threadsafe(self._on_action, "stop")
+            except RuntimeError:
+                pass
 
 
-async def run(coordinator: CaptureCoordinator, stdin: TextIO | None = None, session_id: str = "") -> int:
+def stdin_is_control_pipe(stdin: TextIO | None) -> bool:
+    """Whether stdin's end should end the capture: only on Windows, where the
+    helper always drives this backend through a pipe it holds until it exits."""
+    if stdin is None or sys.platform != "win32":
+        return False
+    try:
+        return not stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+async def run(
+    coordinator: CaptureCoordinator,
+    stdin: TextIO | None = None,
+    session_id: str = "",
+    stop_on_eof: bool | None = None,
+) -> int:
     """Capture until stopped or failed; always release the sources and sockets."""
     loop = asyncio.get_running_loop()
     stopped = asyncio.Event()
@@ -172,7 +202,9 @@ async def run(coordinator: CaptureCoordinator, stdin: TextIO | None = None, sess
         controls.add(task)
         task.add_done_callback(controls.discard)
 
-    channel = ControlChannel(loop, control, stdin)
+    if stop_on_eof is None:
+        stop_on_eof = stdin_is_control_pipe(stdin)
+    channel = ControlChannel(loop, control, stdin, stop_on_eof=stop_on_eof)
     channel.install()
     try:
         try:

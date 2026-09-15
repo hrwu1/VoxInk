@@ -136,6 +136,7 @@ class WebSocketAudioFrameSink:
         self._backlogs: dict[str, AudioBacklog] = {}
         self._spools: dict[str, AudioSpool] = {}
         self._spool_failures: set[str] = set()
+        self._closers: set[asyncio.Task[None]] = set()
 
     # MARK: - AudioFrameSink
 
@@ -190,12 +191,13 @@ class WebSocketAudioFrameSink:
             await self._close_socket(socket)
         for receiver in list(self._receivers.values()):
             receiver.cancel()
-        for receiver in list(self._receivers.values()):
+        for task in [*self._receivers.values(), *self._closers]:
             try:
-                await receiver
+                await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         self._receivers.clear()
+        self._closers.clear()
         self._stopped.clear()
         self._connected = False
         self._session_id = None
@@ -251,7 +253,9 @@ class WebSocketAudioFrameSink:
         if self._sockets.get(stream_id) is not socket:
             return
         del self._sockets[stream_id]
-        asyncio.get_running_loop().create_task(self._close_socket(socket))
+        closer = asyncio.get_running_loop().create_task(self._close_socket(socket))
+        self._closers.add(closer)
+        closer.add_done_callback(self._closers.discard)
 
     async def _close_socket(self, socket: Any) -> None:
         try:
