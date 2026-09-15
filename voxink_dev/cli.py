@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +22,7 @@ from .preflight import (
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_STATE_ROOT,
     DEFAULT_WINDOWS_CAPTURE,
+    WINDOWS_CAPTURE_IMPORTS,
     PreflightError,
     PreflightOptions,
     run_preflight,
@@ -150,20 +153,41 @@ def _resolve_interface(args: argparse.Namespace) -> str:
     return "menubar"
 
 
-def _capture_backend(native: Path) -> tuple[Path, str]:
+def _capture_backend(
+    native: Path, import_available: Callable[[str], bool] | None = None
+) -> tuple[Path, str]:
     """The capture executable the helper launches, and which kind it is.
 
     `native` is the Swift helper on macOS or the Windows backend on Windows;
-    either serves every source, so it is used wherever it is present.
-    Otherwise the portable microphone backend keeps a checkout without a
-    build able to record the microphone. The kind is `native`, `windows`, or
+    either serves every source, so it is used wherever it can run: the Swift
+    one wherever it is built, the Windows one wherever its packages are
+    installed. Otherwise the portable microphone backend keeps the checkout
+    able to record the microphone. The kind is `native`, `windows`, or
     `portable`.
     """
+    available = import_available or (lambda name: importlib.util.find_spec(name) is not None)
     executable = native.expanduser().resolve()
     if executable.is_file() and os.access(executable, os.X_OK):
-        kind = "windows" if sys.platform == "win32" and executable.suffix.lower() == ".cmd" else "native"
-        return executable, kind
+        if sys.platform == "win32" and executable.suffix.lower() == ".cmd":
+            if all(available(name) for name in WINDOWS_CAPTURE_IMPORTS):
+                return executable, "windows"
+        else:
+            return executable, "native"
     return DEFAULT_MICROPHONE_CAPTURE, "portable"
+
+
+def _portable_backend_notice() -> str:
+    if sys.platform == "win32":
+        return (
+            "The native Windows capture backend's packages are not installed; recording "
+            "the microphone through the portable Python backend. Install "
+            "requirements-capture.txt for system audio."
+        )
+    return (
+        "The native capture helper is not built; recording the microphone "
+        "through the portable Python backend. Build ./scripts/build-macos-capture "
+        "for system audio."
+    )
 
 
 def _built_menubar_app(path: Path) -> Path | None:
@@ -203,11 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     backend, kind = _capture_backend(args.native_capture)
     portable = kind == "portable"
     if portable:
-        print(
-            "The native capture helper is not built; recording the microphone "
-            "through the portable Python backend. Build ./scripts/build-macos-capture "
-            "for system audio."
-        )
+        print(_portable_backend_notice())
     try:
         capture_plan = _build_capture_plan(args.sources, args.applications)
     except ValueError as exc:

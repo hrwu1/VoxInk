@@ -27,7 +27,9 @@ DEFAULT_NATIVE_CAPTURE = (
 )
 # The portable microphone backend the helper launches where the Swift one is
 # not built. It needs `sounddevice` and captures the microphone only.
-DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "clients" / "python_capture" / "voxink-mic-capture"
+DEFAULT_MICROPHONE_CAPTURE = PROJECT_ROOT / "clients" / "python_capture" / (
+    "voxink-mic-capture.cmd" if sys.platform == "win32" else "voxink-mic-capture"
+)
 # The native Windows backend: microphone, system audio, and applications,
 # launched on Windows in place of the Swift helper.
 DEFAULT_WINDOWS_CAPTURE = PROJECT_ROOT / "clients" / "windows_capture" / "voxink-windows-capture.cmd"
@@ -144,6 +146,9 @@ def run_preflight(
             or not os.access(native, os.X_OK)
         ):
             failures.append(
+                "System audio requires the native Windows capture backend. "
+                "Install its packages with: .venv\\Scripts\\python -m pip install -r requirements-capture.txt"
+                if sys.platform == "win32" else
                 "System audio requires an executable native capture helper. "
                 "Run ./scripts/build-macos-capture or pass --native-capture PATH."
             )

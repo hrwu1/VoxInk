@@ -11,6 +11,7 @@ from voxink_dev.cli import (
     _build_capture_plan,
     _built_menubar_app,
     _capture_backend,
+    DEFAULT_MICROPHONE_CAPTURE,
     _resolve_interface,
     _run_web_ui,
     build_parser,
@@ -240,8 +241,18 @@ class CaptureBackendTests(unittest.TestCase):
             native.write_bytes(b"")
             native.chmod(0o755)
             with patch("voxink_dev.cli.sys.platform", "win32"):
-                self.assertEqual((native.resolve(), "windows"), _capture_backend(native))
+                self.assertEqual((native.resolve(), "windows"), _capture_backend(native, lambda _: True))
             self.assertEqual((native.resolve(), "native"), _capture_backend(native))
+
+    def test_on_windows_missing_packages_select_the_portable_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            native = Path(directory) / "voxink-windows-capture.cmd"
+            native.write_bytes(b"")
+            native.chmod(0o755)
+            with patch("voxink_dev.cli.sys.platform", "win32"):
+                backend, kind = _capture_backend(native, lambda name: name != "comtypes")
+        self.assertEqual("portable", kind)
+        self.assertEqual(DEFAULT_MICROPHONE_CAPTURE, backend)
 
     def _main(self, argv: list[str], native: Path):
         with (

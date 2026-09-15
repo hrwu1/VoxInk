@@ -133,7 +133,10 @@ only and needs the capture dependencies:
 On Windows the same role is played by the native Windows backend
 (`clients/windows_capture/voxink-windows-capture.cmd`), which serves the
 microphone, all system audio, and selected applications through WASAPI and
-installs from the same requirements file. See
+installs from the same requirements file. Where its packages are not
+installed, `voxink-app` says so and the helper launches the portable Python
+backend (`clients/python_capture/voxink-mic-capture.cmd`) for the microphone,
+exactly as on a Mac without the Swift build. See
 [the Windows capture notes](clients/windows_capture/README.md).
 
 With that backend the browser and Terminal offer microphone modes only, and a
@@ -592,10 +595,11 @@ portable backend streams the microphone until Ctrl-C:
 ./clients/python_capture/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/demo/stream --session-id demo
 ```
 
-It accepts the same command line and signals as the Swift `voxink-capture`
+It accepts the same command line and controls as the native backends
 (`--list-devices`, `--list-sources`, `--mic-device`, `--language`,
-`--retain-audio`; SIGUSR1 pauses, SIGUSR2 resumes, SIGINT stops), which is what
-lets the helper launch either. It sends frames; the helper's VAD forms
+`--retain-audio`; SIGUSR1 pauses, SIGUSR2 resumes, SIGINT stops, and
+`pause`, `resume`, `stop` lines on stdin do the same), which is what lets
+the helper launch any of them. It sends frames; the helper's VAD forms
 utterances.
 
 ## Native macOS capture
