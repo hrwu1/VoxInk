@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import signal
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from clients.python_capture.cli import build_parser, capture_config, main, run
+from clients.python_capture.cli import build_parser, capture_config, main, run, stdin_is_control_pipe
 from clients.python_capture.client import CapturedFrame, CaptureConfig, MicrophoneCaptureClient
 from voxink_core.models import TranscriptEvent
 
@@ -76,10 +77,17 @@ class CommandLineContractTests(unittest.TestCase):
         with patch.dict("os.environ", {"VOXINK_AUTH_SECRET": "per-launch"}):
             self.assertEqual("per-launch", self._config(["--mic"]).auth_token)
 
-    def test_system_sources_are_refused_with_the_native_helper_named(self) -> None:
+    def test_system_sources_are_refused_with_the_native_backend_named(self) -> None:
         for argv in (["--system-all"], ["--mic", "--app", "us.zoom.xos"]):
             with self.assertRaisesRegex(ValueError, "build-macos-capture"):
                 self._config(argv)
+        with patch("clients.python_capture.cli.sys.platform", "win32"):
+            with self.assertRaisesRegex(ValueError, "requirements-capture.txt"):
+                self._config(["--system-all"])
+
+    def test_the_helpers_spool_directory_is_accepted_and_ignored(self) -> None:
+        config = self._config(["--mic", "--spool-dir", "/tmp/session", "--backend", "auto"])
+        self.assertEqual("microphone", config.source)
 
     def test_list_sources_reports_the_microphone_only(self) -> None:
         with patch("sys.stdout", new=StringIO()) as out:
@@ -138,6 +146,76 @@ class SignalContractTests(unittest.TestCase):
         client.pause.assert_awaited_once()
         client.resume.assert_awaited_once()
         client.stop.assert_awaited_once()
+
+
+    def test_stdin_lines_drive_pause_resume_and_stop(self) -> None:
+        client = MagicMock()
+        client.config.session_id = "demo"
+        client.start = AsyncMock()
+        client.pause = AsyncMock()
+        client.resume = AsyncMock()
+        client.stop = AsyncMock()
+        client.failure = None
+        read_end, write_end = os.pipe()
+        reader = os.fdopen(read_end, "r")
+        writer = os.fdopen(write_end, "w")
+
+        async def scenario() -> int:
+            client.wait_failed = asyncio.Event().wait
+            task = asyncio.ensure_future(run(client, stdin=reader))
+            await asyncio.sleep(0.05)
+            writer.write("PAUSE\n")
+            writer.flush()
+            await asyncio.sleep(0.05)
+            writer.write("nonsense\nresume\n")
+            writer.flush()
+            await asyncio.sleep(0.05)
+            writer.write("stop\n")
+            writer.flush()
+            return await asyncio.wait_for(task, timeout=2)
+
+        try:
+            with patch("builtins.print"):
+                self.assertEqual(0, asyncio.run(scenario()))
+        finally:
+            writer.close()
+            reader.close()
+        client.pause.assert_awaited_once()
+        client.resume.assert_awaited_once()
+        client.stop.assert_awaited_once()
+
+    def test_a_closed_stdin_stops_only_when_it_is_the_helpers_windows_pipe(self) -> None:
+        for stop_on_eof, expected_done in ((True, True), (False, False)):
+            with self.subTest(stop_on_eof=stop_on_eof):
+                client = MagicMock()
+                client.config.session_id = "demo"
+                client.start = AsyncMock()
+                client.stop = AsyncMock()
+                client.failure = None
+                read_end, write_end = os.pipe()
+                os.close(write_end)
+                reader = os.fdopen(read_end, "r")
+
+                async def scenario() -> bool:
+                    client.wait_failed = asyncio.Event().wait
+                    task = asyncio.ensure_future(run(client, stdin=reader, stop_on_eof=stop_on_eof))
+                    await asyncio.sleep(0.1)
+                    done = task.done()
+                    if not done:
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    return done
+
+                try:
+                    with patch("builtins.print"):
+                        self.assertEqual(expected_done, asyncio.run(scenario()))
+                finally:
+                    reader.close()
+        pipe = MagicMock()
+        pipe.isatty.return_value = False
+        with patch("clients.python_capture.cli.sys.platform", "win32"):
+            self.assertTrue(stdin_is_control_pipe(pipe))
+        self.assertFalse(stdin_is_control_pipe(pipe))
 
 
 class FakeSocket:

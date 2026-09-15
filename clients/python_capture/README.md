@@ -1,16 +1,19 @@
 # VoxInk portable microphone capture
 
-This is the microphone capture backend that does not need a Swift build. The
-transcription helper launches it in place of the native `voxink-capture`
-wherever that executable is absent, which today means a checkout that has not
-run `./scripts/build-macos-capture` and, in principle, Windows and Linux. It
-captures 16-bit mono PCM with `sounddevice` and streams frames to the helper's
-WebSocket on localhost. Imports and unit tests work without either runtime
-dependency installed.
+This is the microphone capture backend that needs no build and no
+platform-specific packages. The transcription helper launches it in place of
+the native backend wherever that one cannot serve: on macOS when
+`./scripts/build-macos-capture` has not been run, on Windows when the native
+Windows backend's packages (`comtypes`, `pycaw`, `psutil`) are not
+installed. It captures 16-bit mono PCM with `sounddevice` and streams frames
+to the helper's WebSocket on localhost. Imports and unit tests work without
+either runtime dependency installed.
 
 It is microphone only. System and per-application audio stay in the native
-macOS helper, and this backend says so (`--list-sources` prints `microphone`;
-`--system-all` or `--app` exit 2 naming the native helper).
+backends, and this backend says so (`--list-sources` prints `microphone`;
+`--system-all` or `--app` exit 2 naming the native backend for the platform).
+The helper's `--spool-dir` is accepted and ignored: this backend keeps no
+spool, it fails explicitly instead.
 
 Install the optional runtime packages in your environment:
 
@@ -20,20 +23,25 @@ Install the optional runtime packages in your environment:
 
 ## Backend contract
 
-`clients/python_capture/voxink-mic-capture` and the Swift `voxink-capture` accept the same
-command line, so the helper builds one and runs whichever it was given:
+`clients/python_capture/voxink-mic-capture` (`voxink-mic-capture.cmd` on
+Windows) and the native backends accept the same command line, so the helper
+builds one and runs whichever it was given:
 
 ```sh
 ./clients/python_capture/voxink-mic-capture --list-devices     # uid<TAB>name[<TAB>default]
 ./clients/python_capture/voxink-mic-capture --list-sources     # one supported source per line
 ./clients/python_capture/voxink-mic-capture --mic --endpoint ws://127.0.0.1:8300/v1/sessions/ID/stream \
-    --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio]
+    --session-id ID [--mic-device UID] [--language en|zh] [--retain-audio] [--spool-dir DIR]
 ```
 
 - `VOXINK_AUTH_SECRET` in the environment authenticates the WebSocket; the
   credential never appears on the command line.
 - Capture starts immediately. SIGUSR1 pauses, SIGUSR2 resumes, SIGINT or
-  SIGTERM stops the stream cleanly and exits 0.
+  SIGTERM stops the stream cleanly and exits 0, where those signals exist. On
+  every platform the lines `pause`, `resume`, and `stop` on stdin do the
+  same; that is how the helper drives this backend on Windows, where it
+  cannot send signals, and there the end of the helper's pipe is also a stop.
+  On macOS the helper gives no stdin, and a closed stdin means nothing.
 - Pause drains queued and in-flight audio before sending its control message;
   Resume waits for that drain. A frame's JSON header and binary payload cannot
   be split by a control message. Stop also drains audio and keeps receiving
