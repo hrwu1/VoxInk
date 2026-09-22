@@ -32,6 +32,10 @@ public struct CaptureConfiguration: Sendable {
     public var backend: SystemAudioBackend
     /// Core Audio device UID of the microphone to open; nil means the default.
     public var microphoneDeviceUID: String?
+    /// Put the microphone's input volume back when another process lowers it
+    /// during the session. Off unless asked for: a call app's automatic gain
+    /// and this would otherwise take turns.
+    public var holdMicrophoneGain: Bool
     /// Manual language override handed to the service (for example "en" or
     /// "zh"); nil lets the model detect it.
     public var language: String?
@@ -60,6 +64,7 @@ public struct CaptureConfiguration: Sendable {
         retainAudio: Bool = false,
         backend: SystemAudioBackend = .auto,
         microphoneDeviceUID: String? = nil,
+        holdMicrophoneGain: Bool = false,
         language: String? = nil,
         applicationNames: [String: String] = [:],
         spoolDirectory: URL? = nil
@@ -71,6 +76,7 @@ public struct CaptureConfiguration: Sendable {
         self.retainAudio = retainAudio
         self.backend = backend
         self.microphoneDeviceUID = microphoneDeviceUID
+        self.holdMicrophoneGain = holdMicrophoneGain
         self.language = language
         self.applicationNames = applicationNames
         self.spoolDirectory = spoolDirectory

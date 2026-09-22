@@ -77,7 +77,8 @@ public actor CaptureCoordinator {
                     sessionID: configuration.sessionID,
                     sampleRate: configuration.sampleRate,
                     sink: sink,
-                    deviceUID: configuration.microphoneDeviceUID
+                    deviceUID: configuration.microphoneDeviceUID,
+                    holdGain: configuration.holdMicrophoneGain
                 )
                 try await microphone.start()
                 self.microphone = microphone

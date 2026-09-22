@@ -56,6 +56,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var sourceNonzeroByteCount: UInt64 = 0
     private var sourceFormatDescription = "unavailable"
     private var peakAmplitude = 0
+    private var activity = StreamActivityTracker()
     private var activeProcessIDs = Set<pid_t>()
     private var stopping = false
 
@@ -233,15 +234,21 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             let sourceActivity = Self.pcmByteActivity(input)
             let data = try normalizer.normalize(input)
             guard !data.isEmpty else { return }
-            let sequence = withLock { () -> UInt64 in
+            let peak = Self.pcmPeakAmplitude(data)
+            let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+            let (sequence, transition) = withLock { () -> (UInt64, StreamActivityTracker.Transition?) in
                 self.sequence += 1
                 capturedFrameCount += 1
                 sourcePeakAmplitude = max(sourcePeakAmplitude, sourcePeak)
                 sourceNonzeroByteCount += UInt64(sourceActivity.nonzero)
                 sourceByteCount += UInt64(sourceActivity.total)
                 sourceFormatDescription = input.format.description
-                peakAmplitude = max(peakAmplitude, Self.pcmPeakAmplitude(data))
-                return self.sequence
+                peakAmplitude = max(peakAmplitude, peak)
+                return (self.sequence, self.activity.observe(peak: peak, atSeconds: now))
+            }
+            if let transition {
+                let line = withLock { self.activity.describe(transition, streamID: "system-1") }
+                Task { await emitStatus(level: .info, code: line.code, message: line.message) }
             }
             let appIDs: [String]?
             if case .applications(let identifiers) = selection { appIDs = identifiers.sorted() } else { appIDs = nil }

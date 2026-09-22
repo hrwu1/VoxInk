@@ -103,16 +103,72 @@ enum CoreAudioSupport {
         return object
     }
 
+    static func defaultInputDeviceID() throws -> AudioDeviceID {
+        try scalarProperty(systemObject, selector: kAudioHardwarePropertyDefaultInputDevice)
+    }
+
+    static func deviceName(_ device: AudioDeviceID) -> String? {
+        try? stringProperty(device, selector: kAudioObjectPropertyName)
+    }
+
+    /// The device's input volume, 0...1, and the element it lives on. Most
+    /// devices carry it on the main element; some only on channel 1. Nil when
+    /// the device has no input volume control at all.
+    static func inputVolume(of device: AudioDeviceID) -> (element: AudioObjectPropertyElement, value: Double)? {
+        for element in [AudioObjectPropertyElement(kAudioObjectPropertyElementMain), 1] {
+            if let value = inputVolume(of: device, element: element) { return (element, value) }
+        }
+        return nil
+    }
+
+    static func inputVolume(of device: AudioDeviceID, element: AudioObjectPropertyElement) -> Double? {
+        let value: Float32? = try? scalarProperty(
+            device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeInput, element: element
+        )
+        return value.map(Double.init)
+    }
+
+    static func setInputVolume(_ value: Double, of device: AudioDeviceID, element: AudioObjectPropertyElement) -> OSStatus {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar, mScope: kAudioObjectPropertyScopeInput, mElement: element
+        )
+        var scalar = Float32(min(1, max(0, value)))
+        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &scalar)
+    }
+
+    static func addListener(
+        _ object: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+        element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain,
+        queue: DispatchQueue,
+        block: @escaping AudioObjectPropertyListenerBlock
+    ) {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: element)
+        AudioObjectAddPropertyListenerBlock(object, &address, queue, block)
+    }
+
+    static func removeListener(
+        _ object: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+        element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain,
+        queue: DispatchQueue,
+        block: @escaping AudioObjectPropertyListenerBlock
+    ) {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: element)
+        AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
+    }
+
     // MARK: - Property primitives
 
     static func scalarProperty<T>(
         _ object: AudioObjectID,
         selector: AudioObjectPropertySelector,
-        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+        element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain
     ) throws -> T {
-        var address = AudioObjectPropertyAddress(
-            mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain
-        )
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: element)
         var size = UInt32(MemoryLayout<T>.size)
         let pointer = UnsafeMutablePointer<T>.allocate(capacity: 1)
         defer { pointer.deallocate() }

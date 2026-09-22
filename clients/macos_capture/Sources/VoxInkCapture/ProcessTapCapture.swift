@@ -38,6 +38,7 @@ final class ProcessTapCapture {
     private var sourceNonzeroByteCount: UInt64 = 0
     private var sourceByteCount: UInt64 = 0
     private var peakAmplitude = 0
+    private var activity = StreamActivityTracker()
     private var stopping = false
     private var reconnectTask: Task<Void, Never>?
     /// The format the IO proc's buffers are read with. Not the tap's declared
@@ -368,13 +369,19 @@ final class ProcessTapCapture {
             let activity = SystemAudioCapture.pcmByteActivity(input)
             let data = try normalizer.normalize(input)
             guard !data.isEmpty else { return }
-            let sequence = withLock { () -> UInt64 in
+            let peak = SystemAudioCapture.pcmPeakAmplitude(data)
+            let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+            let (sequence, transition) = withLock { () -> (UInt64, StreamActivityTracker.Transition?) in
                 self.sequence += 1
                 capturedFrameCount += 1
                 sourceNonzeroByteCount += UInt64(activity.nonzero)
                 sourceByteCount += UInt64(activity.total)
-                peakAmplitude = max(peakAmplitude, SystemAudioCapture.pcmPeakAmplitude(data))
-                return self.sequence
+                peakAmplitude = max(peakAmplitude, peak)
+                return (self.sequence, self.activity.observe(peak: peak, atSeconds: now))
+            }
+            if let transition {
+                let line = withLock { self.activity.describe(transition, streamID: channel.streamID) }
+                Task { await emitStatus(level: .info, code: line.code, message: line.message) }
             }
             frames.submit(AudioFrame(
                 sessionID: sessionID,

@@ -13,6 +13,7 @@ private struct Options {
     var sessionID = SessionIdentifier.make()
     var backend = SystemAudioBackend.auto
     var microphoneDeviceUID: String?
+    var holdMicrophoneGain = false
     var language: String?
     var spoolDirectory: URL?
 
@@ -27,6 +28,7 @@ private struct Options {
             case "--list-devices": options.listDevices = true
             case "--list-sources": options.listSources = true
             case "--retain-audio": options.retainAudio = true
+            case "--hold-mic-gain": options.holdMicrophoneGain = true
             case "--app", "--endpoint", "--session-id", "--backend", "--mic-device", "--language", "--spool-dir":
                 guard index + 1 < arguments.count else { throw CLIError("Missing value after \(arguments[index]).") }
                 let value = arguments[index + 1]
@@ -65,12 +67,14 @@ private struct CLIError: LocalizedError {
       voxink-capture --list-apps
       voxink-capture --list-devices
       voxink-capture --list-sources
-      voxink-capture [--mic] [--mic-device UID] [--system-all | --app BUNDLE_ID ...]
+      voxink-capture [--mic] [--mic-device UID] [--hold-mic-gain]
+                      [--system-all | --app BUNDLE_ID ...]
                       [--backend auto|tap|screencapturekit] [--language en|zh]
                       [--endpoint ws://127.0.0.1:8300/v1/sessions/SESSION_ID/stream]
                       [--session-id ID]
                       [--retain-audio]
                       [--spool-dir DIR]   where audio the service never received is saved
+      --hold-mic-gain   put the microphone's input volume back if another app lowers it
 
     Examples:
       voxink-capture --mic
@@ -142,6 +146,7 @@ private struct VoxInkCaptureCommand {
                 retainAudio: options.retainAudio,
                 backend: options.backend,
                 microphoneDeviceUID: options.microphoneDeviceUID,
+                holdMicrophoneGain: options.holdMicrophoneGain,
                 language: options.language,
                 applicationNames: applicationNames,
                 spoolDirectory: options.spoolDirectory
