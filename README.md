@@ -597,7 +597,7 @@ portable backend streams the microphone until Ctrl-C:
 
 It accepts the same command line and controls as the native backends
 (`--list-devices`, `--list-sources`, `--mic-device`, `--language`,
-`--retain-audio`; SIGUSR1 pauses, SIGUSR2 resumes, SIGINT stops, and
+`--retain-audio`, `--hold-mic-gain`; SIGUSR1 pauses, SIGUSR2 resumes, SIGINT stops, and
 `pause`, `resume`, `stop` lines on stdin do the same), which is what lets
 the helper launch any of them. It sends frames; the helper's VAD forms
 utterances.

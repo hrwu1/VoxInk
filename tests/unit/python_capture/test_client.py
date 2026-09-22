@@ -65,6 +65,7 @@ class CommandLineContractTests(unittest.TestCase):
                 "--endpoint", "ws://127.0.0.1:4321/v1/sessions/demo/stream",
                 "--session-id", "demo", "--retain-audio",
                 "--mic-device", "3", "--language", "en", "--backend", "auto", "--mic",
+                "--hold-mic-gain",
             ]
         )
         self.assertEqual("ws://127.0.0.1:4321/v1/sessions/demo/stream", config.websocket_url)

@@ -33,6 +33,7 @@ class CommandLineContractTests(unittest.TestCase):
             "--endpoint", "ws://127.0.0.1:4321/v1/sessions/demo/stream", "--session-id", "demo",
             "--spool-dir", "/tmp/demo", "--retain-audio", "--mic-device", "USB Mic", "--language", "en",
             "--backend", "tap", "--mic", "--app", "Zoom.exe", "--app", "chrome.exe",
+            "--hold-mic-gain",
         ])
         self.assertEqual("ws://127.0.0.1:4321/v1/sessions/demo/stream", config.service_url)
         self.assertEqual("demo", config.session_id)

@@ -238,6 +238,10 @@ class NativeCaptureRequest(BaseModel):
     live_diarization: bool = False
     # Core Audio device UID from /v1/devices; None keeps the system default.
     microphone_device: str | None = None
+    # Put the microphone's input volume back if another app lowers it during
+    # the session (a call app's automatic microphone volume does this to a
+    # shared headset). Off by default so two gain controls do not take turns.
+    hold_microphone_gain: bool = False
     # Manual language override ("en" or "zh"); None lets the model detect it.
     language: str | None = None
     # Translate each finalized segment into the other language, on device.
@@ -761,6 +765,8 @@ def create_app(
             command.append("--retain-audio")
         if options.microphone_device and options.microphone_device.strip():
             command.extend(("--mic-device", options.microphone_device.strip()))
+        if options.hold_microphone_gain:
+            command.append("--hold-mic-gain")
         if language is not None:
             command.extend(("--language", language))
         if options.backend is not None:

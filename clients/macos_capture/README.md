@@ -34,7 +34,14 @@ the selected applications into one `system-1` stream.
 `system`); the helper asks every capture backend this, and the portable Python
 one in `clients/python_capture` answers `microphone` alone.
 Other flags: `--mic-device UID` (from `--list-devices`) picks the microphone,
-`--language en|zh` fixes the language the service transcribes in.
+`--language en|zh` fixes the language the service transcribes in, and
+`--hold-mic-gain` puts the microphone's input volume back when another app
+lowers it mid-session (a call app's automatic microphone volume does this to
+a shared headset; the drop is always reported as `microphone_gain_dropped`,
+the flag decides whether it is also undone). A change of input device is
+followed without restarting the session (`microphone_reattached`), and every
+stream logs `stream_silent` / `stream_active` when it stops carrying any
+signal and when it resumes.
 
 The executable is headless: the helper launches it, and the interfaces draw
 captions from the helper's status feed (the floating panel lives with the

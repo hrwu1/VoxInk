@@ -5,7 +5,7 @@ Speaks the same command line and control contract as the native backends
 transcription helper can launch any of them without knowing which it has:
 
 - `--endpoint`, `--session-id`, `--mic`, `--mic-device`, `--language`,
-  `--retain-audio`, `--backend`, `--spool-dir` are accepted; `--system-all`
+  `--retain-audio`, `--backend`, `--spool-dir`, `--hold-mic-gain` are accepted; `--system-all`
   and `--app` are refused because only a native backend serves system audio.
 - `--list-devices` prints `uid<TAB>name[<TAB>default]`; `--list-sources`
   prints the sources this backend can capture, one per line.
@@ -68,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--list-apps", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--backend", default=None, help=argparse.SUPPRESS)
+    # Holding the input volume is a native-helper feature; accepted so the
+    # helper's one command line fits this backend too.
+    parser.add_argument("--hold-mic-gain", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--spool-dir", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--sample-rate", type=int, default=16_000, help=argparse.SUPPRESS)
     parser.add_argument("--frame-ms", type=int, default=20, help=argparse.SUPPRESS)

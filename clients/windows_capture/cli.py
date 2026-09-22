@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--retain-audio", action="store_true")
     parser.add_argument("--spool-dir", default=None, metavar="DIR", help="where audio the service never received is saved")
+    # Holding the input volume is a macOS helper feature; accepted so the
+    # helper's one command line fits this backend too.
+    parser.add_argument("--hold-mic-gain", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--list-apps", action="store_true")
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--list-sources", action="store_true")

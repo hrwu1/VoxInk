@@ -338,11 +338,13 @@ class ApiTests(unittest.TestCase):
                         "sources": ["microphone", "system"],
                         "applications": ["com.apple.Safari"],
                         "retain_audio": True,
+                        "hold_microphone_gain": True,
                     },
                 )
                 self.assertEqual(200, started.status_code, started.text)
                 command = spawned.call_args.args[0]
                 self.assertIn("--mic", command)
+                self.assertIn("--hold-mic-gain", command)
                 self.assertIn("--app", command)
                 self.assertIn("com.apple.Safari", command)
                 self.assertIn("--retain-audio", command)
