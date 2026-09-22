@@ -68,6 +68,22 @@ private struct CapabilitiesView: Decodable {
     }
 }
 
+/// One microphone the helper can open, from `/v1/devices`.
+private struct InputDeviceView: Decodable, Equatable {
+    let uid: String?
+    let name: String
+    let isDefault: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case uid, name
+        case isDefault = "default"
+    }
+}
+
+private struct DevicesView: Decodable {
+    let devices: [InputDeviceView]
+}
+
 private struct StatusView: Decodable {
     let state: String
     let sessionID: String?
@@ -102,15 +118,21 @@ private final class ControlAPI {
         try await request("GET", "/v1/ui/capture/capabilities")
     }
 
+    func devices() async throws -> [InputDeviceView] {
+        let view: DevicesView = try await request("GET", "/v1/devices")
+        return view.devices
+    }
+
     func start(
         sources: [String], language: String?, retainAudio: Bool = false, diarize: Bool = false,
-        liveDiarization: Bool = false
+        liveDiarization: Bool = false, microphoneDevice: String? = nil, holdMicrophoneGain: Bool = false
     ) async throws -> StatusView {
         var body: [String: Any] = [
             "sources": sources, "retain_audio": retainAudio, "diarize": diarize,
-            "live_diarization": liveDiarization,
+            "live_diarization": liveDiarization, "hold_microphone_gain": holdMicrophoneGain,
         ]
         if let language { body["language"] = language }
+        if let microphoneDevice { body["microphone_device"] = microphoneDevice }
         return try await request("POST", "/v1/ui/capture/start", body: body)
     }
 
@@ -166,9 +188,27 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     /// on until turned off. Push to talk is dictation and never keeps audio.
     private let defaults: UserDefaults = {
         let defaults = UserDefaults.standard
-        defaults.register(defaults: ["keepAudio": true, "identifySpeakers": true, "liveSpeakers": false])
+        defaults.register(defaults: [
+            "keepAudio": true, "identifySpeakers": true, "liveSpeakers": false, "holdMicrophoneGain": false,
+        ])
         return defaults
     }()
+    /// Put the microphone's input volume back if a call app lowers it. Off
+    /// unless asked for: two gain controls would otherwise take turns.
+    private var holdMicrophoneGain: Bool {
+        get { defaults.bool(forKey: "holdMicrophoneGain") }
+        set { defaults.set(newValue, forKey: "holdMicrophoneGain") }
+    }
+    /// Core Audio UID of the microphone to open; nil follows the system
+    /// default. Pinning VoxInk to a different microphone than the call app
+    /// uses keeps that app's gain control off VoxInk's recording.
+    private var microphoneDeviceUID: String? {
+        get { defaults.string(forKey: "microphoneDevice").flatMap { $0.isEmpty ? nil : $0 } }
+        set { defaults.set(newValue ?? "", forKey: "microphoneDevice") }
+    }
+    /// Microphones the helper listed when the menu was last opened.
+    private var inputDevices: [InputDeviceView] = []
+    private var readingDevices = false
     private var keepAudio: Bool {
         get { defaults.bool(forKey: "keepAudio") }
         set { defaults.set(newValue, forKey: "keepAudio") }
@@ -230,7 +270,26 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         // The status poll is idle between sessions, so an experiment runtime
         // that appeared since launch is picked up when the menu is opened.
         if !liveDiarization.available { Task { await refreshCapabilities() } }
+        Task { await refreshDevices() }
         rebuildMenu()
+    }
+
+    /// The microphone list changes as headsets come and go, so it is read
+    /// each time the menu opens rather than once at launch.
+    private func refreshDevices() async {
+        guard !readingDevices else { return }
+        readingDevices = true
+        defer { readingDevices = false }
+        guard let devices = try? await api.devices(), devices != inputDevices else { return }
+        inputDevices = devices
+        rebuildMenu()
+    }
+
+    /// The pinned microphone while it is present; the system default otherwise,
+    /// so a headset left at home does not stop Start from working.
+    private var availableMicrophoneDeviceUID: String? {
+        guard let uid = microphoneDeviceUID, inputDevices.contains(where: { $0.uid == uid }) else { return nil }
+        return uid
     }
 
     /// Availability is a property of the helper, not of a session, so it comes
@@ -306,11 +365,44 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         }
         source.submenu = sourceMenu
         menu.addItem(source)
+        let pinned = microphoneDeviceUID
+        let pinnedName = inputDevices.first { $0.uid == pinned }?.name
+        let microphoneLabel = pinned == nil ? "System default" : (pinnedName ?? "System default (pinned microphone is away)")
+        let microphone = NSMenuItem(title: "Microphone: " + microphoneLabel, action: nil, keyEquivalent: "")
+        microphone.isEnabled = idle && !pushToTalkArmed
+        let microphoneMenu = NSMenu()
+        microphoneMenu.autoenablesItems = false
+        let systemDefault = NSMenuItem(title: "System default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+        systemDefault.target = self
+        systemDefault.representedObject = ""
+        systemDefault.state = pinned == nil ? .on : .off
+        systemDefault.isEnabled = microphone.isEnabled
+        microphoneMenu.addItem(systemDefault)
+        for device in inputDevices {
+            guard let uid = device.uid else { continue }
+            let item = NSMenuItem(
+                title: device.name + (device.isDefault ? " (default)" : ""),
+                action: #selector(selectMicrophone(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = uid
+            item.state = uid == pinned ? .on : .off
+            item.isEnabled = microphone.isEnabled
+            microphoneMenu.addItem(item)
+        }
+        microphone.submenu = microphoneMenu
+        menu.addItem(microphone)
         let audio = NSMenuItem(title: "Keep audio", action: #selector(toggleKeepAudio), keyEquivalent: "")
         audio.target = self
         audio.state = keepAudio ? .on : .off
         audio.isEnabled = idle
         menu.addItem(audio)
+        let hold = NSMenuItem(title: "Hold microphone gain", action: #selector(toggleHoldMicrophoneGain), keyEquivalent: "")
+        hold.target = self
+        hold.state = holdMicrophoneGain ? .on : .off
+        hold.isEnabled = idle
+        hold.toolTip = "Put the microphone's input volume back if a call app's automatic microphone volume lowers it while recording."
+        menu.addItem(hold)
         let live = NSMenuItem(
             title: "Live speakers (experimental)", action: #selector(toggleLiveSpeakers), keyEquivalent: ""
         )
@@ -453,7 +545,9 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
             let view = try await api.start(
                 sources: sources, language: nil, retainAudio: keepAudio,
                 diarize: keepAudio && identifySpeakers && sources.contains("microphone"),
-                liveDiarization: wantsLiveSpeakers
+                liveDiarization: wantsLiveSpeakers,
+                microphoneDevice: sources.contains("microphone") ? availableMicrophoneDeviceUID : nil,
+                holdMicrophoneGain: holdMicrophoneGain && sources.contains("microphone")
             )
             cursor = view.nextCursor
             startedAt = Date()
@@ -483,6 +577,14 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleKeepAudio() { keepAudio.toggle() }
+
+    @objc private func toggleHoldMicrophoneGain() { holdMicrophoneGain.toggle() }
+
+    @objc private func selectMicrophone(_ sender: NSMenuItem) {
+        guard RecordingShortcut.action(state: state, pushToTalkArmed: pushToTalkArmed, busy: commandInFlight) == .start else { return }
+        guard let uid = sender.representedObject as? String else { return }
+        microphoneDeviceUID = uid.isEmpty ? nil : uid
+    }
 
     @objc private func toggleIdentifySpeakers() { identifySpeakers.toggle() }
 
@@ -636,7 +738,9 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         state = "starting"
         refreshStatusButton()
         do {
-            let view = try await api.start(sources: ["microphone"], language: nil)
+            let view = try await api.start(
+                sources: ["microphone"], language: nil, microphoneDevice: availableMicrophoneDeviceUID
+            )
             cursor = view.nextCursor
             // Give the helper a moment to open its stream before pausing it.
             try await Task.sleep(nanoseconds: 1_500_000_000)

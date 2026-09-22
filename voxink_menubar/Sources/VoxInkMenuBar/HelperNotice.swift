@@ -5,8 +5,9 @@ import Foundation
 ///
 /// The helper reports every state change as `code: message`. Only the ones
 /// that mean the recording is degraded are shown; a line that says the
-/// trouble is over (`service_reconnected`) clears the display, and counters
-/// such as dropped-frame totals stay in the logs.
+/// trouble is over (`service_reconnected`, `microphone_reattached`,
+/// `microphone_gain_restored`) clears the display, and counters such as
+/// dropped-frame totals stay in the logs.
 enum HelperNotice {
     static func line(from notice: String?) -> String? {
         guard let notice, let separator = notice.range(of: ": ") else { return nil }
@@ -21,6 +22,10 @@ enum HelperNotice {
             return "Service connection — " + message
         case "live_speakers_stopped":
             return "Live speakers — " + message
+        case "microphone_gain_dropped", "microphone_gain_hold_failed":
+            return "Microphone gain — " + message
+        case "microphone_waiting", "microphone_reattach_failed":
+            return "Microphone — " + message
         default:
             return nil
         }
