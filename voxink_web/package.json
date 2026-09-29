@@ -6,10 +6,10 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "vinext dev --port 3300 --hostname 127.0.0.1",
     "build": "vinext build",
     "build:local": "vite build --config vite.static.config.ts",
-    "start": "vinext start",
+    "start": "vinext start --port 3300 --hostname 127.0.0.1",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:timer": "node --experimental-strip-types --test tests/elapsed-timer.test.ts"

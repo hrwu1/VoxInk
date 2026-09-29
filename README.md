@@ -10,6 +10,14 @@ The local API binds only to `127.0.0.1`. The Qwen provider forces Hugging Face
 and Transformers offline modes and loads the model exclusively from the local
 `models/Qwen3-ASR-1.7B` directory.
 
+Standalone web development (`cd voxink_web && npm run dev`) and `npm start`
+use `http://127.0.0.1:3300`. Vite static dev/preview also uses 3300 and fails if
+occupied instead of selecting another port. Use one UI server at a time; an
+explicit local override (for example, `npm run dev -- --port 3301`) must stay
+in 3300–3399. The supervised recording
+console remains on the helper's 8300–8399 listener. Allocations are recorded in
+the [workspace port registry](../private-workspace/PORT_ALLOCATION_GUIDELINE.md).
+
 ## Current capabilities
 
 - Local batch transcription through HTTP.
