@@ -27,7 +27,6 @@ from .diart_turns import Span, TurnBuffer, context_window, partition
 RATE = 16_000
 STEP = 8_000
 PROJECT = Path(__file__).resolve().parents[1]
-SOURCE_PROJECT = Path("/path/to/VoxInk")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -54,8 +53,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--rho-update", type=float, default=.3)
     p.add_argument("--delta-new", type=float, default=1)
     p.add_argument("--qwen-device", choices=("auto", "mps", "cpu"), default="auto")
-    p.add_argument("--qwen-python", type=Path, default=SOURCE_PROJECT / ".venv/bin/python")
-    p.add_argument("--qwen-model", type=Path, default=SOURCE_PROJECT / "models/Qwen3-ASR-0.6B")
+    p.add_argument("--qwen-python", type=Path, default=PROJECT / ".venv/bin/python")
+    p.add_argument("--qwen-model", type=Path, default=PROJECT / "models/Qwen3-ASR-0.6B")
     p.add_argument("--context", default="", help="Optional ASR vocabulary context")
     p.add_argument("--run-name", default=time.strftime("%Y%m%d-%H%M%S"))
     return p

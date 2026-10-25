@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 
-DEFAULT_RUNTIME = Path("/path/to/VoxInk/.experiments/diart-20260907")
+DEFAULT_RUNTIME = Path(__file__).resolve().parents[2] / ".experiments/diart-20260907"
 OWNER = "voxink-diart-experiment-v1"
 MARKER = ".voxink-diart-owned.json"
 DIRECTORIES = (".venv", "models", "cache", "tmp", "logs", "home", "outputs")
