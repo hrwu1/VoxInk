@@ -785,8 +785,7 @@ Status: Active roadmap. Last verified against the tree on 2026-09-02.
 This section tracks work remaining after the developer workflow, native capture
 integration, and the 2026-09-02 feature push. Completed implementation plans
 are removed once their durable requirements are reflected in this specification,
-`README.md`, or tests; Git history retains their implementation detail.
-`.claude/plans/feature-push.md` records the 2026-09-02 push.
+`README.md`, or tests.
 
 Priority follows observed evidence: defects affecting current sessions first,
 then advertised but incomplete capabilities, verification of frequently changed
@@ -831,7 +830,7 @@ after later changes.
 
 #### Structural symmetry corrections (2026-09-12)
 
-The nine priority findings in `.claude/plans/code-structure-review.md` are
+The nine priority findings of the structure review are
 implemented and merged: operation permissions, credential selection, portable
 capture lifecycle, canonical header encoding, MCP validation, cross-interface
 capture state, shared capture selection, event/error decoding, and focused

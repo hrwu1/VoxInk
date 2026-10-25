@@ -15,8 +15,7 @@ use `http://127.0.0.1:3300`. Vite static dev/preview also uses 3300 and fails if
 occupied instead of selecting another port. Use one UI server at a time; an
 explicit local override (for example, `npm run dev -- --port 3301`) must stay
 in 3300–3399. The supervised recording
-console remains on the helper's 8300–8399 listener. Allocations are recorded in
-the [workspace port registry](../private-workspace/PORT_ALLOCATION_GUIDELINE.md).
+console remains on the helper's 8300–8399 listener.
 
 ## Current capabilities
 
@@ -729,5 +728,3 @@ documented in `clients/macos_capture/README.md`.
 
 - [PROJECT_SPEC.md](PROJECT_SPEC.md) is the canonical architecture,
   event-schema, file-format, active-roadmap, and production-shipping reference.
-- [.claude/plans/public-cli.md](.claude/plans/public-cli.md) records the
-  public CLI review, its accepted deviations, and what it defers.

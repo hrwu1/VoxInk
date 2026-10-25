@@ -42,7 +42,6 @@ dist/
 # Editors and IDEs
 .idea/
 .vscode/
-.claude/settings.local.json
 
 # Xcode / Swift
 DerivedData/
@@ -87,3 +86,10 @@ models/Qwen3-0.6B/*
 
 # Disposable, manifest-owned opt-in experiment runtimes and outputs
 .experiments/
+
+# Local AI agent state and plans
+.claude/
+.agent/
+.agents/
+CLAUDE.md
+AGENTS.md
