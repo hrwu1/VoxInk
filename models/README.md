@@ -1,6 +1,18 @@
 # Local models
 
-Place downloaded transcription models in this directory. The default VoxInk
+Each subdirectory holds one model package. Only its
+`voxink-model-manifest.json` is tracked; the weights are downloaded into it with:
+
+```sh
+./scripts/voxink-models list
+./scripts/voxink-models download [MODEL ...]
+```
+
+The downloader fetches from the publisher's Hugging Face repository at the
+manifest's `revision`, shows the manifest's `license`, and verifies every file
+against the manifest's digests. A manifest added for a new model needs
+`source_model_id`, `revision`, and `license`; `"gated": true` marks a model whose
+conditions the user must accept on Hugging Face first. The default VoxInk
 configuration expects Qwen3-ASR at `models/Qwen3-ASR-1.7B/`.
 
 Qwen3-ASR-0.6B is the optional efficient profile. Select it explicitly with:
@@ -27,4 +39,5 @@ diarization package speakers are not found; without the aligner, blocks are
 labeled whole. Each directory keeps a tracked `voxink-model-manifest.json`
 recording the revision and per-file digests the code was built against.
 
-Model weights are runtime assets and are intentionally excluded from Git.
+Model weights are third-party runtime assets. They are never committed or
+redistributed by VoxInk; users download them from their publishers.

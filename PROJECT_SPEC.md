@@ -481,7 +481,7 @@ on those utilities, while the service does not import developer tooling.
 - Long-duration soak tests before declaring sessions unlimited in production.
 
 Current implementation status and priorities are maintained in section 16;
-setup and test commands are maintained in `README.md`.
+setup and test commands are maintained in `DEVELOPMENT.md`.
 
 ## 13. Design Principles
 
@@ -785,7 +785,7 @@ Status: Active roadmap. Last verified against the tree on 2026-09-02.
 This section tracks work remaining after the developer workflow, native capture
 integration, and the 2026-09-02 feature push. Completed implementation plans
 are removed once their durable requirements are reflected in this specification,
-`README.md`, or tests.
+`README.md`, `DEVELOPMENT.md`, or tests.
 
 Priority follows observed evidence: defects affecting current sessions first,
 then advertised but incomplete capabilities, verification of frequently changed
