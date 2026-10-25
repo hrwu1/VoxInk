@@ -728,3 +728,10 @@ documented in `clients/macos_capture/README.md`.
 
 - [PROJECT_SPEC.md](PROJECT_SPEC.md) is the canonical architecture,
   event-schema, file-format, active-roadmap, and production-shipping reference.
+
+## License
+
+VoxInk's source code is released under the [MIT License](LICENSE). Model
+weights, dependencies, the bundled React runtime, and the public-domain speech
+sample keep their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
