@@ -5,7 +5,15 @@
   "profile": "Efficient",
   "description": "Lower memory and faster local transcription",
   "provider": "qwen-local",
+  "source_model_id": "Qwen/Qwen3-ASR-0.6B",
+  "revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+  "license": "apache-2.0",
   "files": [
+    {
+      "path": "chat_template.json",
+      "size": 1161,
+      "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff"
+    },
     {
       "path": "config.json",
       "size": 6193,

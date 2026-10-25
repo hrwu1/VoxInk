@@ -163,6 +163,8 @@ def _check_model(model_path: Path, verify_checksums: bool, failures: list[str]) 
         model_path, verify_checksums=verify_checksums
     )
     failures.extend(inspection.failures)
+    if inspection.package is not None and inspection.failures:
+        failures.append(f"Download or repair it with: ./scripts/voxink-models download {model_path.name}")
     return inspection.checked_files
 
 

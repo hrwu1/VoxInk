@@ -5,7 +5,15 @@
   "profile": "High accuracy",
   "description": "Larger local model for maximum transcription accuracy",
   "provider": "qwen-local",
+  "source_model_id": "Qwen/Qwen3-ASR-1.7B",
+  "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+  "license": "apache-2.0",
   "files": [
+    {
+      "path": "chat_template.json",
+      "size": 1161,
+      "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff"
+    },
     {
       "path": "config.json",
       "size": 6194,
