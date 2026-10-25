@@ -657,10 +657,10 @@ faster than real time at every utterance length the VAD produces:
 
 | Utterance | Median inference | Real-time factor |
 | --- | --- | --- |
-| 2 s | 1.18 s | 0.59x |
-| 5 s | 1.91 s | 0.38x |
-| 10 s | 3.02 s | 0.30x |
-| 15 s | 4.16 s | 0.28x |
+| 2 s | 0.96 s | 0.48x |
+| 5 s | 1.47 s | 0.30x |
+| 10 s | 2.41 s | 0.24x |
+| 15 s | 3.81 s | 0.25x |
 
 Model load takes about 12 s and peak resident memory reaches roughly 9 GiB, so
 memory headroom — not inference speed — is the binding constraint on the current
@@ -687,13 +687,13 @@ per utterance length:
 
 | Model and runtime | Load | Peak memory | 2 s RTF | 5 s RTF | 10 s RTF | 15 s RTF |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1.7B CPU | 12.23 s | 8996 MiB | 0.590x | 0.382x | 0.302x | 0.277x |
-| 0.6B CPU | 4.37 s | 5477 MiB | 0.270x | 0.192x | 0.141x | 0.137x |
-| 1.7B MPS | 9.51 s | 3781 MiB | 0.159x | 0.116x | 0.091x | 0.082x |
-| 0.6B MPS | 4.87 s | 2794 MiB | 0.095x | 0.072x | 0.061x | 0.057x |
+| 1.7B CPU | 12.18 s | 8787 MiB | 0.481x | 0.295x | 0.241x | 0.254x |
+| 0.6B CPU | 4.44 s | 6028 MiB | 0.225x | 0.137x | 0.111x | 0.103x |
+| 1.7B MPS | 7.18 s | 4605 MiB | 0.120x | 0.073x | 0.066x | 0.063x |
+| 0.6B MPS | 4.72 s | 2794 MiB | 0.074x | 0.045x | 0.039x | 0.038x |
 
-On MPS, 0.6B used 26% less peak memory than 1.7B, loaded 49% faster,
-and reduced steady-state inference latency by roughly 30–40%. Its downloaded
+On MPS, 0.6B used 39% less peak memory than 1.7B, loaded 34% faster,
+and reduced steady-state inference latency by roughly 38–41%. Its downloaded
 weights are 1.75 GiB instead of 4.38 GiB. These measurements establish the
 hardware benefit only; choosing a new default still requires representative
 English, Mandarin, and code-switch accuracy evaluation.

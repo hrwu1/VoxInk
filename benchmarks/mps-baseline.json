@@ -1,43 +1,43 @@
 {
   "device": "mps",
   "model": "models/Qwen3-ASR-1.7B",
-  "model_load_seconds": 9.51,
-  "peak_memory_mib": 3781.3,
+  "model_load_seconds": 7.18,
+  "peak_memory_mib": 4604.8,
   "chunks": [
     {
       "chunk_seconds": 2.0,
       "runs": 2,
-      "median_ms": 317.1,
-      "p95_ms": 331.8,
-      "slowest_ms": 331.8,
-      "real_time_factor": 0.159
+      "median_ms": 239.6,
+      "p95_ms": 252.3,
+      "slowest_ms": 252.3,
+      "real_time_factor": 0.12
     },
     {
       "chunk_seconds": 5.0,
       "runs": 2,
-      "median_ms": 580.8,
-      "p95_ms": 585.2,
-      "slowest_ms": 585.2,
-      "real_time_factor": 0.116
+      "median_ms": 364.8,
+      "p95_ms": 366.9,
+      "slowest_ms": 366.9,
+      "real_time_factor": 0.073
     },
     {
       "chunk_seconds": 10.0,
       "runs": 2,
-      "median_ms": 905.6,
-      "p95_ms": 915.4,
-      "slowest_ms": 915.4,
-      "real_time_factor": 0.091
+      "median_ms": 660.4,
+      "p95_ms": 679.4,
+      "slowest_ms": 679.4,
+      "real_time_factor": 0.066
     },
     {
       "chunk_seconds": 15.0,
       "runs": 2,
-      "median_ms": 1226.4,
-      "p95_ms": 1239.6,
-      "slowest_ms": 1239.6,
-      "real_time_factor": 0.082
+      "median_ms": 941.1,
+      "p95_ms": 951.6,
+      "slowest_ms": 951.6,
+      "real_time_factor": 0.063
     }
   ],
-  "recorded": "2026-08-28",
+  "recorded": "2026-10-25",
   "host": "Apple Silicon, macOS 26.5.1, torch MPS",
   "audio": "samples/asr_en.wav"
 }
